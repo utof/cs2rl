@@ -127,7 +127,10 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # tests: `_interrupt_in_production_order`, `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`,
 # `_SIGNAL_HOOKS_HANDWRITTEN_ALLOWLIST` and the static census
 # `test_signal_tests_fire_handlers_in_production_order`.
-GOVERNED_NAME_COUNT = 299
+# #274 removes the unused path-listing wrapper's test. Reservation and option
+# checks keep their names while exercising the byte/arity production interfaces.
+# The import-purity and path/module help checks add two client test names.
+GOVERNED_NAME_COUNT = 300
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.

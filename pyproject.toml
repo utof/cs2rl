@@ -142,9 +142,9 @@ ignore = ["E501"]
 # #204 moved the deploy libraries into the package; deploy/ keeps only the plugin, its
 # docs and the verify_onnx.py script. This one entry also bans every `deploy.<module>`.
 "deploy".msg = "import `cs2rl.deploy.X` (#204 moved the deploy libraries into the package)"
-# #204 moved the experiment and BC-demo libraries out of scripts/ into the package, so
-# scripts/ holds only CLIs. Each old spelling, bare (a sys.path insert of scripts/ or
-# deploy/) and dotted, names the one it became.
+# #204 moved the experiment and BC-demo libraries out of scripts/ into the package.
+# scripts/ retains the Modal runner as a deliberate exception (see below). Each old
+# bare or dotted spelling names the module it became.
 "analyze_tplant".msg = "import `cs2rl.experiment.analyze_tplant`"
 "scripts.analyze_tplant".msg = "import `cs2rl.experiment.analyze_tplant`"
 "rung1_gate".msg = "import `cs2rl.experiment.gate`"
@@ -160,8 +160,9 @@ ignore = ["E501"]
 # The Modal runner STAYS under scripts/: the owner's carve-out, recorded here as that
 # comment asked ("the Modal runner must stay under `scripts/`",
 # https://github.com/utof/cs2rl/issues/204#issuecomment-5654424835). It is baked into the
-# runner image AND shipped inside the source archive the container extracts, so a copy
-# under src/ would make the archived one importable. Part 2 (#274) re-measures that.
+# runner image AND shipped inside the source archive the container extracts. Training
+# uses the installed cs2rl wheel and excludes inherited PYTHONPATH from its child env;
+# archived scripts remain importable through the extracted source-root cwd (#274).
 "modal_runner".msg = "import `scripts.modal_runner`"
 "run_modal".msg = "import `scripts.run_modal`"
 "modal_artifacts".msg = "import `scripts.modal_artifacts`"

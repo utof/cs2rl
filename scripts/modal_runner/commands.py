@@ -21,18 +21,17 @@ if TYPE_CHECKING:
 # __init__.py).
 
 UV_BIN = "/usr/local/bin/uv"
-# The entry module, launched with `-m` from the installed wheel (build_install_command).
-# Never the file path: a script-path launch runs the checkout's copy as __main__
-# against the installed package's modules, and puts src/cs2rl/ first on sys.path,
-# which re-creates the old flat module names in that process.
-# PYTHONPATH IS preserved (allowlist below): a checkout src/cs2rl on it would shadow the wheel.
+# `-m` selects the installed wheel's entry module (build_install_command).
+# Running the archived __main__.py by path would select that file independently
+# of its cs2rl imports. The extracted source root is cwd, so archived scripts
+# remain importable.
+# Exclude inherited PYTHONPATH: image or checkout paths on it can shadow the wheel.
 TRAIN_MODULE = "cs2rl.train"
 
 # Child env is an allowlist, not a denylist: Modal/image leftovers (tokens,
 # extra WANDB_* creds, host thread caps) must not leak into uv/train.
 _PRESERVED_CHILD_ENV_KEYS = frozenset({
     "PATH",
-    "PYTHONPATH",
     "LD_LIBRARY_PATH",
     "LIBRARY_PATH",
     "CPATH",

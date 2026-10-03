@@ -14,6 +14,7 @@ import dataclasses
 import importlib
 import io
 import json
+import os
 import signal
 import subprocess
 import sys
@@ -426,6 +427,47 @@ def fake_modal():
 
 def _import_run_modal():
     return importlib.import_module("scripts.run_modal")
+
+
+@pytest.mark.parametrize("module_name",
+                         ["scripts.modal_artifacts", "scripts.modal_backfill_sidecar"])
+def test_imported_artifact_clis_leave_sys_path_unchanged(fake_modal, monkeypatch, module_name):
+    """Import through an equivalent root spelling that would trigger an unconditional insert."""
+    equivalent_root = str(ROOT) + "/."
+    monkeypatch.setattr(sys, "path",
+                        [equivalent_root if entry == str(ROOT) else entry for entry in sys.path])
+    assert str(ROOT) not in sys.path
+    before = list(sys.path)
+    importlib.import_module(module_name)
+    assert sys.path == before
+    assert fake_modal.apps == []
+    assert fake_modal.volume_lookups == []
+    assert fake_modal.volume_creates == []
+
+
+@pytest.mark.parametrize("module_name",
+                         ["scripts.modal_artifacts", "scripts.modal_backfill_sidecar"])
+@pytest.mark.parametrize("mode", ["path", "module"])
+def test_artifact_clis_help_in_path_and_module_modes(tmp_path, module_name, mode):
+    """The documented CLI launches parse --help before touching any Modal object."""
+    sdk = tmp_path / "sdk"
+    sdk.mkdir()
+    (sdk / "modal.py").write_text(
+        "def __getattr__(name):\n"
+        "    raise AssertionError('help must not access a Modal object: ' + name)\n")
+    env = {"PATH": os.environ.get("PATH", ""), "PYTHONPATH": str(sdk)}
+    command = ([sys.executable, str(ROOT / (module_name.replace(".", "/") + ".py"))]
+               if mode == "path" else [sys.executable, "-m", module_name])
+    result = subprocess.run([*command, "--help"],
+                            cwd=tmp_path if mode == "path" else ROOT,
+                            env=env,
+                            capture_output=True,
+                            text=True,
+                            timeout=30,
+                            check=False)
+    assert result.returncode == 0, result.stderr
+    assert "usage:" in result.stdout
+    assert "--help" in result.stdout
 
 
 def test_importing_app_creates_no_function_call_or_gpu_work(fake_modal):
@@ -1499,13 +1541,23 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
     def fake_run(cmd, **kwargs):
         if "--dump-config" in list(cmd):
             _write_dumped_config(Path(captured["run_root"]))
+        assert kwargs["env"] is not None
+        assert "PYTHONPATH" not in kwargs["env"]
         return subprocess.CompletedProcess(cmd, 0)
 
     def prepare_with_real_hash_rewrite(**kwargs):
         captured["prepare_in_manifest"] = kwargs["manifest"]
         captured["run_root"] = Path(kwargs["attempt"].run_root)
-        kwargs["host"] = preflight.PreflightHost(run=fake_run, start_heartbeat=_noop_heartbeat)
+        kwargs["host"] = preflight.PreflightHost(
+            run=fake_run,
+            parent_env={
+                "PATH": "/usr/bin",
+                "PYTHONPATH": "/opt/app:/opt/app/scripts:/root:/checkout/src",
+            },
+            start_heartbeat=_noop_heartbeat,
+        )
         prepared = real_prepare(**kwargs)
+        assert "PYTHONPATH" not in prepared.child_env
         captured["prepared"] = prepared
         return prepared
 
@@ -1517,7 +1569,14 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
         captured["execute_manifest"] = kwargs["manifest"]
         run_root = Path(kwargs["attempt"].run_root)
 
-        def factory(*_args, **_kwargs):
+        def factory(*args, **options):
+            prepared = kwargs["prepared"]
+            assert args[0] == prepared.train_command
+            assert options["env"] == prepared.child_env
+            assert "PYTHONPATH" not in options["env"]
+            assert options["cwd"] == str(prepared.source_dir)
+            assert options["start_new_session"] is True
+            assert options["shell"] is False
             ckpt_dir = run_root / "checkpoints"
             torch.save({"weight": torch.tensor([1.0])}, ckpt_dir / "dust2_policy.pt")
             effective = (request.timesteps // request.batch_size) * request.batch_size
@@ -1776,11 +1835,15 @@ def test_download_stages_renames_and_refuses_overwrite(fake_modal, tmp_path):
     volume = _named_volume(fake_modal)
     volume.files["runs/ok-id/STATUS.json"] = b'{"status":"completed"}\n'
     volume.files["runs/ok-id/checkpoints/config.json"] = b"{}\n"
+    volume.files["runs/ok-id/checkpoints/notes.txt"] = b"keep me\n"
+    volume.files["runs/ok-id/checkpoints/extra/weird.bin"] = b"\x00\x01"
     dest_root = tmp_path / "outputs" / "modal"
     dest = module.download_run("ok-id", dest_root=dest_root)
     assert dest == dest_root / "ok-id"
     assert (dest / "STATUS.json").read_bytes() == b'{"status":"completed"}\n'
     assert (dest / "checkpoints" / "config.json").read_bytes() == b"{}\n"
+    assert (dest / "checkpoints" / "notes.txt").read_bytes() == b"keep me\n"
+    assert (dest / "checkpoints" / "extra" / "weird.bin").read_bytes() == b"\x00\x01"
     assert list(dest_root.glob(".ok-id.tmp-*")) == []
     assert fake_modal.iterdir_calls == [("runs/ok-id", True)]
     assert all(not path.startswith("/artifacts") for path, _rec in fake_modal.iterdir_calls)

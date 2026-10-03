@@ -270,27 +270,27 @@ def test_omitted_train_args_fail_closed():
 
 
 def test_live_option_mirror_contains_exact_long_names_only():
-    assert "--timesteps" in request.LIVE_TRAIN_OPTIONS
-    assert "--num_envs" in request.LIVE_TRAIN_OPTIONS
-    assert "--dust2" in request.LIVE_TRAIN_OPTIONS
-    assert "--checkpoint-dir" in request.LIVE_TRAIN_OPTIONS
-    assert "--checkpoint_dir" in request.LIVE_TRAIN_OPTIONS
-    assert "--devi" not in request.LIVE_TRAIN_OPTIONS
-    assert "--num-envs" not in request.LIVE_TRAIN_OPTIONS              # runner spelling, not live
+    assert request.LIVE_TRAIN_OPTION_ARITY["--timesteps"] == 1
+    assert request.LIVE_TRAIN_OPTION_ARITY["--num_envs"] == 1
+    assert request.LIVE_TRAIN_OPTION_ARITY["--dust2"] == 0
+    assert request.LIVE_TRAIN_OPTION_ARITY["--checkpoint-dir"] == 1
+    assert request.LIVE_TRAIN_OPTION_ARITY["--checkpoint_dir"] == 1
+    assert "--devi" not in request.LIVE_TRAIN_OPTION_ARITY
+    assert "--num-envs" not in request.LIVE_TRAIN_OPTION_ARITY         # runner spelling, not live
 
 
 def _live_train_long_options_from_source() -> set[str]:
-    """Static train.py long options + hyphenated RewardWeights field names.
+    """Static training CLI long options + hyphenated RewardWeights field names.
 
     Reads source (no `import cs2rl.train`) so collection cannot pull CUDA.
     Generated `add_argument(f"--{_rw_name...}")` is a JoinedStr and is
     recovered from the dataclass fields instead.
 
     ONE FILE PLUS THE DATACLASS (spec 2026-09-03 §2.3): the argparse parser
-    still lives in src/cs2rl/train.py (it is built inline under
+    lives in src/cs2rl/train/__main__.py (it is built inline under
     `if __name__ == "__main__"`), but the 23 `--reward-*`/`--pbrs-*` flag names
-    are now the field names of `env.config.RewardWeights`. Taking only one of
-    the two sources silently drops half the option set — train.py alone loses all 23
+    are the field names of `cs2rl.env.config.RewardWeights`. Taking only one of
+    the two sources loses options — the CLI source alone loses all 23
     reward flags, the dataclass alone loses every other flag — and the
     set-equality assert below would then "fail" against the runner mirror for a
     reason that has nothing to do with the mirror. Neither contribution is
@@ -299,7 +299,7 @@ def _live_train_long_options_from_source() -> set[str]:
     names: set[str] = set()
     # The 23 --reward-*/--pbrs-* flags are generated from RewardWeights' fields
     # (spec 2026-09-03 §2.3); env.config is stdlib-only so importing it here
-    # keeps collection free of torch/CUDA. train.py's static add_argument
+    # keeps collection free of torch/CUDA. The CLI's static add_argument
     # calls are still recovered from source below.
     import dataclasses
 

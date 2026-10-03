@@ -20,7 +20,9 @@ from datetime import UTC, datetime
 from pathlib import Path, PurePosixPath
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
-if str(_REPO_ROOT) not in sys.path:
+# A direct path launch starts with scripts/ on sys.path. Dotted imports and
+# module-mode launches already have their caller's namespace path.
+if __name__ == "__main__" and not __package__ and str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
 import modal                           # noqa: E402, I001

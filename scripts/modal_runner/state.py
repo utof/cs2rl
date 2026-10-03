@@ -436,7 +436,7 @@ def derive_run_view_from_bytes(
     that crashed after reserving but before its first heartbeat.
 
     WHY bytes and not paths: the status client, the launch validator and the
-    local Path wrapper all reach the same judgement through this function, so
+    sidecar backfill all reach the same judgement through this function, so
     staleness cannot drift between them. Each caller only has to produce bytes.
 
     Operator-facing messages, all ValidationError:
@@ -448,8 +448,8 @@ def derive_run_view_from_bytes(
         but not ISO-8601.
       * "no STATUS.json or reservation.json" — both absent. Every caller
         checks for that case before calling in, so this generic wording is
-        usually replaced: `collect_status` and backfill name the run id and the
-        Path wrapper names the run root. `prior_checkpoint_or_raise` is the
+        usually replaced: `collect_status` and backfill name the run id.
+        `prior_checkpoint_or_raise` is the
         exception — it says a bare "parent run was not found" with no id.
 
     PITFALL — the two branches are deliberately asymmetric. The STATUS branch
@@ -462,13 +462,6 @@ def derive_run_view_from_bytes(
     json", because ValidationError is a ValueError and their generic handler
     swallowed it), made because spec §2.2 asks for corrupt timestamps to
     surface distinctly.
-
-    The third caller, the local Path wrapper `derive_run_view`, is not a
-    fourth vocabulary but a newcomer to this one: before unification it parsed
-    inline and raised raw JSONDecodeError / KeyError / TypeError, producing
-    none of these labelled messages. Spec §2.2 declares that under "Behaviour
-    change (stated, not wrapped)", and
-    test_path_derive_run_view_corrupt_status_is_validation_error pins it.
 
     Every spelling is pinned by the message table in
     tests/modal/test_modal_protocol.py. Adding or removing either clause silently
@@ -492,31 +485,6 @@ def derive_run_view_from_bytes(
     if now - created >= STALE_AFTER:
         return DerivedStatus(status=Status.INTERRUPTED, stale=True, reason="no-heartbeat")
     return DerivedStatus(status=Status.PREPARING, stale=False, reason="no-heartbeat")
-
-
-def derive_run_view(run_root: Path, *, now: datetime) -> DerivedStatus:
-    """Derive status from STATUS.json or, if missing, reservation.json.
-
-    A crash after the durable reservation but before the first STATUS write
-    looks like preparing/no-heartbeat for five minutes, then interrupted.
-    """
-    run_root = Path(run_root)
-    status_path = run_root / STATUS_FILENAME
-    reservation_path = run_root / RESERVATION_FILENAME
-    status_bytes = status_path.read_bytes() if status_path.is_file() else None
-    reservation_bytes = reservation_path.read_bytes() if reservation_path.is_file() else None
-    if status_bytes is None and reservation_bytes is None:
-        raise ValidationError(f"no STATUS.json or reservation.json under {run_root}")
-    return derive_run_view_from_bytes(status_bytes, reservation_bytes, now=now)
-
-
-def list_run_artifacts(run_root: Path) -> list[Path]:
-    """Every file under the run, including unknown trainer outputs.
-
-    Download must not whitelist the minimum schema and drop extras.
-    """
-    run_root = Path(run_root)
-    return sorted(path for path in run_root.rglob("*") if path.is_file())
 
 
 def start_heartbeat_worker(

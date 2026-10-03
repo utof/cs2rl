@@ -12,7 +12,7 @@ from tests.conftest import REPO_ROOT
 ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
-from scripts.modal_runner import checkpoint, state, training           # noqa: E402, I001
+from scripts.modal_runner import checkpoint, training                  # noqa: E402, I001
 from tests.modal.test_modal_state import FakeArtifactIndex             # noqa: E402, I001
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
@@ -162,14 +162,6 @@ def test_protocol_cases_cover_every_reason_token_and_ok():
         f"missing cases {sorted(expected - set(ids))}; unknown cases {sorted(set(ids) - expected)}")
     for param in PROTOCOL_CASES:
         assert param.values[0] == param.id, f"case {param.id} asserts reason {param.values[0]!r}"
-
-
-def test_path_derive_run_view_corrupt_status_is_validation_error(tmp_path):
-    run_root = tmp_path / "run"
-    run_root.mkdir()
-    (run_root / mrl.STATUS_FILENAME).write_bytes(b"{not-json")
-    with pytest.raises(mrl.ValidationError, match=r"^corrupt volume status json$"):
-        state.derive_run_view(run_root, now=NOW)
 
 
 def _status_json(**overrides) -> bytes:

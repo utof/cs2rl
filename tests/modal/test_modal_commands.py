@@ -44,7 +44,7 @@ def test_dump_config_argv_uses_same_owned_flags_without_train():
 def test_child_env_preserves_runtime_keys_and_forces_thread_caps():
     parent = {
         "PATH": "/usr/bin",
-        "PYTHONPATH": "/opt/extra",
+        "PYTHONPATH": "/opt/app:/opt/app/scripts:/root:/checkout/src",
         "LD_LIBRARY_PATH": "/usr/lib/cuda",
         "LIBRARY_PATH": "/usr/lib",
         "CPATH": "/usr/include",
@@ -68,10 +68,10 @@ def test_child_env_preserves_runtime_keys_and_forces_thread_caps():
         "OPENBLAS_NUM_THREADS": "32",
         "NUMEXPR_NUM_THREADS": "4",
     }
+    original = dict(parent)
     env = commands.build_child_env(parent, wandb_enabled=False)
     for key in (
             "PATH",
-            "PYTHONPATH",
             "LD_LIBRARY_PATH",
             "LIBRARY_PATH",
             "CPATH",
@@ -89,6 +89,8 @@ def test_child_env_preserves_runtime_keys_and_forces_thread_caps():
             "LC_MESSAGES",
     ):
         assert env[key] == parent[key]
+    assert "PYTHONPATH" not in env
+    assert parent == original
     assert env["OMP_NUM_THREADS"] == "1"
     assert env["MKL_NUM_THREADS"] == "1"
     assert env["OPENBLAS_NUM_THREADS"] == "1"

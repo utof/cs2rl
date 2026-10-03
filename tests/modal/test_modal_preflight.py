@@ -142,6 +142,7 @@ def _preflight_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
         run=given.get("run", run_not_overridden),
         parent_env={
             "PATH": "/usr/bin",
+            "PYTHONPATH": "/opt/app:/opt/app/scripts:/root:/checkout/src",
             "HOME": "/home/modal",
             "WANDB_API_KEY": "parent-secret"
         },
@@ -607,9 +608,11 @@ def test_prepare_rejects_non_checkpoint_resume(tmp_path):
 
 def test_prepare_records_install_dump_probe_in_order(tmp_path):
     recorded: list[list[str]] = []
+    recorded_options: list[dict[str, Any]] = []
 
     def fake_run(cmd, **kwargs):
         recorded.append(list(cmd))
+        recorded_options.append(kwargs)
         if "--dump-config" in list(cmd):
             _write_dumped_config(kwargs_run_root)
         return subprocess.CompletedProcess(cmd, 0)
@@ -625,6 +628,15 @@ def test_prepare_records_install_dump_probe_in_order(tmp_path):
     assert recorded[0] == commands.build_install_command(prepared.source_dir)
     assert recorded[1] == commands.build_dump_config_command(kwargs["request"], None)
     assert recorded[2] == commands.build_cuda_probe_command()
+    assert len(recorded) == 3
+    assert "PYTHONPATH" in kwargs["host"].parent_env
+    assert "PYTHONPATH" not in prepared.child_env
+    for options in recorded_options:
+        assert options["env"] == prepared.child_env
+        assert "PYTHONPATH" not in options["env"]
+        assert options["cwd"] == os.fspath(prepared.source_dir)
+        assert options["shell"] is False
+        assert options["check"] is True
     assert prepared.train_command == commands.build_train_command(
         commands.build_train_argv(kwargs["request"], None))
     assert prepared.heartbeat is not None

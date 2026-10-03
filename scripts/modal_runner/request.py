@@ -127,7 +127,6 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--pbrs-nav-weight-t": 1,
     "--pbrs-nav-weight-ct": 1,
 }
-LIVE_TRAIN_OPTIONS = frozenset(LIVE_TRAIN_OPTION_ARITY)
 
 # Flags the runner injects (or whose mode it owns). Presence in --train-args
 # is always a hard error, even when the live name is spelled exactly.

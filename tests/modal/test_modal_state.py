@@ -17,9 +17,9 @@ from tests.conftest import REPO_ROOT
 
 ROOT = REPO_ROOT
 
-import scripts.modal_runner as mrl                                                       # noqa: E402, I001
-from scripts.modal_runner import core, state                                             # noqa: E402, I001
-from tests.modal.modal_test_helpers import FakeRegistry, _aware, _minimal_completed_tree # noqa: E402
+import scripts.modal_runner as mrl                                     # noqa: E402, I001
+from scripts.modal_runner import core, state                           # noqa: E402, I001
+from tests.modal.modal_test_helpers import FakeRegistry, _aware        # noqa: E402
 
 # ── Run state: atomic writes, transitions, heartbeat, status, artifacts ────
 
@@ -218,37 +218,17 @@ def test_derive_status_stale_after_five_minutes_does_not_mutate(tmp_path):
     assert fresh.status is core.Status.TRAINING
 
 
-def test_reservation_without_status_is_preparing_then_interrupted(tmp_path):
-    run_root = tmp_path / "run"
-    run_root.mkdir()
+def test_reservation_without_status_is_preparing_then_interrupted():
     reserved_at = _aware()
-    (run_root / "reservation.json").write_text(
-        json.dumps({
-            "attempt_id": "a1",
-            "created_at": reserved_at.isoformat()
-        }))
-    early = state.derive_run_view(run_root, now=_aware(minute=4))
+    reservation = json.dumps({"attempt_id": "a1", "created_at": reserved_at.isoformat()}).encode()
+    early = state.derive_run_view_from_bytes(None, reservation, now=_aware(minute=4))
     assert early.status is core.Status.PREPARING
     assert early.reason == "no-heartbeat"
     assert early.stale is False
-    late = state.derive_run_view(run_root, now=_aware(minute=5))
+    late = state.derive_run_view_from_bytes(None, reservation, now=_aware(minute=5))
     assert late.status is core.Status.INTERRUPTED
     assert late.reason == "no-heartbeat"
     assert late.stale is True
-    assert not (run_root / "STATUS.json").exists()
-
-
-def test_list_run_artifacts_keeps_unknown_trainer_files(tmp_path):
-    run_root, manifest, _, _ = _minimal_completed_tree(tmp_path)
-    extra = run_root / "checkpoints" / "notes.txt"
-    extra.write_text("keep me\n")
-    nested = run_root / "checkpoints" / "extra" / "weird.bin"
-    nested.parent.mkdir()
-    nested.write_bytes(b"\x00\x01")
-    listed = {path.relative_to(run_root).as_posix() for path in state.list_run_artifacts(run_root)}
-    assert "checkpoints/notes.txt" in listed
-    assert "checkpoints/extra/weird.bin" in listed
-    assert "checkpoints/dust2_policy.pt" in listed
 
 
 # ── Run reservation: registry / artifact protocols, durable commit ─────────
