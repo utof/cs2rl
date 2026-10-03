@@ -2,7 +2,7 @@
 
 The first two tests exercise the bare Cs2Env factory (obs/rewards shape
 sanity). The Task 6c tests below use the minimal trainer harness from
-src/cs2rl/train_test_harness.py (Task 6b). Do NOT import the full production
+tests/_helpers/trainer_harness.py (Task 6b). Do NOT import the full production
 trainer setup — those tests only need to verify the Task 6c changes to the
 self-play state (``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
 """
