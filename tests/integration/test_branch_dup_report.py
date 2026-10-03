@@ -9,7 +9,7 @@ import pytest
 from tests.conftest import REPO_ROOT
 
 
-def _git(repo, *args):
+def _report_git(repo, *args):
     """Keep fixture Git operations independent of the report's implementation."""
     return subprocess.check_output(["git", "-C", str(repo), *args]).decode().strip()
 
@@ -23,16 +23,16 @@ def _commit(repo, files):
         else:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(content.encode() if isinstance(content, str) else content)
-    _git(repo, "add", ".")
-    _git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "commit",
-         "-qm", "fixture")
-    return _git(repo, "rev-parse", "HEAD")
+    _report_git(repo, "add", ".")
+    _report_git(repo, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid",
+                "commit", "-qm", "fixture")
+    return _report_git(repo, "rev-parse", "HEAD")
 
 
 @pytest.fixture
 def repo(tmp_path):
     """No shared environment or main repository mutations for fixture revisions."""
-    _git(tmp_path, "init", "-q")
+    _report_git(tmp_path, "init", "-q")
     return tmp_path
 
 
@@ -56,7 +56,7 @@ def _report(repo, base, *extra):
 
 def _snapshot(repo, revision, project, pairs=()) -> dict[str, Any]:
     """Native tool envelope shape measured on the real project, with literal fixture rows."""
-    paths = _git(repo, "ls-tree", "-r", "--name-only", revision).splitlines()
+    paths = _report_git(repo, "ls-tree", "-r", "--name-only", revision).splitlines()
     status = {
         "structuredContent": {
             "project": project,
@@ -232,7 +232,7 @@ def test_growth_boundary_rename_deletion_and_binary_are_explicit(repo):
             "edited.txt": "a\n" * 20,
             "binary.dat": b"\x00one"
         })
-    _git(repo, "mv", "rename me.txt", "renamed\tfile.txt")
+    _report_git(repo, "mv", "rename me.txt", "renamed\tfile.txt")
     _commit(
         repo, {
             "deleted.txt": None,
