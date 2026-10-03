@@ -256,7 +256,10 @@ def _demo_source_roots(entries: list[tuple[str, str, str]]) -> set[str]:
 
     A surviving member with the same relative suffix identifies a moved directory.
     Historical rename entries also cover a destination deleted after the move.
-    The inferred roots are conservative: an ambiguous move can cause regeneration.
+    Changed suffixes cannot identify the old directory's depth, so include its
+    entire top-level tree (or repository root) to retain every possible ancestor.
+    This can cause regeneration for unrelated edits; exact file-root moves stay
+    narrow. Root discovery still depends on Git detecting a surviving rename.
     """
     roots = set(DEMO_RELEVANT_PATHS)
     while True:
@@ -267,7 +270,12 @@ def _demo_source_roots(entries: list[tuple[str, str, str]]) -> set[str]:
             for root in previous:
                 if new == root or new.startswith(root + "/"):
                     suffix = new[len(root):]
-                    roots.add(old[:-len(suffix)] if suffix and old.endswith(suffix) else old)
+                    if not suffix:
+                        roots.add(old)
+                    elif old.endswith(suffix):
+                        roots.add(old[:-len(suffix)])
+                    else:
+                        roots.add(old.split("/", 1)[0] if "/" in old else ".")
         if roots == previous:
             return roots
 
@@ -321,7 +329,8 @@ def _demo_sources_unchanged(sha: str) -> bool:
         roots = _demo_source_roots(entries + cached_entries + _demo_diff_entries(history))
 
         def relevant(path):
-            return any(path == root or path.startswith(root + "/") for root in roots)
+            return "." in roots or any(path == root or path.startswith(root + "/")
+                                       for root in roots)
 
         rc, untracked = _git("ls-files", "--others", "--exclude-standard", "-z")
         if rc or any(relevant(path) for path in untracked.split("\0") if path):

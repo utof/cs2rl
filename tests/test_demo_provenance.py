@@ -119,6 +119,84 @@ def test_root_move_with_a_source_change_is_stale(demo_repo, mutation):
         train_bc.check_demo_sha(sha)
 
 
+@pytest.mark.parametrize("state", ["commit", "index"])
+@pytest.mark.parametrize("deleted", [True, False], ids=["deleted-sibling", "pure-move"])
+@pytest.mark.parametrize("old,new,sibling", [
+    ("old_env/dynamics.c", C_ROOT + "/renamed.c", "old_env/deleted.c"),
+    ("legacy/old_env/original/dynamics.c", C_ROOT + "/revised/renamed.c",
+     "legacy/old_env/deleted.c"),
+    ("legacy/old_env/original/deep/dynamics.c", C_ROOT + "/renamed.c", "legacy/old_env/deleted.c"),
+    ("legacy/old_env/dynamics.c", C_ROOT + "/revised/deep/renamed.c", "legacy/old_env/deleted.c"),
+    ("dynamics.c", C_ROOT + "/revised/renamed.c", "deleted.c"),
+],
+                         ids=[
+                             "basename", "subdirectory", "old-deeper", "new-deeper",
+                             "repository-root"
+                         ])
+def test_changed_relative_move_retains_old_directory_scope(demo_repo, state, deleted, old, new,
+                                                           sibling):
+    """Ambiguous directory moves must not lose deleted members at an old ancestor."""
+    root, git, write = demo_repo
+    write(old, "int value = 1;\n")
+    write(sibling, "int deleted = 1;\n")
+    sha = _record(git)
+    (root / new).parent.mkdir(parents=True, exist_ok=True)
+    git("mv", old, new)
+    if deleted:
+        git("rm", sibling)
+    if state == "commit":
+        _record(git)
+    for cached in (False, True):
+        args = ("--cached", ) if cached else ()
+        raw = git("diff", *args, "--raw", "-z", "--find-renames=1%", sha, "--")
+        tokens = iter(raw.split("\0"))
+        entries = []
+        for header in tokens:
+            if header:
+                status = header.rsplit(" ", 1)[-1]
+                before = next(tokens)
+                after = next(tokens) if status.startswith("R") else before
+                entries.append((status, before, after))
+        assert ("R100", old, new) in entries, raw
+        assert (("D", sibling, sibling) in entries) == deleted, raw
+        assert len(entries) == (2 if deleted else 1), entries
+    if deleted:
+        with pytest.raises(ValueError, match="STALE DEMO"):
+            train_bc.check_demo_sha(sha)
+    else:
+        note = train_bc.check_demo_sha(sha)
+        assert (note is None) == (state == "index")
+        if note is not None:
+            assert "still reproducible" in note
+
+
+@pytest.mark.parametrize("state", ["commit", "index"])
+@pytest.mark.parametrize("mutation", ["edit", "delete"])
+def test_exact_file_root_move_keeps_unrelated_sibling_out_of_scope(demo_repo, state, mutation):
+    """Moving an explicitly owned file cannot promote its siblings into ownership."""
+    root, git, write = demo_repo
+    old = "legacy/old_env/wrapper.py"
+    new = "src/cs2rl/env/map.py"
+    sibling = "legacy/old_env/unrelated.c"
+    write(old, "VALUE = 1\n")
+    write(sibling, "int value = 1;\n")
+    sha = _record(git)
+    (root / new).parent.mkdir(parents=True, exist_ok=True)
+    git("mv", old, new)
+    if mutation == "delete":
+        git("rm", sibling)
+    else:
+        write(sibling, "int value = 2;\n")
+        git("add", sibling)
+    if state == "commit":
+        _record(git)
+    raw = git("diff", "--cached", "--raw", "-z", "--find-renames=1%", sha, "--")
+    assert " R100\0" + old + "\0" + new + "\0" in raw, raw
+    assert (" D\0" if mutation == "delete" else " M\0") + sibling + "\0" in raw, raw
+    note = train_bc.check_demo_sha(sha)
+    assert (note is None) == (state == "index")
+
+
 def test_deleted_destination_after_a_root_move_is_stale(demo_repo):
     """An earlier rename must not hide a source whose destination was later removed."""
     root, git, write = demo_repo
