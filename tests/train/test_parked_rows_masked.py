@@ -185,7 +185,7 @@ def test_twenty_update_ratio_identity_n_active_1():
                                                aim_entropy_bonus=False)
     try:
         assert trainer.config["prio_alpha"] == 0
-        assert not bool(trainer._batch1_event_mask.any())
+        assert not bool(trainer._event_mask.any())
         ent, ent_u, floor, mbs, alpha = [], [], 0.0, 0.0, {}
         for u in range(1, 21):
             trainer.evaluate()

@@ -99,8 +99,8 @@ def test_clipfrac_halves_and_event_fraction_are_logged():
         # pre-divisor write would be divided by executed minibatches and
         # no longer match the per-call Task 8 scalar.
         assert isinstance(losses["event_oversample_fraction"], float)
-        assert isinstance(trainer._batch1_event_oversample_fraction, float)
-        assert (losses["event_oversample_fraction"] == trainer._batch1_event_oversample_fraction)
+        assert isinstance(trainer._event_oversample_fraction, float)
+        assert (losses["event_oversample_fraction"] == trainer._event_oversample_fraction)
         assert "clipfrac" in losses
     finally:
         cleanup()

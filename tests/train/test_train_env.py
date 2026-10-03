@@ -105,8 +105,8 @@ def test_make_env_default_keeps_step_stats_off():
 
 # ── Task 6c: reward-clamp removal + per-channel Welford + symlog ───────────
 # These tests depend on:
-#   - Task 4 (symlog, split_into_channels in src/cs2rl/train_helpers_batch1.py)
-#   - Task 5 (WelfordStd in src/cs2rl/train_helpers_batch1.py)
+#   - Task 4 (symlog, split_into_channels in cs2rl.train.rewards)
+#   - Task 5 (WelfordStd in cs2rl.train.rewards)
 #   - Task 6a (Cs2Env include_step_stats_in_info plumbing)
 #   - Task 6b (src/train_test_harness._build_trainer_for_test)
 # If any of the above regress, these tests will surface the break early.
@@ -122,15 +122,15 @@ def test_selfplay_init_attaches_welford_and_event_mask():
         # Pin config values too — a silent change to prior_std or min_count
         # would alter warmup behaviour without tripping any existing test.
         for w in (
-                trainer._batch1_welford_combat,
-                trainer._batch1_welford_objective,
-                trainer._batch1_welford_positional,
+                trainer._welford_combat,
+                trainer._welford_objective,
+                trainer._welford_positional,
         ):
             assert isinstance(w, WelfordStd)
             assert w.prior_std == 1.0
             assert w.min_count == 1000
-        assert hasattr(trainer, "_batch1_event_mask")
-        assert hasattr(trainer, "_batch1_current_segment_has_event")
+        assert hasattr(trainer, "_event_mask")
+        assert hasattr(trainer, "_current_segment_has_event")
     finally:
         cleanup()
 
@@ -160,28 +160,28 @@ def test_rewards_not_clamped_to_unit_range():
         "Task 6c expected torch.clamp(r, -1, 1) removed from the self-play evaluate body")
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        c0 = trainer._batch1_welford_combat.count
-        o0 = trainer._batch1_welford_objective.count
-        p0 = trainer._batch1_welford_positional.count
+        c0 = trainer._welford_combat.count
+        o0 = trainer._welford_objective.count
+        p0 = trainer._welford_positional.count
         trainer.evaluate()
         # At least one channel must have received an update during the rollout.
-        total_updates = ((trainer._batch1_welford_combat.count - c0) +
-                         (trainer._batch1_welford_objective.count - o0) +
-                         (trainer._batch1_welford_positional.count - p0))
+        total_updates = ((trainer._welford_combat.count - c0) +
+                         (trainer._welford_objective.count - o0) +
+                         (trainer._welford_positional.count - p0))
         assert total_updates > 0, (
             f"Task 6c: no Welford updates during evaluate(); channel split "
-            f"did not execute. Deltas: combat={trainer._batch1_welford_combat.count - c0}, "
-            f"objective={trainer._batch1_welford_objective.count - o0}, "
-            f"positional={trainer._batch1_welford_positional.count - p0}")
+            f"did not execute. Deltas: combat={trainer._welford_combat.count - c0}, "
+            f"objective={trainer._welford_objective.count - o0}, "
+            f"positional={trainer._welford_positional.count - p0}")
     finally:
         cleanup()
 
 
 # ── Task 7: segment-level event-mask aggregation ──────────────────────────
 # These tests exercise the two code paths added by Task 7:
-#   (a) per-tick OR of bomb_planted into _batch1_current_segment_has_event
+#   (a) per-tick OR of bomb_planted into _current_segment_has_event
 #       (one bool per agent row), gated on step_stats being present.
-#   (b) flush of _batch1_current_segment_has_event → _batch1_event_mask at
+#   (b) flush of _current_segment_has_event → _event_mask at
 #       the segment boundary (every bptt_horizon ticks), keyed on the OLD
 #       ep_indices (before they get re-assigned for the next segment).
 #
@@ -196,7 +196,7 @@ def test_rewards_not_clamped_to_unit_range():
 def test_event_mask_flushed_and_reset_at_segment_boundary():
     """Task 7: pre-set the live accumulator for one agent row to True, then
     run a full evaluate() round. After the segment closes, the corresponding
-    segment row in _batch1_event_mask must be True and the live accumulator
+    segment row in _event_mask must be True and the live accumulator
     must be reset back to False.
 
     Independent of bomb_planted plumbing — this exercises only the flush.
@@ -211,24 +211,24 @@ def test_event_mask_flushed_and_reset_at_segment_boundary():
         # but at start-of-rollout it's trivially 0 (free_idx starts at 0 and
         # ep_indices was initialised to arange(total_agents)).
         pre_seg_idx = int(trainer.ep_indices[0].item())
-        trainer._batch1_current_segment_has_event.zero_()
-        trainer._batch1_current_segment_has_event[0] = True
-        trainer._batch1_event_mask.zero_()
+        trainer._current_segment_has_event.zero_()
+        trainer._current_segment_has_event[0] = True
+        trainer._event_mask.zero_()
 
         trainer.evaluate()
 
         # After one full evaluate() round all 320 agent rows flushed once, so
         # the pre_seg_idx slot must reflect our True write.
-        assert bool(trainer._batch1_event_mask[pre_seg_idx].item()), (
+        assert bool(trainer._event_mask[pre_seg_idx].item()), (
             "Task 7: live accumulator True for row 0 did not flush into "
-            f"_batch1_event_mask[{pre_seg_idx}] at segment boundary.")
+            f"_event_mask[{pre_seg_idx}] at segment boundary.")
         # Live accumulator for row 0 must have been reset (it would only come
         # back True if a real bomb_planted event happened for env 0 during
         # the rollout, which is possible but not guaranteed — so we assert a
         # weaker property: at least one row is False, proving the reset path
         # is not a no-op. With a 64-tick rollout and random actions most envs
         # see zero plants, so most rows will be False.)
-        assert not trainer._batch1_current_segment_has_event.all().item(), (
+        assert not trainer._current_segment_has_event.all().item(), (
             "Task 7: all live-accumulator rows True after evaluate() — the "
             "reset at segment boundary appears to be missing.")
     finally:
@@ -250,8 +250,8 @@ def test_event_mask_detects_injected_bomb_planted():
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         # Baseline — ensure no stale event bits.
-        trainer._batch1_event_mask.zero_()
-        trainer._batch1_current_segment_has_event.zero_()
+        trainer._event_mask.zero_()
+        trainer._current_segment_has_event.zero_()
 
         vecenv = trainer.vecenv
         real_recv = vecenv.recv
@@ -299,9 +299,9 @@ def test_event_mask_detects_injected_bomb_planted():
             trainer.evaluate()
 
             assert injected["triggered"], "stub never ran — recv wrapping failed"
-            assert trainer._batch1_event_mask.any().item(), (
+            assert trainer._event_mask.any().item(), (
                 "Task 7: injected bomb_planted=1 in env 0 did not propagate into "
-                "_batch1_event_mask after segment flush.")
+                "_event_mask after segment flush.")
         finally:
             # Always restore recv — cleanup() below may or may not re-init the
             # vecenv, and a leaked stub would poison fixture-shared state if
@@ -316,7 +316,7 @@ def test_event_mask_detects_injected_bomb_planted():
 # body (Cs2PuffeRL.train in src/cs2rl/trainer.py since gh#168 W2a — the harness
 # trainer is a Cs2PuffeRL since gh#168 W1.5).
 # The plan target: segments
-# whose _batch1_event_mask is True get sampled at least 25% of the time when
+# whose _event_mask is True get sampled at least 25% of the time when
 # at least one event segment exists.
 #
 # Why these three tests:
@@ -329,7 +329,7 @@ def test_event_mask_detects_injected_bomb_planted():
 #       boost branch is skipped (no division by zero, no NaN); the exposed
 #       fraction metric must read 0.0.
 #   (3) test_event_oversample_fraction_exposed — pins the metric semantics:
-#       _batch1_event_oversample_fraction reports the RAW fraction of event
+#       _event_oversample_fraction reports the RAW fraction of event
 #       segments (mask.float().mean()), NOT the sampled fraction. This is the
 #       reportable wandb metric.
 
@@ -380,10 +380,10 @@ def test_prio_probs_event_oversample():
 
         # Force half of segments to be "event" segments. Segment count
         # equals trainer.segments (one bool per buffer row).
-        seg_count = trainer._batch1_event_mask.shape[0]
-        trainer._batch1_event_mask.zero_()
-        trainer._batch1_event_mask[:seg_count // 2] = True
-        raw_event_fraction = trainer._batch1_event_mask.float().mean().item()
+        seg_count = trainer._event_mask.shape[0]
+        trainer._event_mask.zero_()
+        trainer._event_mask[:seg_count // 2] = True
+        raw_event_fraction = trainer._event_mask.float().mean().item()
 
         real_multinomial, wrapper, captured = _capture_multinomial_calls()
         torch.multinomial = wrapper
@@ -396,7 +396,7 @@ def test_prio_probs_event_oversample():
 
         # Concatenate every minibatch idx tensor and count event-segment hits.
         all_idx = torch.cat(captured)
-        hits = trainer._batch1_event_mask[all_idx].float().mean().item()
+        hits = trainer._event_mask[all_idx].float().mean().item()
 
         # Plan target: >= 25% absolute. With 50% event segments and the boost
         # the analytic expectation is 80% — well above the 25% floor.
@@ -424,16 +424,16 @@ def test_prio_probs_no_events_fallback():
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
         trainer.evaluate()
-        trainer._batch1_event_mask.zero_()
+        trainer._event_mask.zero_()
 
         # Should run cleanly with the all-False mask.
         trainer.train()
 
-        assert hasattr(trainer, "_batch1_event_oversample_fraction"), (
-            "Task 8: trainer._batch1_event_oversample_fraction not exposed")
-        assert trainer._batch1_event_oversample_fraction == 0.0, (
+        assert hasattr(trainer, "_event_oversample_fraction"), (
+            "Task 8: trainer._event_oversample_fraction not exposed")
+        assert trainer._event_oversample_fraction == 0.0, (
             f"Task 8: expected 0.0 oversample fraction with all-False mask, "
-            f"got {trainer._batch1_event_oversample_fraction}")
+            f"got {trainer._event_oversample_fraction}")
 
         # Sanity: rollout buffer remains finite (no NaN propagation through
         # prio_probs renormalize).
@@ -453,14 +453,14 @@ def test_event_oversample_fraction_exposed():
     try:
         trainer.evaluate()
 
-        seg_count = trainer._batch1_event_mask.shape[0]
-        trainer._batch1_event_mask.zero_()
-        trainer._batch1_event_mask[:seg_count // 2] = True
+        seg_count = trainer._event_mask.shape[0]
+        trainer._event_mask.zero_()
+        trainer._event_mask[:seg_count // 2] = True
         expected_raw = (seg_count // 2) / seg_count
 
         trainer.train()
 
-        frac = trainer._batch1_event_oversample_fraction
+        frac = trainer._event_oversample_fraction
         assert 0.4 <= frac <= 0.6, (
             f"Task 8: expected raw event fraction in [0.4, 0.6], got {frac:.3f} "
             f"(seg_count={seg_count}, expected_raw={expected_raw:.3f})")
@@ -484,7 +484,7 @@ def test_event_oversample_fraction_exposed():
 
 
 def test_target_entropy_schedule_applied():
-    """Task 9A: trainer._batch1_current_target_entropy must follow the
+    """Task 9A: trainer._current_target_entropy must follow the
     linear ramp warmup_frac→base_frac * max_entropy across [0, warmup_steps]
     global steps. Fracs are config-driven since the finding-4-residual fix
     (defaults 0.5→0.35; see test_entropy_target_config_threading) — this
@@ -518,9 +518,9 @@ def test_target_entropy_schedule_applied():
         expected_max_continuous = AIM_DIM * 0.5 * math.log(2 * math.pi * math.e * sigma_max**2)
         expected_max = expected_max_discrete + expected_max_continuous
         # Pin the run-constant first; if this drifts the schedule break too.
-        assert abs(trainer._batch1_max_entropy - expected_max) < 1e-9, (
-            f"Task 9A: _batch1_max_entropy={trainer._batch1_max_entropy} != "
-            f"discrete+continuous max={expected_max}")
+        assert abs(trainer._max_entropy -
+                   expected_max) < 1e-9, (f"Task 9A: _max_entropy={trainer._max_entropy} != "
+                                          f"discrete+continuous max={expected_max}")
 
         # evaluate() advances global_step by ~one rollout (batch_size); we
         # need a populated rollout buffer for train() to be valid, so call
@@ -535,24 +535,24 @@ def test_target_entropy_schedule_applied():
         # Step 0: target = warmup_frac * max
         trainer.global_step = 0
         trainer.train()
-        assert abs(trainer._batch1_current_target_entropy - warmup_frac * expected_max) < 1e-5, (
+        assert abs(trainer._current_target_entropy - warmup_frac * expected_max) < 1e-5, (
             f"Task 9A: at step 0 expected {warmup_frac}*max={warmup_frac * expected_max:.4f}, "
-            f"got {trainer._batch1_current_target_entropy:.4f}")
+            f"got {trainer._current_target_entropy:.4f}")
 
         # Step 20M (past warmup_end=10M): target = base_frac * max (constant after).
         trainer.global_step = 20_000_000
         trainer.train()
-        assert abs(trainer._batch1_current_target_entropy - base_frac * expected_max) < 1e-5, (
+        assert abs(trainer._current_target_entropy - base_frac * expected_max) < 1e-5, (
             f"Task 9A: at step 20M expected {base_frac}*max={base_frac * expected_max:.4f}, "
-            f"got {trainer._batch1_current_target_entropy:.4f}")
+            f"got {trainer._current_target_entropy:.4f}")
 
         # Across the full ramp the value must stay <= max_entropy at every
         # checked step. Upper-bound warmup_frac*max means it can never exceed max.
         for step in (0, 1_000_000, 5_000_000, 10_000_000, 20_000_000):
             trainer.global_step = step
             trainer.train()
-            assert trainer._batch1_current_target_entropy <= expected_max + 1e-9, (
-                f"Task 9A: target_entropy={trainer._batch1_current_target_entropy} "
+            assert trainer._current_target_entropy <= expected_max + 1e-9, (
+                f"Task 9A: target_entropy={trainer._current_target_entropy} "
                 f"exceeded max_entropy={expected_max} at step={step}")
 
         # Config threading end-to-end: a custom frac set on the live config
@@ -560,9 +560,9 @@ def test_target_entropy_schedule_applied():
         trainer.config["entropy_target_warmup_frac"] = 0.42
         trainer.global_step = 0
         trainer.train()
-        assert abs(trainer._batch1_current_target_entropy - 0.42 * expected_max) < 1e-5, (
+        assert abs(trainer._current_target_entropy - 0.42 * expected_max) < 1e-5, (
             f"custom entropy_target_warmup_frac not honored: expected "
-            f"{0.42 * expected_max:.4f}, got {trainer._batch1_current_target_entropy:.4f}")
+            f"{0.42 * expected_max:.4f}, got {trainer._current_target_entropy:.4f}")
     finally:
         cleanup()
 
@@ -572,7 +572,7 @@ def test_log_alpha_reset_at_batch_start():
     return-norm state is seeded by Cs2PuffeRL._init_return_norm, gh#168 W2a;
     the harness trainer is a Cs2PuffeRL since W1.5)
     must reset log_alpha to log(ent_coef). Subsequent calls must NOT
-    re-reset (idempotent via the _batch1_log_alpha_reset_done flag)."""
+    re-reset (idempotent via the _log_alpha_reset_done flag)."""
     import math
 
     from tests._helpers.trainer_harness import _build_trainer_for_test
@@ -581,29 +581,29 @@ def test_log_alpha_reset_at_batch_start():
     try:
 
         # Pre-train invariant: flag is False.
-        assert trainer._batch1_log_alpha_reset_done is False, (
-            "Task 9B: _batch1_log_alpha_reset_done should start False")
+        assert trainer._log_alpha_reset_done is False, (
+            "Task 9B: _log_alpha_reset_done should start False")
 
         trainer.evaluate()
         trainer.train()
 
         # Flag flipped after first train().
-        assert trainer._batch1_log_alpha_reset_done is True, (
-            "Task 9B: _batch1_log_alpha_reset_done should be True after first train()")
+        assert trainer._log_alpha_reset_done is True, (
+            "Task 9B: _log_alpha_reset_done should be True after first train()")
 
         # log_alpha is close to log(ent_coef). The 1e-3 tolerance covers a
         # single alpha_optimizer.step() at lr=1e-4 — far less than ent_coef
         # log magnitude — so this still pins "we reset" vs "we did not".
         ent_coef = trainer.config["ent_coef"]
         expected = math.log(ent_coef)
-        assert abs(trainer._batch1_log_alpha - expected) < 1e-3, (
-            f"Task 9B: _batch1_log_alpha={trainer._batch1_log_alpha:.6f} != "
-            f"log(ent_coef={ent_coef})={expected:.6f}")
+        assert abs(trainer._log_alpha -
+                   expected) < 1e-3, (f"Task 9B: _log_alpha={trainer._log_alpha:.6f} != "
+                                      f"log(ent_coef={ent_coef})={expected:.6f}")
     finally:
         cleanup()
 
 
-def test_batch1_metrics_exposed():
+def test_training_metrics_exposed():
     """Task 9C: after evaluate() + train() the trainer must expose every
     Batch 1 metric the wandb log layer reads: log_alpha, effective_alpha,
     per-channel std (combat/objective/positional), event_oversample_fraction
@@ -618,13 +618,13 @@ def test_batch1_metrics_exposed():
         trainer.train()
 
         for name in (
-                "_batch1_log_alpha",
-                "_batch1_effective_alpha",
-                "_batch1_std_combat",
-                "_batch1_std_objective",
-                "_batch1_std_positional",
-                "_batch1_event_oversample_fraction",
-                "_batch1_grad_norm",
+                "_log_alpha",
+                "_effective_alpha",
+                "_std_combat",
+                "_std_objective",
+                "_std_positional",
+                "_event_oversample_fraction",
+                "_grad_norm",
         ):
             assert hasattr(trainer, name), f"Task 9C: missing trainer.{name}"
             v = getattr(trainer, name)

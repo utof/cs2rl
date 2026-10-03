@@ -291,10 +291,22 @@ RESUME_CONFIG_ALLOWLIST = frozenset(
     {"data_dir", "device", "run_id", "total_timesteps", "participating_timesteps"})
 # Trainer attrs of the warm-start entropy machine + SAC target (all set in
 # cs2rl.train.trainer.Cs2PuffeRL._init_return_norm). Plain Python scalars/None — pickled as-is.
-_WARMSTART_ATTRS = ("_batch1_warmstart_phase", "_batch1_last_entropy_mean",
-                    "_batch1_log_alpha_reset_done", "_batch1_current_target_entropy",
-                    "_batch1_warmstart_h_anchor", "_batch1_warmstart_h0",
-                    "_batch1_warmstart_warn_epoch")
+_WARMSTART_ATTRS = ("_warmstart_phase", "_last_entropy_mean", "_log_alpha_reset_done",
+                    "_current_target_entropy", "_warmstart_h_anchor", "_warmstart_h0",
+                    "_warmstart_warn_epoch")
+# Before the trainer ownership rename, these attribute names were persisted as
+# train_state.pt dict keys. Load both formats; collect_train_state saves only
+# current names. Keep the mapping explicit so unrelated unknown keys retain
+# restore_train_state's existing setattr behavior.
+_LEGACY_WARMSTART_KEYS = {
+    "_batch1_warmstart_phase": "_warmstart_phase",
+    "_batch1_last_entropy_mean": "_last_entropy_mean",
+    "_batch1_log_alpha_reset_done": "_log_alpha_reset_done",
+    "_batch1_current_target_entropy": "_current_target_entropy",
+    "_batch1_warmstart_h_anchor": "_warmstart_h_anchor",
+    "_batch1_warmstart_h0": "_warmstart_h0",
+    "_batch1_warmstart_warn_epoch": "_warmstart_warn_epoch",
+}
 
 
 def _rng_state_dict():
@@ -418,8 +430,14 @@ def restore_train_state(trainer, self_play_mgr, state: dict):
             group["lr"] = sch.eta_min + (base - sch.eta_min) * (
                 1 + math.cos(math.pi * sch.last_epoch / sch.T_max)) / 2
         sch._last_lr = [g["lr"] for g in trainer.optimizer.param_groups]
-    for k, v in state["warmstart"].items():
-        setattr(trainer, k, v)
+    warmstart = state["warmstart"]
+    for key, value in warmstart.items():
+        attr = _LEGACY_WARMSTART_KEYS.get(key, key)
+        # A mixed-format sidecar's current value wins regardless of insertion
+        # order; never restore a legacy alias onto the renamed trainer.
+        if attr != key and attr in warmstart:
+            continue
+        setattr(trainer, attr, value)
     self_play_mgr.load_state_dict(state["self_play"])
     _rng_load_state_dict(state["rng"])
 
