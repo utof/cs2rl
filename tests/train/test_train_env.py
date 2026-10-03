@@ -108,7 +108,7 @@ def test_make_env_default_keeps_step_stats_off():
 #   - Task 4 (symlog, split_into_channels in cs2rl.train.rewards)
 #   - Task 5 (WelfordStd in cs2rl.train.rewards)
 #   - Task 6a (Cs2Env include_step_stats_in_info plumbing)
-#   - Task 6b (src/train_test_harness._build_trainer_for_test)
+#   - Task 6b (tests._helpers.trainer_harness._build_trainer_for_test)
 # If any of the above regress, these tests will surface the break early.
 
 
@@ -313,7 +313,7 @@ def test_event_mask_detects_injected_bomb_planted():
 
 # ── Task 8: prio_probs event-biased oversampling ───────────────────────────
 # These tests cover the prio_probs boosting added to the replacement train()
-# body (Cs2PuffeRL.train in src/cs2rl/trainer.py since gh#168 W2a — the harness
+# body (Cs2PuffeRL.train in src/cs2rl/train/trainer.py since gh#168 W2a — the harness
 # trainer is a Cs2PuffeRL since gh#168 W1.5).
 # The plan target: segments
 # whose _event_mask is True get sampled at least 25% of the time when
@@ -470,7 +470,7 @@ def test_event_oversample_fraction_exposed():
 
 # ── Task 9: target_entropy schedule + log_alpha reset + Batch 1 metrics ────
 # These tests cover three sub-features of the return-norm machinery
-# (Cs2PuffeRL._init_return_norm + Cs2PuffeRL.train, src/cs2rl/trainer.py, gh#168 W2a):
+# (Cs2PuffeRL._init_return_norm + Cs2PuffeRL.train, src/cs2rl/train/trainer.py, gh#168 W2a):
 #   (A) target_entropy schedule — linear ramp 0.7→0.5 * max_entropy across
 #       global_step ∈ [0, 10_000_000]; constant after.
 #   (B) log_alpha reset — first train() after construction sets log_alpha to

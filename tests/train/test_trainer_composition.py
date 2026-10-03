@@ -114,9 +114,8 @@ def find_def(module, qualname):
 def _attribute_reads_and_stores(fn):
     """({read}, {stored}) attribute names accessed on the trainer instance.
 
-    The receiver is ``self`` OR ``trainer``: the closure bodies take ``self`` but also read
-    the enclosing patch function's ``trainer`` (the same object; ``_max_entropy`` is
-    read ONLY that way in the train body), and the resume_state helpers take ``trainer``.
+    The receiver is ``self`` in trainer methods or ``trainer`` in checkpoint
+    helpers; both names refer to the trainer instance.
     Reads: ``recv.<name>`` in Load context, and ``getattr(recv, "<name>")`` with exactly two
     arguments (a 3-argument getattr has a default and so does not require the attribute).
     Stores: ``recv.<name>`` in Store/Del context. Reads inside nested defs count too: a
