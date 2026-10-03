@@ -87,7 +87,7 @@ def warmstart_entropy_state(step: int, *, grace_steps: int, ramp_steps: int, h_a
     interpolation from the grace-end anchor.
 
     WHY h_anchor=None => GRACE even past the boundary: the anchor is read
-    from the PREVIOUS update's mean entropy (trainer._batch1_last_entropy_mean
+    from the PREVIOUS update's mean entropy (trainer._last_entropy_mean
     — added by the trainer wiring task, not yet present in this module),
     which doesn't exist on the very first update of a grace_steps=0 run —
     grace semantics until the caller can anchor keeps that case well-defined.

@@ -14,7 +14,7 @@ construction snapshot in .superpowers/sdd/2026-09-24-168-trainer-subclass/ pin t
 W2a (gh#168) folded the first of the four in: ``_init_return_norm`` seeds the return-norm
 state and ``train`` / ``_normalize_returns`` / ``_update_return_stats`` are methods, so
 W2b folded the self-play patcher: ``_init_selfplay`` stores the manager, the past
-policy's LSTM state and the ``_batch1_*`` reward state, and ``evaluate`` is a method, so
+policy's LSTM state and the reward-channel state, and ``evaluate`` is a method, so
 ``__init__`` calls ``_init_return_norm``, ``_init_hybrid_aim``, and
 ``_init_selfplay``; callers install ``HybridAimVecEnv`` first. The checkpoint body is
 ``save_checkpoint`` on the class. Construction keeps the state setup order.
@@ -374,10 +374,10 @@ class Cs2PuffeRL(PuffeRL):
             if _bonus else 0.0
         max_entropy = max_entropy_discrete + max_entropy_continuous
         # Task 9A: target_entropy is no longer a static scalar — it's recomputed
-        # each train() call from a linear ramp 0.7→0.5*max_entropy across
-        # [0, 10_000_000] global steps (see target_entropy_schedule). The live
-        # value lives in the local _t9_target_entropy in train() and on
-        # self._batch1_current_target_entropy.
+        # each train() call from the config's linear entropy ramp (defaults
+        # 0.5→0.35*max_entropy over 10M steps; see target_entropy_schedule). The live
+        # value lives in the local target_entropy in train() and on
+        # self._current_target_entropy.
         entropy_floor = 0.3 * max_entropy              # collapse threshold
                                                        # W2a (gh#168): the floor used to be a closure variable of the train body;
                                                        # tests/train/test_warmstart_entropy_trainer.py sets it directly to force the
@@ -394,20 +394,20 @@ class Cs2PuffeRL(PuffeRL):
 
         # Task 9A/9B: trainer-level state for target_entropy schedule + log_alpha
         # reset. Instance attributes (not locals of train()) so:
-        #   - tests can inspect/pin _batch1_max_entropy and current_target_entropy
-        #   - the wandb log layer can read _batch1_current_target_entropy without
+        #   - tests can inspect/pin _max_entropy and current_target_entropy
+        #   - the wandb log layer can read _current_target_entropy without
         #     reaching into train().
-        # _batch1_log_alpha_reset_done is the idempotency flag for Task 9B —
+        # _log_alpha_reset_done is the idempotency flag for Task 9B —
         # the first train() call after construction resets log_alpha to
         # log(ent_coef); every later train() call leaves log_alpha alone so the
         # SAC dual-gradient loop can do its job.
-        self._batch1_max_entropy = float(max_entropy)
-        self._batch1_log_alpha_reset_done = False
+        self._max_entropy = float(max_entropy)
+        self._log_alpha_reset_done = False
         # Seed from the schedule at the CURRENT global_step (not a hardcoded
         # warmup constant) so checkpoint-resumed trainers start consistent;
         # the per-train()-call recompute below overwrites it every call anyway.
-        self._batch1_current_target_entropy = _scheduled_target_entropy(
-            self.config, self.global_step, float(max_entropy))
+        self._current_target_entropy = _scheduled_target_entropy(self.config, self.global_step,
+                                                                 float(max_entropy))
         # Pre-init effective_alpha + grad_norm metrics (utof/cs2rl#16). The
         # post-loop reads in train() refresh these, but if the
         # target_kl early-break trips on mb=0 OR no accumulation boundary fires,
@@ -416,8 +416,8 @@ class Cs2PuffeRL(PuffeRL):
         # turns those edge cases into "stale-from-previous-call" instead of a
         # crash, and the post-loop refresh overwrites whenever the loop runs
         # all the way through.
-        self._batch1_effective_alpha = float(self.config["ent_coef"])
-        self._batch1_grad_norm = 0.0
+        self._effective_alpha = float(self.config["ent_coef"])
+        self._grad_norm = 0.0
 
         # ── Warm-start entropy mode state (spec 2026-08-01) ────────────────────
         # h_anchor: mean policy entropy captured at grace end (None until then);
@@ -428,11 +428,11 @@ class Cs2PuffeRL(PuffeRL):
         # h0: first update's mean entropy, denominator of warmstart_h_over_h0
         # (grace collapse watch — with the floor disabled AND alpha~0 the run
         # has no anti-collapse guard, spec finding 6).
-        self._batch1_warmstart_h_anchor = None
-        self._batch1_warmstart_h0 = None
-        self._batch1_warmstart_phase = WS_OFF
-        self._batch1_last_entropy_mean = None
-        self._batch1_warmstart_warn_epoch = -10**9
+        self._warmstart_h_anchor = None
+        self._warmstart_h0 = None
+        self._warmstart_phase = WS_OFF
+        self._last_entropy_mean = None
+        self._warmstart_warn_epoch = -10**9
         print("[Train] Value target normalization enabled (running mean/std of returns).")
 
     def _update_return_stats(self, returns_flat):
@@ -490,17 +490,18 @@ class Cs2PuffeRL(PuffeRL):
         Stores the manager, the past policy's own LSTM state (the same dict structure as
         ``self.lstm_h``: keyed by agent-batch start ``i*n``, one ``(agents_per_batch,
         hidden_size)`` tensor per chunk, so ``evaluate`` can index it by ``env_id.start``),
-        and the six ``_batch1_*`` reward-processing attributes. ``process_step_rewards``
+        and the reward-channel statistics, event flags and scratch buffer.
+        ``process_step_rewards``
         updates the three ``WelfordStd`` and reads their ``std()``; ``train`` copies the
-        three ``std()`` values into ``_batch1_std_*`` at the end of each call.
+        three ``std()`` values into ``_std_*`` at the end of each call.
         ``process_step_rewards`` writes each env's channel sum into
-        ``_batch1_reward_scratch`` when step_stats exists, or a 0.0 placeholder
+        ``_reward_scratch`` when step_stats exists, or a 0.0 placeholder
         when it does not, then reads the scratch buffer for one host-to-device copy;
         ``evaluate`` replaces the buffer with a longer one when the info list (at most one
         entry per env) is longer than it. ``process_step_rewards`` only sets rows of
-        ``_batch1_current_segment_has_event`` to True (bomb planted this tick); ``evaluate``
-        reads those rows into ``_batch1_event_mask`` and clears them at the segment
-        boundary. Apart from the zero fill here, ``_batch1_event_mask`` is written only by
+        ``_current_segment_has_event`` to True (bomb planted this tick); ``evaluate``
+        reads those rows into ``_event_mask`` and clears them at the segment
+        boundary. Apart from the zero fill here, ``_event_mask`` is written only by
         ``evaluate`` at that boundary, and ``train`` reads it.
         ``save_checkpoint`` reads the stored manager when writing the sidecar.
         """
@@ -511,15 +512,15 @@ class Cs2PuffeRL(PuffeRL):
         # masks, and the numpy scratch buffer process_step_rewards writes into; evaluate
         # replaces it with a longer one when the info list, at most one entry per env, is
         # longer than the buffer).
-        self._batch1_welford_combat = WelfordStd(prior_std=1.0, min_count=1000)
-        self._batch1_welford_objective = WelfordStd(prior_std=1.0, min_count=1000)
-        self._batch1_welford_positional = WelfordStd(prior_std=1.0, min_count=1000)
+        self._welford_combat = WelfordStd(prior_std=1.0, min_count=1000)
+        self._welford_objective = WelfordStd(prior_std=1.0, min_count=1000)
+        self._welford_positional = WelfordStd(prior_std=1.0, min_count=1000)
         _dev = self.config["device"]
-        self._batch1_event_mask = torch.zeros(self.segments, dtype=torch.bool, device=_dev)
-        self._batch1_current_segment_has_event = torch.zeros(self.total_agents,
-                                                             dtype=torch.bool,
-                                                             device=_dev)
-        self._batch1_reward_scratch = np.empty(0, dtype=np.float32)
+        self._event_mask = torch.zeros(self.segments, dtype=torch.bool, device=_dev)
+        self._current_segment_has_event = torch.zeros(self.total_agents,
+                                                      dtype=torch.bool,
+                                                      device=_dev)
+        self._reward_scratch = np.empty(0, dtype=np.float32)
         print("[Train] Self-play evaluate patch enabled.")
 
     def save_checkpoint(self):
@@ -693,7 +694,7 @@ class Cs2PuffeRL(PuffeRL):
                 # the flag gets toggled or an upstream change sneaks through.
                 #
                 # Task 7: process_step_rewards also ORs the per-tick
-                # bomb_planted flag into _batch1_current_segment_has_event for
+                # bomb_planted flag into _current_segment_has_event for
                 # every agent row in the env. The C side sets ss->bomb_planted
                 # only on the transition tick (process_bomb, cs2_bomb.h — guarded by
                 # `if g->bomb_plant_ticks >= sd->bomb_plant_time`) and StepStats
@@ -701,7 +702,7 @@ class Cs2PuffeRL(PuffeRL):
                 # env_step (cs2_env.h), so the field is already a per-tick delta (1 only
                 # on the plant tick) — NO edge-trigger needed. All 10 agent rows
                 # in an env share the event state; it is flushed into
-                # _batch1_event_mask at the segment boundary below.
+                # _event_mask at the segment boundary below.
                 #
                 # PERF: the per-env loop lives in process_step_rewards() and
                 # builds the tick's rewards in a host float32 scratch buffer, so
@@ -712,17 +713,17 @@ class Cs2PuffeRL(PuffeRL):
                 # carries the bit-exactness invariants — read it before touching
                 # the arithmetic.
                 agents_per_env_local = self.vecenv.driver_env.num_agents
-                if self._batch1_reward_scratch.shape[0] < len(info):
-                    self._batch1_reward_scratch = np.empty(len(info), dtype=np.float32)
+                if self._reward_scratch.shape[0] < len(info):
+                    self._reward_scratch = np.empty(len(info), dtype=np.float32)
                 r = process_step_rewards(
                     info,
                     r,
                     agents_per_env_local,
-                    self._batch1_welford_combat,
-                    self._batch1_welford_objective,
-                    self._batch1_welford_positional,
-                    self._batch1_reward_scratch,
-                    current_segment_has_event=self._batch1_current_segment_has_event,
+                    self._welford_combat,
+                    self._welford_objective,
+                    self._welford_positional,
+                    self._reward_scratch,
+                    current_segment_has_event=self._current_segment_has_event,
                 )
 
                 # ── SELF-PLAY: override opponent-team actions ───────────────
@@ -868,15 +869,14 @@ class Cs2PuffeRL(PuffeRL):
                     # segment index lives in self.ep_indices[env_id]; once we
                     # reassign ep_indices to (free_idx + arange(num_full)) a
                     # few lines down, the old segment index is lost. Clone
-                    # first, write to _batch1_event_mask at those OLD slots,
+                    # first, write to _event_mask at those OLD slots,
                     # then reset the live accumulator so the next segment
                     # starts clean. Pitfall: writing AFTER the re-index would
                     # clobber freshly-allocated future segments (off-by-one
                     # bug that would silently mark the wrong rollout rows).
                     old_seg_indices = self.ep_indices[env_id].clone().long()
-                    self._batch1_event_mask[old_seg_indices] = (
-                        self._batch1_current_segment_has_event[env_id])
-                    self._batch1_current_segment_has_event[env_id] = False
+                    self._event_mask[old_seg_indices] = (self._current_segment_has_event[env_id])
+                    self._current_segment_has_event[env_id] = False
                     self.ep_indices[env_id] = (self.free_idx +
                                                torch.arange(num_full, device=dev).int())
                     self.ep_lengths[env_id] = 0
@@ -927,7 +927,7 @@ class Cs2PuffeRL(PuffeRL):
 
         WHAT: return-normalised value targets, the hybrid discrete+continuous PPO loss
         (``_hybrid_ppo_loss``), the SAC-style α dual loop, the warm-start entropy mode,
-        the TAG gradient-cosine diagnostic and every ``losses[...]``/``_batch1_*`` metric
+        the TAG gradient-cosine diagnostic and every trainer/loss metric
         the log layer and the metrics census read.
 
         WHY this replaces ``PuffeRL.train`` outright (it never calls ``super().train``):
@@ -967,16 +967,15 @@ class Cs2PuffeRL(PuffeRL):
         # train() call. WHY here (not inside the minibatch loop): the schedule
         # is keyed on global_step which is fixed for the duration of a single
         # train() call, so recomputing per-minibatch would burn cycles for no
-        # signal. We mirror the value onto self._batch1_current_target_entropy
+        # signal. We mirror the value onto self._current_target_entropy
         # so the wandb log layer can read it without touching this method.
         # Fracs/warmup_steps come from config via _scheduled_target_entropy
         # (finding 4 residual — previously hardcoded 0.7→0.5).
-        # PITFALL: read self._batch1_max_entropy, never a copy taken at
+        # PITFALL: read self._max_entropy, never a copy taken at
         # construction: the value follows the run (σ cap, pinned pitch, bonus
-        # switch) and a resume restores the instance attribute.
-        _t9_target_entropy = _scheduled_target_entropy(config, self.global_step,
-                                                       self._batch1_max_entropy)
-        self._batch1_current_target_entropy = float(_t9_target_entropy)
+        # switch) and is computed from those settings when the trainer is built.
+        target_entropy = _scheduled_target_entropy(config, self.global_step, self._max_entropy)
+        self._current_target_entropy = float(target_entropy)
 
         # Task 9B: one-shot log_alpha reset on the first train() call after
         # construction. WHY: the entropy schedule + log_alpha are coupled — the
@@ -985,10 +984,10 @@ class Cs2PuffeRL(PuffeRL):
         # of log(ent_coef) so the SAC dual-gradient loop converges from a
         # known floor. The flag is an instance attribute so a checkpoint-restored
         # trainer still resets exactly once.
-        if not self._batch1_log_alpha_reset_done:
+        if not self._log_alpha_reset_done:
             with torch.no_grad():
                 self._log_alpha_tensor.fill_(math.log(config["ent_coef"]))
-            self._batch1_log_alpha_reset_done = True
+            self._log_alpha_reset_done = True
 
         # ── Warm-start entropy mode: resolve phase once per train() call ───
         # (global_step only advances in evaluate(), so it is constant here —
@@ -1013,26 +1012,25 @@ class Cs2PuffeRL(PuffeRL):
         _ws_floor_active = True
         if _ws_enabled:
             _ws_grace = int(config.get("warmstart_grace_steps", 5_000_000))
-            if (self._batch1_warmstart_h_anchor is None and self.global_step >= _ws_grace
-                    and self._batch1_last_entropy_mean is not None):
+            if (self._warmstart_h_anchor is None and self.global_step >= _ws_grace
+                    and self._last_entropy_mean is not None):
                 # one-shot anchor capture (idempotent: guarded on None).
                 # Finite-check (Task 1 review): a NaN/inf entropy mean latched
                 # here would poison target and alpha_loss for the whole ramp —
                 # skip the capture (stay GRACE) and shout instead.
-                if math.isfinite(self._batch1_last_entropy_mean):
-                    self._batch1_warmstart_h_anchor = float(self._batch1_last_entropy_mean)
+                if math.isfinite(self._last_entropy_mean):
+                    self._warmstart_h_anchor = float(self._last_entropy_mean)
                 else:
                     print(f"[Train] WARN warm-start: non-finite entropy mean "
-                          f"{self._batch1_last_entropy_mean} at grace end — "
+                          f"{self._last_entropy_mean} at grace end — "
                           f"anchor capture skipped, staying in GRACE.")
             _ws = warmstart_entropy_state(
                 self.global_step,
                 grace_steps=_ws_grace,
                 ramp_steps=int(config.get("warmstart_ramp_steps", 10_000_000)),
-                h_anchor=self._batch1_warmstart_h_anchor,
-                base_target=(config.get("entropy_target_base_frac", 0.35) *
-                             self._batch1_max_entropy))
-            self._batch1_warmstart_phase = _ws.phase
+                h_anchor=self._warmstart_h_anchor,
+                base_target=(config.get("entropy_target_base_frac", 0.35) * self._max_entropy))
+            self._warmstart_phase = _ws.phase
             _ws_floor_active = _ws.floor_active
             if _ws.phase != WS_OFF and _ws.target is not None:
                 # Override the Task 9A schedule during the ramp AND mirror it,
@@ -1046,24 +1044,24 @@ class Cs2PuffeRL(PuffeRL):
                 # whenever grace+ramp < entropy_target_warmup_steps. Falling
                 # through here is what makes OFF byte-for-byte pre-feature
                 # behavior at ANY config, which is what the spec promises.
-                _t9_target_entropy = _ws.target
-                self._batch1_current_target_entropy = float(_ws.target)
+                target_entropy = _ws.target
+                self._current_target_entropy = float(_ws.target)
         else:
             # Config can be toggled off in-process (tests do this; production
             # builds the config once). Re-seed the phase so a stale GRACE can
             # never keep the alpha optimizer frozen after the mode is disabled.
-            self._batch1_warmstart_phase = WS_OFF
+            self._warmstart_phase = WS_OFF
 
         # Task 8: raw event-segment fraction (mask mean) — computed once per
-        # train() call because _batch1_event_mask doesn't change inside the
+        # train() call because _event_mask doesn't change inside the
         # minibatch loop. Persisted onto losses["event_oversample_fraction"]
         # AFTER the gh#90 divisor loop (per-call scalar, like ret_mean).
-        _t8_event_mask = getattr(self, "_batch1_event_mask", None)
+        event_mask = getattr(self, "_event_mask", None)
         # Masked over participating segments (participating[:, 0] is the
         # per-segment flag) so parked rows don't dilute the fraction at n<5.
-        self._batch1_event_oversample_fraction = (float(
-            masked_mean(_t8_event_mask.float(), self.participating[:, 0].float()))
-                                                  if _t8_event_mask is not None else 0.0)
+        self._event_oversample_fraction = (float(
+            masked_mean(event_mask.float(), self.participating[:, 0].float()))
+                                           if event_mask is not None else 0.0)
 
         # ── gh#90: KL early-stop bookkeeping ───────────────────────────────
         # WHAT: the target_kl early-stop is (a) gated to update-epoch
@@ -1126,7 +1124,7 @@ class Cs2PuffeRL(PuffeRL):
             #   gradient stays unbiased.
             # WHY: bomb-plant events are sparse in early training (the exact
             #   fraction is itself a Task 9 metric, reported via
-            #   _batch1_event_oversample_fraction). Uniform prio sampling
+            #   _event_oversample_fraction). Uniform prio sampling
             #   under-replays them; oversampling accelerates value-function
             #   fit on the rare-but-decisive transitions. Plan §Task 8
             #   target: event-mask hit-rate among sampled segments >= 25%.
@@ -1145,9 +1143,9 @@ class Cs2PuffeRL(PuffeRL):
             #     losses["event_oversample_fraction"] after the divisor
             #     loop — do not accumulate it inside this minibatch loop.
             OVERSAMPLE_FACTOR = 4.0
-            if _t8_event_mask is not None and _t8_event_mask.any():
+            if event_mask is not None and event_mask.any():
                 boosted = prio_probs.clone()
-                boosted[_t8_event_mask] *= OVERSAMPLE_FACTOR
+                boosted[event_mask] *= OVERSAMPLE_FACTOR
                 prio_probs = boosted / boosted.sum()
             # ──────────────────────────────────────────────────────────────
 
@@ -1333,7 +1331,7 @@ class Cs2PuffeRL(PuffeRL):
             # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
             alpha = self._log_alpha_tensor.exp()
             # Task 9A: use the scheduled target_entropy (recomputed at top of
-            # this train() call) instead of the static fallback. _t9_target_entropy
+            # this train() call) instead of the static fallback. target_entropy
             # is a Python float; .detach() on a tensor minus a float is fine —
             # autograd treats the float as a constant.
             # alpha_loss is computed UNCONDITIONALLY (the logging block below
@@ -1342,14 +1340,14 @@ class Cs2PuffeRL(PuffeRL):
             # log_alpha stays at its operating point (see phase-resolution
             # comment above for why that matters).
             alpha_loss = (self._log_alpha_tensor *
-                          (current_entropy - _t9_target_entropy).detach()).mean()
-            if self._batch1_warmstart_phase != WS_GRACE:
+                          (current_entropy - target_entropy).detach()).mean()
+            if self._warmstart_phase != WS_GRACE:
                 self._alpha_optimizer.zero_grad()
                 alpha_loss.backward()
                 self._alpha_optimizer.step()
 
             effective_alpha = alpha.detach()
-            if self._batch1_warmstart_phase == WS_GRACE:
+            if self._warmstart_phase == WS_GRACE:
                 # grace: entropy pressure ceilinged (default 0.0 — pure
                 # PPO+reward; the knob exists for a nonzero-alpha rerun if
                 # the collapse watch fires)
@@ -1495,9 +1493,9 @@ class Cs2PuffeRL(PuffeRL):
                 # trainer makes it available to the log layer; the .item()
                 # call forces a host sync which is fine here because the
                 # caller already syncs via .item() on losses below.
-                _t9_grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
-                                                               config["max_grad_norm"])
-                self._batch1_grad_norm = float(_t9_grad_norm)
+                grad_norm = torch.nn.utils.clip_grad_norm_(self.policy.parameters(),
+                                                           config["max_grad_norm"])
+                self._grad_norm = float(grad_norm)
                 self.optimizer.step()
                 self.optimizer.zero_grad()
 
@@ -1521,35 +1519,35 @@ class Cs2PuffeRL(PuffeRL):
         # divisor loop above, alongside minibatches_run, or they'd be divided
         # by the executed-minibatch count (the exact bug class gh#90 fixed).
         if config.get("warmstart_entropy", False):
-            losses["warmstart_phase"] = self._batch1_warmstart_phase
+            losses["warmstart_phase"] = self._warmstart_phase
             # h0 is captured on the mode's first update, when entropy is
             # healthy (BC policy ~1.8 nats) — the >1e-9 guard exists because
             # total entropy (discrete + Gaussian differential) CAN go
             # non-positive in the collapse regime, and a non-positive
             # denominator would flip the watch's sign. If capture is ever
             # skipped, say so once instead of silently disabling the watch.
-            if self._batch1_warmstart_h0 is None:
+            if self._warmstart_h0 is None:
                 if losses["entropy"] > 1e-9:
-                    self._batch1_warmstart_h0 = float(losses["entropy"])
+                    self._warmstart_h0 = float(losses["entropy"])
                 else:
                     print(f"[Train] WARN warm-start: first-update entropy "
                           f"{losses['entropy']:.3f} <= 0 — h_over_h0 collapse "
                           f"watch cannot arm (will retry next update).")
-            if self._batch1_warmstart_h0:
-                losses["warmstart_h_over_h0"] = losses["entropy"] / self._batch1_warmstart_h0
+            if self._warmstart_h0:
+                losses["warmstart_h_over_h0"] = losses["entropy"] / self._warmstart_h0
                 # collapse watch (spec finding 6): grace disables BOTH
                 # anti-collapse guards (floor clamp + alpha), so shout —
                 # throttled to every 20 epochs — if H halves.
-                if (self._batch1_warmstart_phase == WS_GRACE and losses["warmstart_h_over_h0"] < 0.5
-                        and self.epoch - self._batch1_warmstart_warn_epoch >= 20):
-                    self._batch1_warmstart_warn_epoch = self.epoch
+                if (self._warmstart_phase == WS_GRACE and losses["warmstart_h_over_h0"] < 0.5
+                        and self.epoch - self._warmstart_warn_epoch >= 20):
+                    self._warmstart_warn_epoch = self.epoch
                     print(f"[Train] WARN warm-start grace: entropy at "
                           f"{losses['warmstart_h_over_h0']:.2f} of its start value "
                           f"({losses['entropy']:.3f} nats) with alpha ceilinged and the "
                           f"entropy floor disabled — collapse watch (spec finding 6).")
         # Anchor source: maintained EVERY update, unconditionally (mode may be
         # enabled on a later resume of this process in tests; cost is one float).
-        self._batch1_last_entropy_mean = float(losses["entropy"])
+        self._last_entropy_mean = float(losses["entropy"])
 
         # Reprioritize experience
         profile("train_misc", epoch)
@@ -1567,7 +1565,7 @@ class Cs2PuffeRL(PuffeRL):
         losses["ret_mean"] = self._ret_mean.item()
         losses["ret_std"] = (self._ret_var + 1e-8).sqrt().item()
         # Observe-only persist (spec 2026-08-15 §3.4). Task 8 already
-        # computes `_batch1_event_oversample_fraction` once per train()
+        # computes `_event_oversample_fraction` once per train()
         # call; older comments that say the wandb/log layer already
         # reports it were stale. MUST sit after the gh#90 divisor loop —
         # this is a per-call scalar like ret_mean, not a minibatch sum.
@@ -1575,8 +1573,8 @@ class Cs2PuffeRL(PuffeRL):
         # (no event mask); that zero is the production signal. The
         # KL-break harness turns the flag on, so its test must not
         # assert == 0.0.
-        losses["event_oversample_fraction"] = float(
-            getattr(self, "_batch1_event_oversample_fraction", 0.0))
+        losses["event_oversample_fraction"] = float(getattr(self, "_event_oversample_fraction",
+                                                            0.0))
         losses["log_alpha"] = self._log_alpha_tensor.item()
 
         # Task 9C: expose per-train()-call metrics on the trainer for the
@@ -1592,13 +1590,13 @@ class Cs2PuffeRL(PuffeRL):
         # effective_alpha unbound" NameError is structurally impossible —
         # the try/except below stays as defense-in-depth only. The NaN
         # guard's `continue` can still skip the optimizer-step site, so
-        # _batch1_grad_norm keeps its pre-seeded default in that edge.
-        self._batch1_log_alpha = float(self._log_alpha_tensor.item())
+        # _grad_norm keeps its pre-seeded default in that edge.
+        self._log_alpha = float(self._log_alpha_tensor.item())
         # effective_alpha may be unbound this call if target_kl early-broke
         # on mb=0 — leave the pre-initialised attr (set in _init_return_norm
         # block above) intact in that case rather than crashing.
         try:
-            self._batch1_effective_alpha = float(effective_alpha.detach().item())
+            self._effective_alpha = float(effective_alpha.detach().item())
         except (NameError, UnboundLocalError):
             pass
         # Rung 0 §2.2: log the alpha the loss ACTUALLY used (post ceiling /
@@ -1607,16 +1605,16 @@ class Cs2PuffeRL(PuffeRL):
         # collapse guard is holding the run up. Absolute value, so it sits here
         # after the gh#90 divisor, and it reads the trainer attr rather than
         # the loop-local so the KL-early-break edge cannot NameError.
-        losses["effective_alpha"] = float(self._batch1_effective_alpha)
+        losses["effective_alpha"] = float(self._effective_alpha)
         # Welford std exposure: guard with getattr+fallback so a trainer whose
         # _init_selfplay (where these get attached) did not run keeps the
         # no-selfplay code path (a legacy guard from the monkey-patch era).
-        _w_combat = getattr(self, "_batch1_welford_combat", None)
-        self._batch1_std_combat = (float(_w_combat.std()) if _w_combat is not None else 1.0)
-        _w_obj = getattr(self, "_batch1_welford_objective", None)
-        self._batch1_std_objective = (float(_w_obj.std()) if _w_obj is not None else 1.0)
-        _w_pos = getattr(self, "_batch1_welford_positional", None)
-        self._batch1_std_positional = (float(_w_pos.std()) if _w_pos is not None else 1.0)
+        _w_combat = getattr(self, "_welford_combat", None)
+        self._std_combat = (float(_w_combat.std()) if _w_combat is not None else 1.0)
+        _w_obj = getattr(self, "_welford_objective", None)
+        self._std_objective = (float(_w_obj.std()) if _w_obj is not None else 1.0)
+        _w_pos = getattr(self, "_welford_positional", None)
+        self._std_positional = (float(_w_pos.std()) if _w_pos is not None else 1.0)
 
         profile.end()
         logs = None

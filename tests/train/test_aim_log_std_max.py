@@ -88,7 +88,7 @@ def test_max_entropy_reflects_cap_pin_and_bonus(simple_map):
             assert trainer.config["aim_log_std_max"] == pytest.approx(cap)
             assert trainer.config["pin_pitch"] == pin
             cont = n_dims * 0.5 * math.log(2 * math.pi * math.e * math.exp(cap)**2)
-            assert trainer._batch1_max_entropy == pytest.approx(disc + cont)
+            assert trainer._max_entropy == pytest.approx(disc + cont)
         finally:
             cleanup()
 

@@ -51,8 +51,8 @@ def _snapshot(trainer, mgr):
         "ret_var": trainer._ret_var.clone(),
         "ret_count": trainer._ret_count.clone(),
         "log_alpha": trainer._log_alpha_tensor.detach().clone(),
-        "target_entropy": trainer._batch1_current_target_entropy,
-        "ws_phase": trainer._batch1_warmstart_phase,
+        "target_entropy": trainer._current_target_entropy,
+        "ws_phase": trainer._warmstart_phase,
         "opponent_team": mgr.opponent_team,
         "pool": list(mgr.pool),
                                                                                    # RNG STATES (not fresh draws — a draw-based compare is one stray
@@ -159,7 +159,7 @@ def test_resumed_schedule_matches_uninterrupted():
             t_a.evaluate()
             t_a.train()
         want = (t_a.scheduler.get_last_lr(), t_a.optimizer.param_groups[0]["lr"], t_a.global_step,
-                t_a.epoch, t_a._batch1_current_target_entropy)
+                t_a.epoch, t_a._current_target_entropy)
     finally:
         cleanup_a()
     t_b, mgr_b, cleanup_b = _make(seed=3)
@@ -175,7 +175,7 @@ def test_resumed_schedule_matches_uninterrupted():
             t_c.evaluate()
             t_c.train()
             got = (t_c.scheduler.get_last_lr(), t_c.optimizer.param_groups[0]["lr"],
-                   t_c.global_step, t_c.epoch, t_c._batch1_current_target_entropy)
+                   t_c.global_step, t_c.epoch, t_c._current_target_entropy)
             assert got == want, (got, want)
         finally:
             cleanup_c()

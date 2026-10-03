@@ -41,7 +41,7 @@ def test_c_env_smoke():
     assert sps >= 300_000, f"SPS {sps:.0f} below 300_000 target"
 
 
-def test_batch1_smoke_runs_without_nan():
+def test_training_smoke_runs_without_nan():
     """Batch 1 integration smoke (plan §Task 10).
 
     Wires the full Batch 1 stack (selfplay patch, return-norm patch, symlog
@@ -75,15 +75,15 @@ def test_batch1_smoke_runs_without_nan():
 
         # ── All Batch 1 metrics populated and finite ────────────────────
         for name in (
-                "_batch1_max_entropy",
-                "_batch1_current_target_entropy",
-                "_batch1_log_alpha",
-                "_batch1_effective_alpha",
-                "_batch1_std_combat",
-                "_batch1_std_objective",
-                "_batch1_std_positional",
-                "_batch1_event_oversample_fraction",
-                "_batch1_grad_norm",
+                "_max_entropy",
+                "_current_target_entropy",
+                "_log_alpha",
+                "_effective_alpha",
+                "_std_combat",
+                "_std_objective",
+                "_std_positional",
+                "_event_oversample_fraction",
+                "_grad_norm",
         ):
             assert hasattr(trainer, name), f"Batch 1 smoke: missing {name}"
             v = getattr(trainer, name)
@@ -96,8 +96,8 @@ def test_batch1_smoke_runs_without_nan():
         # the actual running std takes over. That value can be small (most
         # channels are zero on most ticks), so the only universal invariant
         # is non-negative.
-        assert trainer._batch1_std_combat >= 0.0
-        assert trainer._batch1_std_objective >= 0.0
-        assert trainer._batch1_std_positional >= 0.0
+        assert trainer._std_combat >= 0.0
+        assert trainer._std_objective >= 0.0
+        assert trainer._std_positional >= 0.0
     finally:
         cleanup()

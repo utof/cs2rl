@@ -10,7 +10,7 @@ PITFALL: trainer.losses is a defaultdict(float) — losses["warmstart_phase"]
 == 0 would be vacuously true on a missing key. Always assert membership
 BEFORE any value comparison against 0/WS_GRACE.
 
-PITFALL (spec finding 8): assert on trainer._batch1_effective_alpha and
+PITFALL (spec finding 8): assert on trainer._effective_alpha and
 losses["log_alpha"], NOT losses["alpha"] — losses/alpha logs RAW alpha,
 which sits at ent_coef=0.1 during grace by design (Task 9B reset).
 """
@@ -54,7 +54,7 @@ def _force_floor_above_entropy(trainer, floor=1e6):
     WHY a margin and not a precondition: on this harness the floor trips
     NATURALLY. Measured (num_envs=32, with_selfplay=True, mode off, PR #261
     review): losses["entropy"] ~1.60 nats against _entropy_floor = 0.3 * 8.21
-    = 2.46, so entropy_floor_fires is 7/7 and _batch1_effective_alpha is 0.5
+    = 2.46, so entropy_floor_fires is 7/7 and _effective_alpha is 0.5
     with no forcing at all, and deleting the write below leaves both floor
     tests green. The helper pins those two tests to the below-floor arm however
     the harness policy's entropy drifts; the proof that the body READS
@@ -96,9 +96,9 @@ def test_floor_stays_disarmed_during_grace_even_below_floor():
         losses = _run_train_once(trainer)
         assert "warmstart_phase" in losses
         assert losses["warmstart_phase"] == 0, "test precondition: must still be in GRACE"
-        assert trainer._batch1_effective_alpha <= 1e-8, (
+        assert trainer._effective_alpha <= 1e-8, (
             "floor re-armed during GRACE: effective_alpha "
-            f"{trainer._batch1_effective_alpha} left the ceiling despite "
+            f"{trainer._effective_alpha} left the ceiling despite "
             "_ws_floor_active being False")
     finally:
         cleanup()
@@ -118,9 +118,9 @@ def test_floor_clamps_effective_alpha_when_mode_off():
         _force_floor_above_entropy(trainer)
         losses = _run_train_once(trainer)
         assert "warmstart_phase" not in losses, "test precondition: mode must be off"
-        assert trainer._batch1_effective_alpha >= 0.5, (
+        assert trainer._effective_alpha >= 0.5, (
             "floor clamp did not fire with the mode off: effective_alpha "
-            f"{trainer._batch1_effective_alpha} < 0.5")
+            f"{trainer._effective_alpha} < 0.5")
     finally:
         cleanup()
 
@@ -157,9 +157,9 @@ def test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off():
         assert losses["entropy_floor_fires"] == 0, (
             f"floor fired {losses['entropy_floor_fires']}x with _entropy_floor = -1.0: "
             "Cs2PuffeRL.train is not comparing against self._entropy_floor")
-        assert trainer._batch1_effective_alpha < 0.5, (
+        assert trainer._effective_alpha < 0.5, (
             "floor clamp fired with the floor below the entropy: effective_alpha "
-            f"{trainer._batch1_effective_alpha}")
+            f"{trainer._effective_alpha}")
     finally:
         cleanup()
 
@@ -172,9 +172,9 @@ def test_grace_pins_effective_alpha_and_freezes_log_alpha():
         # defaultdict(float): membership first!
         assert "warmstart_phase" in losses
         assert losses["warmstart_phase"] == 0
-        assert trainer._batch1_effective_alpha <= 1e-8, (
+        assert trainer._effective_alpha <= 1e-8, (
             "grace must ceiling effective alpha to the (0.0) ceiling; "
-            f"got {trainer._batch1_effective_alpha}")
+            f"got {trainer._effective_alpha}")
         # alpha optimizer paused: log_alpha stays at the Task 9B reset value
         assert abs(losses["log_alpha"] - math.log(trainer.config["ent_coef"])) < _FROZEN_TOL
         losses2 = _run_train_once(trainer)
@@ -186,7 +186,7 @@ def test_grace_pins_effective_alpha_and_freezes_log_alpha():
         assert "warmstart_h_over_h0" in losses2
         assert losses2["warmstart_h_over_h0"] == pytest.approx(1.0, rel=0.5)
         # the anchor source must be maintained every update, unconditionally
-        assert trainer._batch1_last_entropy_mean is not None
+        assert trainer._last_entropy_mean is not None
     finally:
         cleanup()
 
@@ -197,21 +197,21 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
         # no prior update -> no anchor source yet -> still GRACE
         losses1 = _run_train_once(trainer)
         assert losses1["warmstart_phase"] == 0
-        h_after_1 = trainer._batch1_last_entropy_mean
+        h_after_1 = trainer._last_entropy_mean
         # anchors to update 1's mean H
         assert h_after_1 is not None
         losses2 = _run_train_once(trainer)
         assert losses2["warmstart_phase"] == 1
-        anchor = trainer._batch1_warmstart_h_anchor
+        anchor = trainer._warmstart_h_anchor
         assert anchor is not None
         assert abs(anchor - h_after_1) < 1e-9
         # ramp_steps is huge so the mirrored target sits ~at the anchor
-        target = trainer._batch1_current_target_entropy
+        target = trainer._current_target_entropy
         assert target is not None
         assert abs(target - h_after_1) < 1e-3
         # COUPLING: the assertion above only proves the MIRROR (the wandb
         # trace) was overridden. This one proves the CONSUMED target — the
-        # _t9_target_entropy that alpha_loss is actually computed from — was
+        # target_entropy that alpha_loss is actually computed from — was
         # overridden too, which is the half that steers training.
         # alpha_loss = mean(log_alpha * (H - target)). With the target anchored
         # at the previous update's mean H, (H - target) ~ 0, so alpha_loss ~ 0
