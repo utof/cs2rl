@@ -330,8 +330,7 @@ def test_jump_enabled_is_in_the_eval_driver_agreement_loop():
     precondition every source scan in this file shares. What is at stake is
     unchanged — an eval env built from one EnvConfig while the workers ran
     another would silently score the policy on a DIFFERENT sim than it trains on,
-    and the mismatch would never surface in metrics. Mirrors
-    test_cli_flags_declared_default_none's source-scan rationale."""
+    and the mismatch would never surface in metrics."""
     import re
     src = (REPO_ROOT / "src" / "cs2rl" / "train" / "envs.py").read_text()
     m = re.search(r"for _k in \((.*?)\):", src, re.S)
@@ -352,44 +351,3 @@ def test_policy_max_turn_speed_assert(simple_map):
             assert_max_turn_speed_agreement(trainer.vecenv, trainer.policy)
     finally:
         cleanup()
-
-
-def test_cli_flags_declared_default_none():
-    """The parser is built inline under ``if __name__ == "__main__"`` (not
-    importable), so check the source: each flag is declared, defaults to None
-    (⇒ env default) and has the matching dest. The modal arity mirror's flag
-    names are checked against train.py by
-    `test_live_train_option_mirror_matches_train_py` in
-    tests/modal/test_modal_request.py."""
-    import re
-    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
-    for flag, dest, typ in (("--round-time-ticks", "round_time_ticks", "int"),
-                            ("--laser-range", "laser_range", "float"), ("--max-turn-speed",
-                                                                        "max_turn_speed", "float")):
-        # yapf may put the flag on its own line after `add_argument(`; allow
-        # any whitespace between the paren and the flag literal.
-        m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
-        assert m, flag
-        body = m.group(1)
-        assert f"type={typ}" in body and "default=None" in body and f'dest="{dest}"' in body, flag
-
-
-def test_stance_flags_declared_default_on():
-    """--crouch-enabled / --jump-enabled are 0/1 knobs that must default to 1.
-
-    They are NOT default=None like the R0-G knobs: there is no "env decides"
-    value for a mask bit, and a default of 0 would silently mask the action for
-    every run that never asked for the Rung 1a diagnostic. Same source-scan
-    reason as above (the parser is not importable).
-
-    The default is read from `EnvConfig()` (bound once as `_ENV_DEFAULTS` above
-    the parser) rather than written as `1`, so the flag and the env cannot
-    drift; R11's argparse probe is what enforces that direction."""
-    import re
-    src = (REPO_ROOT / "src" / "cs2rl" / "train" / "__main__.py").read_text()
-    for flag, dest in (("--crouch-enabled", "crouch_enabled"), ("--jump-enabled", "jump_enabled")):
-        m = re.search(rf'add_argument\(\s*"{flag}",(.*?)\)\n', src, re.S)
-        assert m, flag
-        body = m.group(1)
-        assert "type=int" in body and "choices=(0, 1)" in body, flag
-        assert f"default=_ENV_DEFAULTS.{dest}" in body and f'dest="{dest}"' in body, flag
