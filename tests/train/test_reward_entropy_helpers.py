@@ -39,7 +39,7 @@ def test_target_entropy_schedule_monotone():
     # docs/2026-07-06-adversarial-review-verification.md): the old targets
     # kept the policy near-uniform forever. These defaults mirror
     # build_train_config's entropy_target_{warmup,base}_frac — production
-    # threads the config values explicitly via train._scheduled_target_entropy.
+    # threads the config values via cs2rl.train.update._scheduled_target_entropy.
     assert abs(vals[0] - 0.5 * max_ent) < 1e-6
     assert abs(vals[-1] - 0.35 * max_ent) < 1e-6
 
