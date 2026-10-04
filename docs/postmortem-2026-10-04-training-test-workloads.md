@@ -2,8 +2,9 @@
 
 Date: 2026-10-04. This retrospective covers seven CPU controller tests, not the
 learning experiments or the complete test suite. The measured candidate is
-commit e432d1249374ca39a4e69c1ccdfa84cc4ea9582e; final combined-branch full-suite
-acceptance remains pending.
+commit e432d1249374ca39a4e69c1ccdfa84cc4ea9582e. Final combined-branch acceptance
+passed at c56fd64626af9ba5a19516dbf5a2864977899ed1; its separate complete-suite
+measurement is recorded below.
 
 ## What happened
 
@@ -50,11 +51,25 @@ reducing the workload to one would risk making that check ineffective.
 Both pairs show less selected work and lower observed elapsed cost and maximum
 RSS. They do not establish a stable percentage improvement or complete-suite
 saving. GNU time records an individually accounted process/waited-child
-maximum, not simultaneous process-tree memory. The free-memory threshold for a
-full run remains a separate safety prerequisite. Scratch directories were
+maximum, not simultaneous process-tree memory. A free-memory launch cutoff is a
+separate conservative estimate, not measured suite consumption. Scratch directories were
 removed and the test processes exited; these observations are not proof of
 absence of all allocator, thread or native-handle leaks. A final uninstrumented
 selection also passed.
+
+The final combined candidate's canonical two-worker suite passed 2062 tests with
+one expected performance opt-in skip in 735.94 seconds; external command wall
+time was 738.07 seconds. An isolated Linux cgroup recorded a native accounted
+memory peak of 3.802 GiB and a separate swap peak of 0.684 GiB. The owner waived
+the estimated 7 GiB launch cutoff for this measured run. No scope OOM event
+occurred.
+
+The native memory peak includes memory charged to the suite and its descendants,
+including charged file cache and kernel memory. It excludes GPU memory and shared
+pages charged elsewhere; it is not total RSS or a reusable launch requirement.
+The memory and swap peaks may occur at different times and are not added. This
+single run supplies neither a controlled full-suite speedup nor a baseline
+accounted-memory comparison.
 
 ## Why it was easy to miss
 

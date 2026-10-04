@@ -4,7 +4,9 @@ Date: 2026-10-04. This public retrospective draws on the completed
 [topology work](https://github.com/utof/cs2rl/issues/184),
 [naming cleanup](https://github.com/utof/cs2rl/issues/167) and the later measured
 test cleanups. It records bounded lessons, not a fresh audit of every module.
-The newer test-cleanup branch still awaits combined full-suite acceptance.
+The combined cleanup passed its canonical full suite at commit
+c56fd64626af9ba5a19516dbf5a2864977899ed1: 2062 passed and one expected
+performance opt-in skip. This establishes acceptance, not a controlled speedup.
 
 ## What caused rework
 
