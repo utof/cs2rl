@@ -377,7 +377,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
         pytest.fail(f"unknown binding site: {site}")
 
 
-@pytest.mark.slow                      # 7 pytest child sessions per binding site (~1 min)
+@pytest.mark.slow                      # Seven isolated child sessions per binding site.
 def test_patch_binding_campaign(tmp_path):
     """The executable instrument must report every original site and own bite.
 
