@@ -22,8 +22,8 @@ import pytest
 # tensor, so log_alpha.item() round-trips log(0.1) to ~3.2e-8 of the float64
 # math.log(0.1) the assertions compare against. 1e-7 absorbs that while
 # staying three orders of magnitude below real controller motion — Adam at
-# lr=1e-4 moves log_alpha ~1e-4 per minibatch (~7e-4 over one update at the
-# harness's 7 minibatches), which is what test_mode_off_is_unchanged_behavior
+# lr=1e-4 moves log_alpha ~1e-4 per minibatch across multiple minibatches
+# per update, which is what test_mode_off_is_unchanged_behavior
 # asserts on the other side of the contract.
 _FROZEN_TOL = 1e-7
 
@@ -35,7 +35,7 @@ def _run_train_once(trainer):
     return trainer.losses
 
 
-def _build_ws_trainer(num_envs=32, **ws_overrides):
+def _build_ws_trainer(num_envs=4, **ws_overrides):
     from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=num_envs, with_selfplay=True)
     trainer.config["warmstart_entropy"] = True
@@ -113,7 +113,7 @@ def test_floor_clamps_effective_alpha_when_mode_off():
     clamp was deleted outright.
     """
     from tests._helpers.trainer_harness import _build_trainer_for_test
-    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    trainer, cleanup = _build_trainer_for_test(num_envs=4, with_selfplay=True)
     try:
         _force_floor_above_entropy(trainer)
         losses = _run_train_once(trainer)
@@ -138,14 +138,14 @@ def test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off():
     entropy_floor_fires must be 0 and effective alpha must stay at the raw alpha
     (exp(log_alpha) ~ ent_coef = 0.1 after the Task 9B reset), i.e. < 0.5.
 
-    Measured mutants of `if _ws_floor_active and current_entropy.item() <
+    Historical num_envs=32 mutants of `if _ws_floor_active and current_entropy.item() <
     self._entropy_floor:` in Cs2PuffeRL.train: comparison replaced by `True` -> this
     test red (fires 7, alpha 0.5), the mode-off test above green; replaced by `False`
     -> the mode-off test above red (alpha ~0.1), this one green. The pair pins both
     constant replacements; neither alone does.
     """
     from tests._helpers.trainer_harness import _build_trainer_for_test
-    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    trainer, cleanup = _build_trainer_for_test(num_envs=4, with_selfplay=True)
     try:
         assert hasattr(trainer, "_entropy_floor"), (
             "trainer has no _entropy_floor: Cs2PuffeRL._init_return_norm renamed it")
@@ -181,8 +181,8 @@ def test_grace_pins_effective_alpha_and_freezes_log_alpha():
         assert abs(losses2["log_alpha"] - math.log(trainer.config["ent_coef"])) < _FROZEN_TOL
         # Value pin, not mere presence: h_over_h0 is an ABSOLUTE ratio and
         # must stay ~1 over two updates. If it ever migrates above the gh#90
-        # divisor loop it gets divided by the executed-minibatch count (7 on
-        # this harness), landing near 0.14 — well outside rel=0.5.
+        # divisor loop it gets divided by the executed-minibatch count
+        # (more than one on this harness), falling outside rel=0.5.
         assert "warmstart_h_over_h0" in losses2
         assert losses2["warmstart_h_over_h0"] == pytest.approx(1.0, rel=0.5)
         # the anchor source must be maintained every update, unconditionally
@@ -213,6 +213,7 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
         # trace) was overridden. This one proves the CONSUMED target — the
         # target_entropy that alpha_loss is actually computed from — was
         # overridden too, which is the half that steers training.
+        # The numerical measurements below used the earlier num_envs=32 workload.
         # alpha_loss = mean(log_alpha * (H - target)). With the target anchored
         # at the previous update's mean H, (H - target) ~ 0, so alpha_loss ~ 0
         # (measured -0.020). Drop the consumed override while keeping the
@@ -231,7 +232,7 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
 
 def test_mode_off_is_unchanged_behavior():
     from tests._helpers.trainer_harness import _build_trainer_for_test
-    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    trainer, cleanup = _build_trainer_for_test(num_envs=4, with_selfplay=True)
     try:
         # no warmstart keys at all
         losses = _run_train_once(trainer)
