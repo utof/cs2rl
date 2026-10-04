@@ -60,6 +60,48 @@ You do **not** need to touch the policy (`cs2rl.policy`), `cs2_env.py`'s MultiDi
 
 ## Tests
 
+### Design tests around the behavior they protect
+
+Before adding a test or changing its cost, name the production behavior it must
+observe and a harmful change that must make it fail. A declaration, mirrored
+trace, missing key or constructor shape alone may not prove the consumer uses
+the value. Observe the actual effect; check membership before reading a
+defaultdict value, and keep an opposite-direction positive control when a
+predicate could pass unconditionally.
+
+Use the existing real trainer harness for narrow controller tests. Choose the
+smallest measured workload that preserves their intended failure sensitivity.
+Record actual rollout, update and minibatch counts: a ratio test that must catch
+division by the minibatch count needs more than one executed minibatch. Keep
+mutable trainers/environments fresh and run their existing cleanup in finally
+blocks. Do not shrink seed, checkpoint continuation, long-update or native
+integration experiments merely because another test tolerates a smaller batch.
+
+Before adding an adapter, fixture layer, configuration object or test runner,
+the prototyper (or implementer for a small change) checks existing project code,
+standard-library APIs and supported installed dependencies. Record the API,
+version, official source, an executed success and relevant failure, and the
+specific unmet requirement if custom code remains necessary. The implementer
+preserves that evidence; the reviewer checks the riskiest reuse or equivalence
+claim. API existence alone does not establish equivalent behavior.
+
+Measure the affected selection before and after with the same interpreter,
+options and observation method. Keep failing controls and noisy runs. Distinguish
+summed testcase durations, external wall time, per-process maximum RSS and
+simultaneous process-tree memory. Free-memory headroom is a launch prerequisite,
+not measured peak usage. A marker changes scheduling; it does not reduce the
+cost or preserve coverage unless the omitted checks run elsewhere.
+
+For file/module/attribute refactors, inventory callers, import aliases,
+entrypoints, configuration and persisted state before editing. Graph results
+need coverage checks and exact source/AST fallback; a zero is not proof of
+absence. Name interfaces for what they own, preserve old-format resume where
+state is serialized, and verify the full combined diff. Reuse the measured
+prototype on the same branch instead of rebuilding it from prose.
+
+See the [training-test workload postmortem](docs/postmortem-2026-10-04-training-test-workloads.md)
+and [architecture-refactor postmortem](docs/postmortem-2026-10-04-architecture-refactors.md).
+
 `tests/CONTEXT.md` says where a new test goes (the directory that mirrors the `src/cs2rl`
 package it tests; a file at the `tests/` root is only for a flat module such as `policy`), and
 what the session guards in `tests/conftest.py` check.
