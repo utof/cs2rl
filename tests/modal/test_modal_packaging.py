@@ -130,7 +130,11 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # #274 removes the unused path-listing wrapper's test. Reservation and option
 # checks keep their names while exercising the byte/arity production interfaces.
 # The import-purity and path/module help checks add two client test names.
-GOVERNED_NAME_COUNT = 300
+# 299, after gh#345: `_consume_training_kwargs` is no longer needed because
+# setup returns only production keywords. The two flat-routing self-tests
+# are replaced by native setup/default safety tests in their original files;
+# their key changes do not change the population or any behavioral test home.
+GOVERNED_NAME_COUNT = 299
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.
