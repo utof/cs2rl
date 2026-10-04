@@ -123,6 +123,10 @@ trainer rollouts, learning loops and checkpoint continuation carry `training`;
 expensive non-training campaigns, native builds and fresh-process checks use `slow`.
 Some training tests retain `slow` as well: `-m training` selects them together.
 
+`-m "not slow"` excludes only `slow` tests; it still includes training tests without
+that marker. Use the default `not slow and not training` selection for ordinary
+validation.
+
 At this combined selection and source-reuse change, collection is 1949 fast,
 57 training and 65 extended non-training cases; the complete command collects
 2071 (2063 original cases plus seven selection regressions and one parser-freshness
