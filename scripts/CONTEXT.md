@@ -21,7 +21,7 @@ image and shipped inside the source archive the container extracts. It has its o
 | `pyrefly_gate.py` | the type gate the pre-commit hook runs; `--update` refreshes `pyrefly-snapshot.json` |
 | `run_rung1.sh` | the Rung 1 sweep: seeds, retries with `--resume-run`, the files `cs2rl.experiment.gate` reads |
 | `launch_server.sh` | starts a local CS2 server with 2 RL bots per side (`deploy/serversetup.md`) |
-| `run_modal.py`, `modal_artifacts.py`, `modal_backfill_sidecar.py`, `modal_image_reqs.py` | the Modal launcher, status client, sidecar backfill and image requirements (`scripts/modal_runner/CONTEXT.md`) |
+| `run_modal.py`, `modal_artifacts.py`, `modal_backfill_sidecar.py` | the Modal launcher, status client and sidecar backfill (`scripts/modal_runner/CONTEXT.md`) |
 
 ## Where new code goes
 
