@@ -25,6 +25,7 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
+from modal.exception import NotFoundError, PermissionDeniedError, ServiceError
 
 from tests.conftest import REPO_ROOT
 
@@ -86,8 +87,8 @@ class FakeModal:
             Volume=self.Volume,
             Dict=self.Dict,
             Secret=self.Secret,
-            exception=SimpleNamespace(NotFoundError=FakeNotFoundError),
-            NotFoundError=FakeNotFoundError,
+            exception=SimpleNamespace(NotFoundError=NotFoundError),
+            NotFoundError=NotFoundError,
             __version__=self.__version__,
         )
 
@@ -147,7 +148,8 @@ class FakeModal:
                     if create_if_missing:
                         fake.volumes[name] = FakeVolume(fake, name)
                     else:
-                        raise FakeNotFoundError(f"Volume {name!r} not found")
+                        # Public SDK lookup is lazy; absence surfaces on hydration.
+                        return FakeVolume(fake, name)
                 return fake.volumes[name]
 
         return Volume
@@ -201,8 +203,8 @@ class FakeModal:
         return Secret
 
 
-class FakeNotFoundError(Exception):
-    """Stand-in for a missing named Modal object."""
+class FakeNotFoundError(NotFoundError):
+    """Legacy launcher double using the real SDK missing-resource base class."""
 
 
 class FakeImage:
@@ -309,8 +311,14 @@ class FakeVolume:
         self.commit_count = 0
         self.reject_next_upload = False
         self.iterdir_entries: list[object] | None = None
-        self.missing_prefix_exc: type[BaseException] | None = None
+        self.missing_prefix_exc: type[BaseException] | None = NotFoundError
         self.fail_prefix: str | None = None
+
+    def hydrate(self):
+        """Resolve a noncreating handle before file APIs, as the SDK does."""
+        if self.name not in self._fake.volumes:
+            raise NotFoundError(f"Volume {self.name!r} not found")
+        return self
 
     def _client_path(self, path) -> str:
         text = str(path)
@@ -322,6 +330,7 @@ class FakeVolume:
         return FakeBatchUpload(self, force)
 
     def read_file(self, path):
+        self.hydrate()
         key = self._client_path(path)
         self._fake.read_file_calls.append(key)
         if key not in self.files:
@@ -332,6 +341,7 @@ class FakeVolume:
         yield data
 
     def iterdir(self, path, *, recursive: bool = True):
+        self.hydrate()
         key = self._client_path(path)
         self._fake.iterdir_calls.append((key, recursive))
         if self.iterdir_entries is not None:
@@ -1738,25 +1748,42 @@ def _import_artifacts():
     return importlib.import_module("scripts.modal_artifacts")
 
 
-def test_artifact_client_never_imports_app_or_creates_objects(fake_modal):
+@pytest.mark.parametrize("consumer", ["status", "download", "backfill"])
+def test_artifact_client_never_imports_app_or_creates_objects(fake_modal, tmp_path, consumer):
+    """A lazy missing Volume must be diagnosed before any artifact read or write."""
     module = _import_artifacts()
     assert "scripts.run_modal" not in sys.modules
     assert fake_modal.images == []
     assert fake_modal.apps == []
-    with pytest.raises(mrl.ValidationError):
-        module.collect_status("ok-id")
+    with pytest.raises(mrl.ValidationError, match="^artifact volume is missing$") as info:
+        if consumer == "status":
+            module.collect_status("ok-id")
+        elif consumer == "download":
+            module.download_run("ok-id", dest_root=tmp_path)
+        else:
+            _import_backfill().backfill_sidecar("ok-id")
+    assert isinstance(info.value.__cause__, NotFoundError)
     assert fake_modal.volume_creates == []
     assert fake_modal.dict_creates == []
     assert fake_modal.volume_lookups == [(mrl.VOLUME_NAME, False)]
     assert fake_modal.configured_remote_calls == []
     assert fake_modal.base_remote_calls == []
+    assert fake_modal.read_file_calls == []
+    assert fake_modal.batch_upload_calls == []
+    assert not (tmp_path / "ok-id").exists()
 
 
-def test_collect_status_missing_run_message(fake_modal):
+@pytest.mark.parametrize("consumer", ["status", "download"])
+def test_collect_status_missing_run_message(fake_modal, tmp_path, consumer):
+    """A missing run in an existing Volume remains a run-specific diagnosis."""
     module = _import_artifacts()
     _named_volume(fake_modal)
     with pytest.raises(mrl.ValidationError, match="run not found: missing-id"):
-        module.collect_status("missing-id", now=_aware())
+        if consumer == "status":
+            module.collect_status("missing-id", now=_aware())
+        else:
+            module.download_run("missing-id", dest_root=tmp_path)
+    assert not (tmp_path / "missing-id").exists()
 
 
 def test_status_rejects_launch_only_options_via_client(fake_modal):
@@ -1862,13 +1889,48 @@ def test_download_stages_renames_and_refuses_overwrite(fake_modal, tmp_path):
     assert not (dest_root / "secret").exists()
 
 
-def test_detached_run_can_be_downloaded_later_by_id(fake_modal, tmp_path):
+@pytest.mark.parametrize("phase,error_type", [
+    ("present", None),
+    *[(phase, error_type) for phase in ("call", "iterator", "midway")
+      for error_type in (NotFoundError, PermissionError, OSError, KeyError, PermissionDeniedError,
+                         ServiceError, RuntimeError)],
+])
+def test_detached_run_can_be_downloaded_later_by_id(fake_modal, tmp_path, monkeypatch, phase,
+                                                    error_type):
+    """Listing errors retain their diagnosis, including after a yielded entry."""
     module = _import_artifacts()
     assert "scripts.run_modal" not in sys.modules
     volume = _named_volume(fake_modal)
     volume.files["runs/detached-1/result.json"] = b'{"status":"completed"}\n'
-    dest = module.download_run("detached-1", dest_root=tmp_path / "outputs" / "modal")
-    assert (dest / "result.json").read_text() == '{"status":"completed"}\n'
+    dest_root = tmp_path / "outputs" / "modal"
+    if phase == "present":
+        dest = module.download_run("detached-1", dest_root=dest_root)
+        assert (dest / "result.json").read_text() == '{"status":"completed"}\n'
+    else:
+        error = error_type("list failure")
+
+        def broken_iterator():
+            if phase == "midway":
+                yield SimpleNamespace(path="runs/detached-1/result.json", type="file")
+            raise error
+
+        def broken_list(path, *, recursive):
+            assert (path, recursive) == ("runs/detached-1", True)
+            if phase == "call":
+                raise error
+            return broken_iterator()
+
+        monkeypatch.setattr(volume, "iterdir", broken_list)
+        expected = (mrl.ValidationError
+                    if error_type is NotFoundError and phase != "midway" else error_type)
+        message = "run not found: detached-1" if expected is mrl.ValidationError else "list failure"
+        with pytest.raises(expected, match=message) as info:
+            module.download_run("detached-1", dest_root=dest_root)
+        if expected is mrl.ValidationError:
+            assert info.value.__cause__ is error
+        else:
+            assert info.value is error
+        assert not dest_root.exists()
     assert fake_modal.apps == []
     assert fake_modal.images == []
     assert fake_modal.configured_remote_calls == []
@@ -1995,7 +2057,19 @@ def test_launch_upload_failure_records_failure_code_without_freeing_id(fake_moda
         module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
 
 
-def test_lookup_helpers_chain_unexpected_errors(fake_modal):
+@pytest.mark.parametrize("phase", ["from-name", "hydrate"])
+@pytest.mark.parametrize("error_type", [
+    RuntimeError,
+    PermissionError,
+    OSError,
+    KeyError,
+    PermissionDeniedError,
+    ServiceError,
+    type("NotFoundError", (Exception, ), {}),
+    type("FakeNotFoundError", (Exception, ), {}),
+])
+def test_lookup_helpers_chain_unexpected_errors(fake_modal, phase, error_type):
+    """SDK exception identity, not a lookalike name, determines volume absence."""
     launch = _import_run_modal()
     artifacts = _import_artifacts()
 
@@ -2010,21 +2084,38 @@ def test_lookup_helpers_chain_unexpected_errors(fake_modal):
         launch._lookup_named(BoomFactory, mrl.VOLUME_NAME, missing="artifact volume is missing")
     assert launch_info.value.__cause__ is None
 
+    error = error_type("volume backend exploded")
+
     class BoomModal:
 
         class Volume:
 
             @staticmethod
             def from_name(name, create_if_missing=False):
-                del name, create_if_missing
-                raise RuntimeError("volume backend exploded")
+                assert (name, create_if_missing) == (mrl.VOLUME_NAME, False)
+                if phase == "from-name":
+                    raise error
+                return SimpleNamespace(hydrate=hydrate)
 
-    with pytest.raises(RuntimeError, match="volume backend exploded") as artifact_info:
-        artifacts.lookup_volume(BoomModal)
+    def hydrate():
+        raise error
+
+    with pytest.raises(error_type, match="volume backend exploded") as artifact_info:
+        artifacts.collect_status("ok-id", modal_module=BoomModal)
+    assert artifact_info.value is error
     assert artifact_info.value.__cause__ is None
 
 
-def test_corrupt_volume_json_is_validation_error(fake_modal):
+@pytest.mark.parametrize("consumer", ["status", "backfill", "download"])
+@pytest.mark.parametrize("phase,error_type", [
+    *[(phase, error_type) for phase in ("call", "midway")
+      for error_type in (PermissionError, OSError, KeyError, PermissionDeniedError, ServiceError,
+                         RuntimeError)],
+    ("midway", FileNotFoundError),
+])
+def test_artifact_read_errors_preserve_diagnostics(fake_modal, tmp_path, monkeypatch, consumer,
+                                                   phase, error_type):
+    """Read failures reach status/backfill and roll back staged downloads."""
     module = _import_artifacts()
     volume = _named_volume(fake_modal)
     volume.files["runs/ok-id/STATUS.json"] = b"{not-json"
@@ -2034,6 +2125,35 @@ def test_corrupt_volume_json_is_validation_error(fake_modal):
     volume.files["runs/ok-id/reservation.json"] = b'{"created_at":"not-a-timestamp"}'
     with pytest.raises(mrl.ValidationError):
         module.collect_status("ok-id", now=_aware())
+    volume.files.clear()
+    volume.files["runs/ok-id/a-first.txt"] = b"preserve atomic rollback"
+    volume.files["runs/ok-id/b-broken.txt"] = b"unreadable"
+    error = error_type("read failure")
+    original_read = volume.read_file
+
+    def broken_iterator():
+        if phase == "midway":
+            yield b"partial"
+        raise error
+
+    def broken_read(path):
+        if path == "runs/ok-id/a-first.txt":
+            return original_read(path)
+        if phase == "call":
+            raise error
+        return broken_iterator()
+
+    monkeypatch.setattr(volume, "read_file", broken_read)
+    with pytest.raises(error_type, match="read failure") as info:
+        if consumer == "status":
+            module.collect_status("ok-id", now=_aware())
+        elif consumer == "backfill":
+            _import_backfill().backfill_sidecar("ok-id", now=_aware())
+        else:
+            module.download_run("ok-id", dest_root=tmp_path)
+    assert info.value is error
+    assert fake_modal.batch_upload_calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 # ── Client-side sidecar backfill ───────────────────────────────────────────
