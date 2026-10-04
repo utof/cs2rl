@@ -123,9 +123,10 @@ trainer rollouts, learning loops and checkpoint continuation carry `training`;
 expensive non-training campaigns, native builds and fresh-process checks use `slow`.
 Some training tests retain `slow` as well: `-m training` selects them together.
 
-At this selection change, collection is 1948 fast, 57 training and 65 extended
-non-training cases; the complete command collects 2070 (2063 original cases plus
-seven selection regressions). The tiers are disjoint and their union is complete.
+At this combined selection and source-reuse change, collection is 1949 fast,
+57 training and 65 extended non-training cases; the complete command collects
+2071 (2063 original cases plus seven selection regressions and one parser-freshness
+regression). The tiers are disjoint and their union is complete.
 The fast and complete `tests` invocations both retain the expected performance-smoke
 opt-in skip; naming its file explicitly still opts in. Counts describe this revision
 and will change as tests are added. Deselection omits real coverage; it is not a skip
@@ -146,7 +147,7 @@ Broad selections use 2 pytest-xdist workers (`-n 2`), with the complete suite in
 - **The guards.** The session-end guards in `tests/conftest.py` (one module object per file, the namespace guard) relay each worker's facts to the controller, so they hold under `-n`. Their `-n 2` tests need pytest-xdist in the environment: run `uv sync --all-groups --inexact` in the main checkout, or they fail with that remedy.
 - **One complete session.** The four files that used to run each alone (`tests/env/test_arena_duel.py`, `tests/env/c/test_binding.py`, `tests/train/test_pitch_pin.py`, `tests/train/test_train_cli.py`) run inside the complete `-n 2` session. The recorded reason for "each alone" (cold vis-cache orphans, #251/#254) is closed. The historical 7 GiB available-memory cutoff was a conservative launch estimate, not measured suite usage. Later native accounting measured 3.801693 GiB charged memory peak and a separate 0.684212 GiB swap peak in one full run; these are not a reusable launch requirement or total host/GPU usage. One hazard remains: a cold vis cache. Copy the `vis_cache*.npy` files from the main checkout's `src/cs2rl/` into a fresh worktree before any test run.
 
-The latest historical complete run after PR #346 reported 2062 passed and one expected
+The complete validation run for PR #346 reported 2062 passed and one expected
 skip in 735.94 s. The unmatched slowdown investigation is owner-deferred in
 [#347](https://github.com/utof/cs2rl/issues/347); selection alone establishes no controlled
 whole-suite speedup. Preserve workloads and timeouts when choosing a tier.
