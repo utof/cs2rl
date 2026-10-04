@@ -112,330 +112,129 @@ def _advance_to_building(run_root, attempt_id="attempt-a", *, lock):
                                    lock=lock)
 
 
-def _training_kwargs(tmp_path: Path, **overrides) -> dict[str, Any]:
-    """execute_training_attempt's keyword arguments, from flat overrides, run_root in BUILDING.
+def _training_kwargs(tmp_path: Path, *, prepared: core.PreparedSource) -> dict[str, Any]:
+    """Fixed safe attempt setup; callers edit the native collaborators directly.
 
-    Call sites pass flat keys (`child=`, `now=`, `killpg=`, ...); this
-    assembles them into the collaborators the attempt takes (gh#163 W5):
-    `attempt` (an AttemptContext over a commit-only Volume and a Clock),
-    `prepared`, `registry`, `process` (a ProcessControl) and `log_sink`, plus
-    `manifest` and `timeout` only when overridden, so an absent one keeps the
-    attempt's own default. The private keys `_launches` (the default spawn's
-    record), `_child` and `_kills` (the default killpg's record, `(pgid, sig)`
-    pairs) must be popped before the call: `_consume_training_kwargs` pops all
-    three, and a test that pops by hand pops each.
-
-    SAFETY: `process` ALWAYS has fake `spawn`, `getpgid` and `killpg`. `spawn`
-    records and returns `child`; `getpgid` is the identity; `killpg` only
-    records, into `_kills`. `install_signal` is NOT always a fake: it is the
-    override `signal_signal` or the real `signal.signal`, which the real-SIGTERM
-    test needs; it installs only the attempt's own handlers, and `release`
-    restores the previous ones. So nothing built here reaches a real process
-    group, and a test that drops `process` from the result meets the
-    tests/conftest.py tripwire instead of the real functions (only
-    `test_process_control_tripwire_guards_the_resolution_path` does so, on
-    purpose). The default child has FakeChild's default pid, which
-    tests/conftest.py checks once per session is not the session's own process
-    group: the guard refuses that group, so a `kills == []` here would pass
-    without testing anything.
-
-    Every known key is taken with `overrides.pop`, and a leftover raises
-    TypeError: a misspelt or retired key (`start_heartbeat`) stays loud, as it
-    was when the flat dict went straight to the attempt. The mapping from key
-    to field is hand-written, so `test_training_kwargs_routes_every_override`
-    checks that every key a call site passes reaches its field; a key popped
-    here and then dropped fails there instead of quietly testing the default.
-    The `child` and `prepared` defaults are built only when not overridden, so
-    an override makes the builder build no unused FakeChild or `src/`. The
-    result is typed `dict[str, Any]` because tests reach test-double members
-    through it and store replacements into it (`kwargs["process"] =
-    dataclasses.replace(kwargs["process"], spawn=...)`).
+    Pass the prepared source explicitly so no unused source tree is created.
+    The default child is made only when the recording fake spawn is consumed.
+    Spawn and killpg record, getpgid is the identity; install_signal remains
+    real signal.signal for the real-SIGTERM test, which restores its handlers.
+    Optional production arguments are absent and are supplied directly by tests.
     """
-    known = ("child", "commit", "getpgid", "killpg", "log_sink", "manifest", "now", "prepared",
-             "signal_signal", "sleep", "timeout", "wait")
-    given = {key: overrides.pop(key) for key in known if key in overrides}
-    if overrides:
-        raise TypeError(f"unknown override(s): {sorted(overrides)}")
     run_root = tmp_path / "run"
     run_root.mkdir(exist_ok=True)
     lock = threading.Lock()
     _advance_to_building(run_root, lock=lock)
-    child = given["child"] if "child" in given else FakeChild(stdout=b"ok\n")
     launches: list[tuple[tuple, dict]] = []
     kills: list[tuple[int, int]] = []
 
     def default_factory(*args, **kwargs):
         launches.append((args, kwargs))
-        return child
+        return FakeChild(stdout=b"ok\n")
 
     class Volume:
-        """Commit-only: the attempt commits the Volume and never reloads it."""
+        """Commit-only: reload would discard uncommitted training state."""
 
-        def __init__(self, commit):
-            self.commit = commit
+        def commit(self):
+            return None
 
         def reload(self):
             raise RuntimeError("training must not reload the Volume")
 
-    process = training.ProcessControl(
-        spawn=default_factory,
-        getpgid=given.get("getpgid", lambda pid: pid),
-        killpg=given.get("killpg", lambda pgid, sig: kills.append((pgid, sig))),
-        install_signal=given.get("signal_signal", signal.signal),
+    return {
+        "attempt":
+        core.AttemptContext(
+            attempt_id="attempt-a",
+            run_root=run_root,
+            lock=lock,
+            volume=Volume(),
+            clock=core.Clock(now=_aware, sleep=lambda _seconds: None),
+        ),
+        "prepared":
+        prepared,
+        "registry":
+        FakeRegistry(),
+        "process":
+        training.ProcessControl(
+            spawn=default_factory,
+            getpgid=lambda pid: pid,
+            killpg=lambda pgid, sig: kills.append((pgid, sig)),
+            install_signal=signal.signal,
+        ),
+        "log_sink":
+        io.StringIO(),
+    }
+
+
+def test_training_setup_keeps_defaults_and_rejects_flat_overrides(tmp_path, monkeypatch):
+    """Fixed setup is lazy; native field edits do not need a second input vocabulary."""
+    prepared = core.PreparedSource(
+        source_dir=tmp_path / "provided-source",
+        child_env={"PATH": "/usr/bin"},
+        train_command=["/nonexistent/test-fake-spawn-only"],
+        heartbeat=_noop_heartbeat(),
+        config_hash="d" * 64,
     )
-    clock = core.Clock(
-        now=given.get("now", lambda: _aware()),
-        sleep=given.get("sleep", lambda _seconds: None),
-        wait=given.get("wait", core._event_wait),
-    )
-    attempt = core.AttemptContext(
-        attempt_id="attempt-a",
-        run_root=run_root,
-        lock=lock,
-        volume=Volume(given.get("commit", lambda: None)),
-        clock=clock,
-    )
-    kwargs: dict[str, Any] = {
-        "attempt": attempt,
-        "prepared": given["prepared"] if "prepared" in given else _prepared_source(tmp_path),
-        "registry": FakeRegistry(),
-        "process": process,
-        "log_sink": given.get("log_sink", io.StringIO()),
-    }
-    kwargs.update({key: given[key] for key in ("manifest", "timeout") if key in given})
-    kwargs["_launches"] = launches
-    kwargs["_child"] = child
-    kwargs["_kills"] = kills
-    return kwargs
+    creations = []
+    original_child = FakeChild
 
+    def recording_child(**kwargs):
+        creations.append("spawn")
+        return original_child(**kwargs)
 
-def test_training_kwargs_routes_every_override(tmp_path):
-    """Every flat key a call site passes to `_training_kwargs` reaches the field the attempt reads.
-
-    gh#163 W5. The builder assembles flat overrides into collaborators by
-    hand-written code, and several tests assert that something is ABSENT from
-    a recorder they injected (`kills == []`, `sleeps == []`); such an
-    assertion goes vacuous, still green, if the builder stops routing its key.
-    So, both ways:
-      * the keys call sites pass, enumerated by AST over the modal test files,
-        must equal the keys of `routes`. A call is read through the bare name,
-        an attribute `x._training_kwargs`, or an `import ... as` or plain
-        `name = ...` alias. A key a call site passes that `routes` lacks fails,
-        and so does a `routes` entry that no call site passes;
-      * each key, passed as a sentinel, must come back by identity at the
-        field `routes` names (the collaborator field that replaced the flat
-        key). No key is converted. One route is weaker than the rest:
-        `child` is read back from the builder's own echo `_child`, not from
-        what `process.spawn` returns, because calling the spawn factory here
-        would run a builder fake (see SAFETY). A builder whose spawn returned
-        some other child would pass this test; the attempt tests that assert
-        on their own child fail instead.
-    A call site whose keys cannot be read statically (a `**` splat, a second
-    positional argument) fails too, and so does any other reference to the
-    builder: its name loaded anywhere but as a callee or a plain alias's value
-    (`functools.partial(_training_kwargs, ...)`, a tuple assignment), or the
-    name as a string (`getattr(module, "_training_kwargs")`). RESIDUAL: a name
-    computed at run time (a concatenated string, `vars()` with a variable key)
-    is not seen. This test's own calls and strings are not call sites.
-
-    SAFETY: the sentinels land in a ProcessControl and a Clock that are built
-    and read back, never called; the builder's own recording fakes are never
-    called here either. A builder that pops `sleep` and then drops it is
-    caught here (and by the watcher tests that pass `sleep=`), not by the
-    grace-period test, whose `15.0 not in hooks["slept"]` holds either way: a
-    FakeChild has `wait`, so the grace period never reaches `sleep`.
-
-    THE PLANTS are synthetic call sites, parsed and never run, each passing an
-    unmapped key through one spelling: each must fail the key equality or be
-    reported as a problem, or the enumeration would not be evidence. Keep
-    `routes` and the plants INSIDE this function: a module-level name in this
-    file is a governed seam name and moves GOVERNED_NAME_COUNT
-    (tests/modal/test_modal_packaging.py). The enumerator (`last_name`,
-    `call_site_keys`) is duplicated in `test_preflight_kwargs_routes_every_override`
-    (tests/modal/test_modal_preflight.py) for the same reason, so this test asserts
-    the two copies are AST-equal (`ast.dump`, docstrings included): change
-    both together, or this goes red. A planted one-token edit of the other
-    copy must make them differ, or the comparison would not be evidence.
-    """
-    routes = {
-        "child": lambda built: built["_child"],
-        "commit": lambda built: built["attempt"].volume.commit,
-        "getpgid": lambda built: built["process"].getpgid,
-        "killpg": lambda built: built["process"].killpg,
-        "log_sink": lambda built: built["log_sink"],
-        "manifest": lambda built: built["manifest"],
-        "now": lambda built: built["attempt"].clock.now,
-        "prepared": lambda built: built["prepared"],
-        "signal_signal": lambda built: built["process"].install_signal,
-        "sleep": lambda built: built["attempt"].clock.sleep,
-        "timeout": lambda built: built["timeout"],
-        "wait": lambda built: built["attempt"].clock.wait,
-    }
-    builder = "_training_kwargs"
-    this_test = "test_training_kwargs_routes_every_override"
-
-    def last_name(expr):
-        """The callee spelling a call site is matched on: a bare name, or the last attribute."""
-        if isinstance(expr, ast.Name):
-            return expr.id
-        if isinstance(expr, ast.Attribute):
-            return expr.attr
-        return None
-
-    def call_site_keys(sources):
-        """({key: [file:line, ...]}, problems) over every builder call outside this test.
-
-        A reference to the builder that is not read as a call (see the
-        docstring above) is a problem, so a spelling this cannot read fails
-        rather than hiding its keys.
-        """
-        keys, problems = {}, []
-        for rel, text in sources.items():
-            tree = ast.parse(text)
-            spellings = {builder}
-            # ids of the loads a spelling may occupy: callees and plain alias values
-            read = set()
-            for node in ast.walk(tree):
-                if isinstance(node, ast.ImportFrom):
-                    spellings |= {
-                        alias.asname
-                        for alias in node.names if alias.name == builder and alias.asname
-                    }
-                elif isinstance(node, ast.Assign) and last_name(node.value) == builder:
-                    spellings |= {t.id for t in node.targets if isinstance(t, ast.Name)}
-                    read.add(id(node.value))
-            own = {
-                id(node)
-                for top in tree.body if isinstance(top, ast.FunctionDef) and top.name == this_test
-                for node in ast.walk(top)
-            }
-            for node in ast.walk(tree):
-                if (not isinstance(node, ast.Call) or last_name(node.func) not in spellings
-                        or id(node) in own):
-                    continue
-                read.add(id(node.func))
-                where = f"{rel}:{node.lineno}"
-                if len(node.args) != 1 or any(k.arg is None for k in node.keywords):
-                    problems.append(f"{where} {ast.unparse(node)[:100]}")
-                for keyword in node.keywords:
-                    if keyword.arg is not None:
-                        keys.setdefault(keyword.arg, []).append(where)
-            for node in ast.walk(tree):
-                if isinstance(node, (ast.Name, ast.Attribute)):
-                    stray = last_name(node) in spellings and isinstance(node.ctx, ast.Load)
-                elif isinstance(node, ast.Constant):
-                    stray = node.value == builder
-                else:
-                    continue
-                if stray and id(node) not in read and id(node) not in own:
-                    problems.append(f"{rel}:{node.lineno} not a call: {ast.unparse(node)[:100]}")
-        return keys, problems
-
-    sources = {
-        path.relative_to(ROOT).as_posix(): path.read_text(encoding="utf-8")
-        for pattern in ("test_modal_*.py", "modal_test_helpers.py",
-                        "modal_patch_binding_campaign.py")
-        for path in sorted((ROOT / "tests").rglob(pattern))
-    }
-    assert {"tests/modal/test_modal_training.py",
-            "tests/modal/test_modal_patch_bindings.py"} <= set(sources), sorted(sources)[:5]
-
-    mirror_file = "tests/modal/test_modal_preflight.py"
-    mirror_test = "test_preflight_kwargs_routes_every_override"
-
-    def enumerator_dumps(text, test_name):
-        """{name: ast.dump} of the enumerator's two functions nested in `test_name`."""
-        test = next(top for top in ast.parse(text).body
-                    if isinstance(top, ast.FunctionDef) and top.name == test_name)
-        return {
-            node.name: ast.dump(node)
-            for node in test.body
-            if isinstance(node, ast.FunctionDef) and node.name in ("last_name", "call_site_keys")
-        }
-
-    ours = enumerator_dumps(sources["tests/modal/test_modal_training.py"], this_test)
-    assert set(ours) == {"last_name", "call_site_keys"}, sorted(ours)
-    assert enumerator_dumps(sources[mirror_file], mirror_test) == ours, (
-        f"the enumerator in {mirror_file}::{mirror_test} is no longer AST-equal to this test's "
-        "`last_name`/`call_site_keys`: change both copies together")
-    anchor = "if len(node.args) != 1 or"
-    assert sources[mirror_file].count(anchor) == 1, f"plant anchor {anchor!r} is not unique"
-    planted_mirror = sources[mirror_file].replace(anchor, "if len(node.args) != 2 or")
-    assert enumerator_dumps(planted_mirror, mirror_test) != ours, (
-        "a one-token edit of the other copy left the two enumerators equal, so the comparison "
-        "above is not evidence")
-
-    keys, problems = call_site_keys(sources)
-    assert problems == [], (
-        f"call sites whose override keys cannot be read statically: {problems}. Call the "
-        "builder by its name, an attribute or a plain alias, and pass every override as a "
-        "keyword, so this test can check that it is routed")
-    unrouted = sorted(set(keys) - set(routes))
-    unused = sorted(set(routes) - set(keys))
-    assert not unrouted and not unused, (
-        f"call sites pass {unrouted} ({ {key: keys[key] for key in unrouted} }), which "
-        f"`routes` does not map, and `routes` maps {unused}, which no call site passes. A new "
-        "key needs a field in `_training_kwargs` and an entry here; a key nobody passes any "
-        "more comes out of both")
-
-    plants = {
-        "the bare name":
-        "_training_kwargs(tmp_path, start_heartbeat=f)\n",
-        "an attribute":
-        "training_tests._training_kwargs(tmp_path, start_heartbeat=f)\n",
-        "an import alias":
-        ("from tests.modal.test_modal_training import _training_kwargs as build\n"
-         "build(tmp_path, start_heartbeat=f)\n"),
-        "an assignment alias":
-        "build = _training_kwargs\nbuild(tmp_path, start_heartbeat=f)\n",
-        "functools.partial":
-        "build = functools.partial(_training_kwargs, start_heartbeat=f)\nbuild(tmp_path)\n",
-        "getattr by name":
-        "getattr(training_tests, '_training_kwargs')(tmp_path, start_heartbeat=f)\n",
-        "a tuple-assignment alias":
-        "build, _ = _training_kwargs, None\nbuild(tmp_path, start_heartbeat=f)\n",
-    }
-    for plant, source in plants.items():
-        planted, planted_problems = call_site_keys({**sources, "tests/test_modal_plant.py": source})
-        assert planted_problems or set(planted) != set(routes), (
-            f"a call site passing an unmapped key through {plant} left the key sets equal and "
-            "reported no problem, so the enumeration cannot see that spelling and its green is "
-            "not evidence")
-    _, splat = call_site_keys({"tests/test_modal_plant.py": "_training_kwargs(tmp_path, **k)\n"})
-    assert splat, "a `**` splat call site was not reported, so its keys would go unchecked"
-
-    sentinels: dict[str, object] = {key: object() for key in routes}
-    built = _training_kwargs(tmp_path, **sentinels)
-    assert set(built) == {
-        "attempt", "prepared", "registry", "process", "log_sink", "manifest", "timeout",
-        "_launches", "_child", "_kills"
-    }, sorted(built)
-    for key, route in routes.items():
-        assert route(built) is sentinels[key], f"{key} does not reach its field"
-    # A directory of its own, so a builder that stopped raising would build there and fail on
-    # DID NOT RAISE, rather than on colliding with the build above.
-    leftover = tmp_path / "leftover"
-    leftover.mkdir()
-    with pytest.raises(TypeError, match=r"unknown override\(s\): \['start_heartbeat'\]"):
-        _training_kwargs(leftover, start_heartbeat=_noop_heartbeat)
+    monkeypatch.setattr(sys.modules[__name__], "FakeChild", recording_child)
+    kwargs = _training_kwargs(tmp_path, prepared=prepared)
+    assert set(kwargs) == {"attempt", "prepared", "registry", "process", "log_sink"}
+    assert kwargs["prepared"] is prepared
+    assert not (tmp_path / "src").exists()
+    assert creations == []
+    # The optional production inputs remain omitted; explicitly supplying None is
+    # still distinct in the call itself, without a builder filtering either value.
+    kwargs["manifest"] = None
+    kwargs["timeout"] = None
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(
+                                                kwargs["attempt"].clock,
+                                                now=lambda: _aware(minute=17)))
+    kwargs["process"] = dataclasses.replace(kwargs["process"], install_signal=lambda *_a: None)
+    mrl.execute_training_attempt(**kwargs)
+    assert creations == ["spawn"]
+    assert json.loads(
+        (kwargs["attempt"].run_root /
+         mrl.STATUS_FILENAME).read_text())["updated_at"] == _aware(minute=17).isoformat()
+    # Dynamic keyword mappings deliberately exercise Python's runtime rejection.
+    invalid_setup: dict[str, Any] = {"prepared": prepared, "sleep": lambda _seconds: None}
+    with pytest.raises(TypeError, match="unexpected keyword argument 'sleep'"):
+        _training_kwargs(tmp_path, **invalid_setup)
+    invalid_attempt: dict[str, Any] = {**kwargs, "start_heartbeat": _noop_heartbeat}
+    with pytest.raises(TypeError, match="unexpected keyword argument 'start_heartbeat'"):
+        mrl.execute_training_attempt(**invalid_attempt)
 
 
 def test_training_child_starts_in_new_session_without_shell(tmp_path):
-    kwargs = _training_kwargs(tmp_path)
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
     kwargs["prepared"].child_env = commands.build_child_env({
         "PATH":
         "/usr/bin",
         "PYTHONPATH":
         "/opt/app:/opt/app/scripts:/root:/checkout/src",
     })
-    launches = kwargs.pop("_launches")
-    kwargs.pop("_child")
-    kills = kwargs.pop("_kills")
+    launches = []
+    kills = []
+
+    def spawn(*args, **options):
+        launches.append((args, options))
+        return FakeChild(stdout=b"ok\n")
+
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=spawn,
+                                            killpg=lambda pgid, sig: kills.append((pgid, sig)))
     prepared = kwargs["prepared"]
     mrl.execute_training_attempt(**kwargs)
     assert len(launches) == 1
     args, kw = launches[0]
     command = args[0] if args else kw.get("args")
+    assert command is not None
     assert list(command) == prepared.train_command
     assert kw["start_new_session"] is True
     assert kw["shell"] is False
@@ -470,10 +269,9 @@ def test_stdout_stderr_are_teed_to_log_sink_without_truncation(tmp_path):
             return "".join(self.parts)
 
     sink = CaptureSink()
-    kwargs = _training_kwargs(tmp_path, child=child, log_sink=sink)
-    kwargs.pop("_launches")
-    kwargs.pop("_child")
-    kwargs.pop("_kills")
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=lambda *_a, **_k: child)
+    kwargs["log_sink"] = sink
     (kwargs["attempt"].run_root / "train.log").write_text("already here\n")
     mrl.execute_training_attempt(**kwargs)
     text = sink.getvalue()
@@ -491,14 +289,15 @@ def test_stdout_stderr_are_teed_to_log_sink_without_truncation(tmp_path):
 def test_same_attempt_redelivery_invokes_subprocess_once(tmp_path):
     commits: list[str] = []
     child = FakeChild(stdout=b"first-delivery\n")
-    kwargs = _training_kwargs(
-        tmp_path,
-        child=child,
-        commit=lambda: commits.append("commit"),
-    )
-    launches = kwargs.pop("_launches")
-    kwargs.pop("_child")
-    kwargs.pop("_kills")
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    launches = []
+
+    def spawn(*args, **options):
+        launches.append((args, options))
+        return child
+
+    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=spawn)
+    kwargs["attempt"].volume.commit = lambda: commits.append('commit')
     first = mrl.execute_training_attempt(**kwargs)
     assert first != mrl.REDELIVERED
     assert len(launches) == 1
@@ -533,13 +332,6 @@ class _FakeClock:
         with self._lock:
             self._now += timedelta(seconds=seconds)
             return self._now
-
-
-def _consume_training_kwargs(kwargs):
-    kwargs.pop("_launches", None)
-    kwargs.pop("_child", None)
-    kwargs.pop("_kills", None)
-    return kwargs
 
 
 def _run_attempt_in_thread(kwargs, *, daemon: bool = False):
@@ -579,14 +371,13 @@ def test_heartbeat_commits_every_60s_while_training(tmp_path):
         clock.advance(seconds)
         return event.wait(0.01)
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            now=clock.now,
-            wait=wait,
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=lambda *_a, **_k: child)
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      now=clock.now,
+                                                                      wait=wait))
+    kwargs["attempt"].volume.commit = commit
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
         deadline = time.monotonic() + 5.0
@@ -627,8 +418,12 @@ def test_stable_checkpoint_gets_sidecar_and_joint_commit(tmp_path):
             settle_seen.set()
             _write_policy_checkpoint(kwargs["attempt"].run_root, 2.0)
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(tmp_path, child=child, commit=commit, sleep=fake_sleep))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=lambda *_a, **_k: child)
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=fake_sleep))
+    kwargs["attempt"].volume.commit = commit
     ckpt = _write_policy_checkpoint(kwargs["attempt"].run_root, 1.0)
     first_digest = core.sha256_file(ckpt)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
@@ -661,7 +456,11 @@ def test_torn_checkpoint_does_not_publish_sidecar(tmp_path):
         if seconds >= 1.0:
             settle_calls.set()
 
-    kwargs = _consume_training_kwargs(_training_kwargs(tmp_path, child=child, sleep=fake_sleep))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=lambda *_a, **_k: child)
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=fake_sleep))
     ckpt_dir = kwargs["attempt"].run_root / "checkpoints"
     ckpt_dir.mkdir(parents=True)
     (ckpt_dir / "dust2_policy.pt").write_bytes(b"torn-not-a-checkpoint")
@@ -697,15 +496,15 @@ def test_interrupt_publishes_sidecar_after_unstable_live_saves(tmp_path):
             rewrites["n"] += 1
             _write_policy_checkpoint(kwargs["attempt"].run_root, float(rewrites["n"]))
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=fake_sleep,
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=fake_sleep))
     ckpt = _write_policy_checkpoint(kwargs["attempt"].run_root, 0.0)
     sidecar = kwargs["attempt"].run_root / "checkpoints" / "dust2_policy.pt.meta.json"
 
@@ -820,15 +619,13 @@ def test_interrupt_without_publishable_checkpoint_writes_a_reason_file(tmp_path,
         commits.append((kwargs["attempt"].run_root / "checkpoints" /
                         core.CHECKPOINT_PUBLISH_REASON_NAME).is_file())
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"].volume.commit = commit
     _write_policy_checkpoint(kwargs["attempt"].run_root, 1.0)
     _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
 
@@ -869,15 +666,13 @@ def test_interrupt_commits_status_even_if_prebuilt_load_hangs(tmp_path, monkeypa
             return
         commits.append(json.loads(status_path.read_text())["status"])
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"].volume.commit = commit
     _write_policy_checkpoint(kwargs["attempt"].run_root, 1.0)
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
@@ -999,6 +794,7 @@ def _signal_hooks(child, *, release_on=None):
     originals = {signal.SIGINT: object(), signal.SIGTERM: object()}
     installed: dict[int, object] = dict(originals)
     kills: list[int] = []
+    groups: list[int] = []
     slept: list[float] = []
 
     def fake_signal(sig, handler):
@@ -1007,6 +803,7 @@ def _signal_hooks(child, *, release_on=None):
         return previous
 
     def fake_getpgid(pid):
+        groups.append(pid)
         return pid
 
     def fake_killpg(_pgid, sig):
@@ -1021,6 +818,7 @@ def _signal_hooks(child, *, release_on=None):
         "originals": originals,
         "installed": installed,
         "kills": kills,
+        "groups": groups,
         "slept": slept,
         "signal_signal": fake_signal,
         "getpgid": fake_getpgid,
@@ -1189,15 +987,15 @@ def test_sigint_and_sigterm_share_cleanup_and_restore_handlers(tmp_path):
         order.append(
             json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())["status"])
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     kwargs["prepared"] = _prepared_source(tmp_path,
                                           heartbeat=SimpleNamespace(stop_and_join=stop_and_join))
     seen: list[bool] = []
@@ -1234,15 +1032,15 @@ def test_keyboard_interrupt_uses_same_cleanup(tmp_path):
 
     child.wait = exploding_wait
     hooks = _signal_hooks(child)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     result = mrl.execute_training_attempt(**kwargs)
     assert result != mrl.REDELIVERED
     assert hooks["installed"][signal.SIGINT] is hooks["originals"][signal.SIGINT]
@@ -1255,15 +1053,15 @@ def test_keyboard_interrupt_uses_same_cleanup(tmp_path):
 def test_child_receives_term_then_kill_after_grace(tmp_path):
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child, release_on=signal.SIGKILL)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
         _handler, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
@@ -1274,6 +1072,7 @@ def test_child_receives_term_then_kill_after_grace(tmp_path):
         thread.join(timeout=2.0)
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
     assert training.TERM_GRACE_SECONDS in child.wait_timeouts
+    assert hooks["groups"] == [child.pid]
 
 
 def test_cleanup_closes_log_before_final_commit(tmp_path):
@@ -1301,17 +1100,17 @@ def test_cleanup_closes_log_before_final_commit(tmp_path):
         status_path = kwargs["attempt"].run_root / mrl.STATUS_FILENAME
         events.append(f"commit:{json.loads(status_path.read_text())['status']}")
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            log_sink=RecordingSink(),
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
+    kwargs["attempt"].volume.commit = commit
+    kwargs["log_sink"] = RecordingSink()
     _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert "log_closed" in events
     assert events.index("log_closed") < events.index("commit:interrupted")
@@ -1339,17 +1138,17 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
             raise RuntimeError("volume commit failed")
         committed.append(payload)
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            now=lambda: _aware(),
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      now=lambda: _aware(),
+                                                                      sleep=hooks['sleep']))
+    kwargs["attempt"].volume.commit = commit
     boxed, _ = _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert len(boxed) == 1
     assert boxed[0] == training.TrainingAttemptResult(status=core.Status.INTERRUPTED,
@@ -1378,15 +1177,15 @@ def test_post_spawn_failure_kills_child_and_writes_terminal_status(tmp_path):
     # Opt-out (see `_SIGNAL_HOOKS_RELEASE_ALLOWLIST`): `child.poll()` below is
     # non-None only because the child dies at SIGKILL.
     hooks = _signal_hooks(child, release_on=signal.SIGKILL)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     (kwargs["attempt"].run_root / core.TRAIN_LOG_NAME).mkdir()
     with pytest.raises(OSError):
         mrl.execute_training_attempt(**kwargs)
@@ -1401,15 +1200,15 @@ def test_term_grace_is_deadline_not_mandatory_sleep(tmp_path):
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child, release_on=signal.SIGTERM)
     started = time.monotonic()
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     thread, finished, _boxed = _run_attempt_in_thread(kwargs)
     try:
         _handler, term_handler = _wait_until_handlers(hooks["installed"], hooks["originals"])
@@ -1503,15 +1302,15 @@ def test_interrupt_uses_sidecar_digest_and_skips_torch_hash(tmp_path, monkeypatc
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     run_root = kwargs["attempt"].run_root
     ckpt_dir = run_root / "checkpoints"
     ckpt_dir.mkdir()
@@ -1545,15 +1344,15 @@ def test_interrupt_without_sidecar_leaves_checkpoint_hash_null(tmp_path, monkeyp
     """
     child = FakeChild(hold=True)
     hooks = _signal_hooks(child)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     run_root = kwargs["attempt"].run_root
     ckpt_dir = run_root / "checkpoints"
     ckpt_dir.mkdir()
@@ -1628,17 +1427,17 @@ def test_publish_note_reaches_the_volume_in_the_right_commit(tmp_path, ending, a
 
         child.wait = exploding_wait
     hooks = _signal_hooks(child)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            timeout=timedelta(0) if ending == "timeout" else None,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
+    kwargs["attempt"].volume.commit = commit
+    kwargs["timeout"] = timedelta(0) if ending == 'timeout' else None
     if ending == "signal":
         _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     elif ending == "error":
@@ -1705,16 +1504,16 @@ def test_a_signal_inside_finalize_does_not_finalize_again(tmp_path):
         note = run_root / "checkpoints" / core.CHECKPOINT_PUBLISH_REASON_NAME
         commits.append((status, note.is_file()))
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            sleep=hooks["sleep"],
-            killpg=reentrant_killpg,
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=reentrant_killpg,
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
+    kwargs["attempt"].volume.commit = commit
     _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert nested == ["entered", "returned"]
     assert hooks["kills"] == [signal.SIGTERM, signal.SIGKILL]
@@ -1775,15 +1574,15 @@ def test_a_hung_heartbeat_does_not_strand_the_run_in_training(tmp_path, capsys, 
         expected = training.TrainingAttemptResult(status=core.Status.FAILED,
                                                   reason=training.REASON_INVALID_EVIDENCE,
                                                   exit_code=0)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     kwargs["prepared"] = _prepared_source(tmp_path,
                                           heartbeat=SimpleNamespace(stop_and_join=stop_and_join))
     run_root = kwargs["attempt"].run_root
@@ -1887,16 +1686,16 @@ def test_a_signal_while_taking_the_once_gate_returns_at_once(tmp_path, monkeypat
     monkeypatch.setattr(
         training, "threading",
         SimpleNamespace(Thread=threading.Thread, Event=threading.Event, Lock=_GateDouble))
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            commit=commit,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
+    kwargs["attempt"].volume.commit = commit
     thread, finished, boxed = _run_attempt_in_thread(kwargs, daemon=True)
     try:
         assert finished.wait(timeout=2.0), "the nested finalize deadlocked on the once-gate"
@@ -1984,15 +1783,15 @@ def test_finalize_kills_the_child_before_joining_the_tees(tmp_path, monkeypatch)
 
     monkeypatch.setattr(threading.Thread, "start", spy_start)
     monkeypatch.setattr(threading.Thread, "join", spy_join)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     run_root = kwargs["attempt"].run_root
     try:
         # `armed`: the attempt is in its wait loop, so start_tees is done.
@@ -2032,15 +1831,15 @@ def test_checkpoint_watcher_stops_before_terminal_status(tmp_path, monkeypatch):
 
     monkeypatch.setattr(*binding_target("attempt-watcher"), wrapped_start)
     monkeypatch.setattr(*binding_target("attempt-transition"), wrapped_transition)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     _interrupt_in_production_order(kwargs, child, hooks, signal.SIGINT)
     assert at_terminal == [("interrupted", True)]
     persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
@@ -2163,14 +1962,14 @@ def test_real_sigterm_in_tee_window_never_joins_unstarted_thread(tmp_path, monke
 
     monkeypatch.setattr(threading.Thread, "start", spy_start)
     monkeypatch.setattr(threading.Thread, "join", spy_join)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=child,
-            sleep=hooks["sleep"],
-            killpg=killpg_marking_finalize,
-            getpgid=hooks["getpgid"],
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=killpg_marking_finalize)
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      sleep=hooks['sleep']))
     run_root = kwargs["attempt"].run_root
     previous_term = signal.signal(signal.SIGTERM, lambda *_args: None)
     previous_int = signal.getsignal(signal.SIGINT)
@@ -4010,12 +3809,11 @@ def test_process_control_tripwire_guards_the_resolution_path(request,
     assert training.ProcessControl.system() is tripwire, (
         "ProcessControl.system() is not the tests/conftest.py tripwire's poisoned control, so "
         "the attempt below would reach the REAL spawn and killpg. Nothing was called.")
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(tmp_path,
-                         prepared=_prepared_source(
-                             tmp_path,
-                             train_command=["/nonexistent/cs2rl-tripwire-must-not-run"],
-                             heartbeat=_noop_heartbeat())))
+    kwargs = _training_kwargs(tmp_path,
+                              prepared=_prepared_source(
+                                  tmp_path,
+                                  train_command=['/nonexistent/cs2rl-tripwire-must-not-run'],
+                                  heartbeat=_noop_heartbeat()))
     kwargs.pop("process")
     with pytest.raises(process_control_tripwire_error, match="ProcessControl.spawn was"):
         mrl.execute_training_attempt(**kwargs)
@@ -4037,14 +3835,12 @@ def test_exit_zero_fails_when_completion_evidence_invalid(tmp_path):
         status_path = kwargs["attempt"].run_root / mrl.STATUS_FILENAME
         events.append(f"commit:{json.loads(status_path.read_text())['status']}")
 
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=FakeChild(returncode=0, stdout=b"done\n"),
-            commit=commit,
-            log_sink=RecordingSink(),
-            manifest=_make_manifest(),
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(
+        kwargs["process"], spawn=lambda *_a, **_k: FakeChild(returncode=0, stdout=b'done\n'))
+    kwargs["attempt"].volume.commit = commit
+    kwargs["manifest"] = _make_manifest()
+    kwargs["log_sink"] = RecordingSink()
     result = mrl.execute_training_attempt(**kwargs)
     assert result != mrl.REDELIVERED
     assert result.status is core.Status.FAILED
@@ -4061,12 +3857,10 @@ def test_exit_zero_fails_when_completion_evidence_invalid(tmp_path):
 
 def test_exit_zero_with_valid_evidence_completes(tmp_path):
     run_root, manifest, effective, ckpt = _minimal_completed_tree(tmp_path)
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            tmp_path,
-            child=FakeChild(returncode=0, stdout=b"done\n"),
-            manifest=manifest,
-        ))
+    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
+    kwargs["process"] = dataclasses.replace(
+        kwargs["process"], spawn=lambda *_a, **_k: FakeChild(returncode=0, stdout=b'done\n'))
+    kwargs["manifest"] = manifest
     result = mrl.execute_training_attempt(**kwargs)
     assert result.status is core.Status.COMPLETED
     assert result.reason is None
@@ -4083,12 +3877,10 @@ def test_exit_zero_with_valid_evidence_completes(tmp_path):
 def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
     dead_root = tmp_path / "dead"
     dead_root.mkdir()
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            dead_root,
-            child=FakeChild(returncode=3, stdout=b"dead\n"),
-            manifest=_make_manifest(),
-        ))
+    kwargs = _training_kwargs(dead_root, prepared=_prepared_source(dead_root))
+    kwargs["process"] = dataclasses.replace(
+        kwargs["process"], spawn=lambda *_a, **_k: FakeChild(returncode=3, stdout=b'dead\n'))
+    kwargs["manifest"] = _make_manifest()
     (kwargs["attempt"].run_root / "checkpoints").mkdir(exist_ok=True)
     (kwargs["attempt"].run_root / "checkpoints" / "dust2_policy_dead.pt").write_bytes(b"autopsy")
     dead = mrl.execute_training_attempt(**kwargs)
@@ -4103,18 +3895,18 @@ def test_dead_run_and_timeout_have_distinct_reasons(tmp_path):
     hooks = _signal_hooks(child)
     timeout_root = tmp_path / "timeout"
     timeout_root.mkdir()
-    kwargs = _consume_training_kwargs(
-        _training_kwargs(
-            timeout_root,
-            child=child,
-            now=clock.now,
-            timeout=timedelta(minutes=120),
-            sleep=hooks["sleep"],
-            killpg=hooks["killpg"],
-            getpgid=hooks["getpgid"],
-            signal_signal=hooks["signal_signal"],
-            manifest=_make_manifest(),
-        ))
+    kwargs = _training_kwargs(timeout_root, prepared=_prepared_source(timeout_root))
+    kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                            spawn=lambda *_a, **_k: child,
+                                            getpgid=hooks['getpgid'],
+                                            killpg=hooks['killpg'],
+                                            install_signal=hooks['signal_signal'])
+    kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                            clock=dataclasses.replace(kwargs["attempt"].clock,
+                                                                      now=clock.now,
+                                                                      sleep=hooks['sleep']))
+    kwargs["manifest"] = _make_manifest()
+    kwargs["timeout"] = timedelta(minutes=120)
     thread, finished, boxed = _run_attempt_in_thread(kwargs)
     try:
         _wait_until_handlers(hooks["installed"], hooks["originals"])

@@ -13,6 +13,8 @@ homes for installation commands and contributor recipes.
 | [Gotchas](gotchas.md) | Operational traps grounded in code and tests |
 | [ADRs](adr/README.md) | Accepted decisions and their historical context |
 | [Duplication postmortem](postmortem-2026-09-03-duplication-blindness.md) | Why diff-only reviews missed structural duplication |
+| [Training-test workload postmortem](postmortem-2026-10-04-training-test-workloads.md) | Smaller real controller workloads with effective failure controls |
+| [Architecture-refactor postmortem](postmortem-2026-10-04-architecture-refactors.md) | Ownership, checkpoint compatibility and limits of structural guards |
 | [July verification reconstruction](2026-07-06-adversarial-review-verification.md) | Current contracts behind historical finding references |
 
 Raw plans, logs, review traffic and session records stay private. Their local

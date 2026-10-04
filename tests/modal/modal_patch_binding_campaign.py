@@ -23,8 +23,11 @@ WHAT this module owns:
     out or leaves no usable JUnit evidence (`_run_probe` lists those cases).
 
 WHY it lives under tests/: it is test harness, not production code. Production
-never imports it, and the Modal image mounts only scripts/run_modal.py,
-scripts/modal_runner/*.py and the /opt/cs2rl build inputs.
+never imports it. scripts/run_modal.py builds the image with runner modules copied
+under /opt/app/scripts; native dependency setup copies pyproject.toml and uv.lock
+into the SDK-managed /.uv context. /opt/cs2rl/.venv is a compatibility
+symlink to /.uv/.venv. Training source arrives separately as a content-addressed
+archive.
 
 Run from the repository root (`test_patch_binding_campaign` is the checked-in
 caller): python -m tests.modal.modal_patch_binding_campaign --repo-root .
@@ -37,7 +40,11 @@ PITFALLS:
     importlib, concurrent.futures and typing, so importing `BINDING_SITES`
     (tests/modal/test_modal_packaging.py does) loads no runner module.
   * Children run `sys.executable -m pytest` from `repo_root` with
-    `-p no:cacheprovider`. `uv run` would depend on uv being on PATH and on the
+    `-p no:cacheprovider`, explicit timeout/xdist plugins and pytest11 autoload
+    disabled. The
+    synchronous observations need no other installed pytest11 plugins, so
+    native `--disable-plugin-autoload` avoids their repeated startup cost.
+    `uv run` would depend on uv being on PATH and on the
     venv's console-script shebang, and could re-sync the shared venv; the cache
     provider would write each child's lastfailed into the repository's
     .pytest_cache.
@@ -133,7 +140,8 @@ def _run_probe(repo_root, evidence_root, site, mode, label):
     try:
         result = subprocess.run(
             [
-                sys.executable, "-m", "pytest",
+                sys.executable, "-m", "pytest", "--disable-plugin-autoload", "-p", "pytest_timeout",
+                "-p", "xdist.plugin",
                 f"tests/modal/test_modal_patch_bindings.py::test_patch_binding_observation[{site}]",
                 "-q", "--tb=short", "-p", "no:cacheprovider", "-o", "junit_family=legacy",
                 f'--basetemp={directory / "pytest"}', f"--junitxml={report}"

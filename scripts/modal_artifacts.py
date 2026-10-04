@@ -66,30 +66,20 @@ def read_volume_file(volume: object, remote: str) -> bytes | None:
         rather than attempted — otherwise a wrong-API call would come back as
         an indistinguishable `None`. Callers that route through `_client_path`
         are already checked; this guard covers the ones that are not.
-      * The `list(...)` is inside the `try` on purpose: however
-        `volume.read_file` delivers its chunks, a part-way failure of one of
-        the caught types is converted here rather than at the caller. Only
-        those three types become `None`; anything else still propagates, which
-        is intended — an auth or transport error is not "no such object".
+      * The SDK maps a missing file to FileNotFoundError before yielding bytes.
+        Once any chunk arrives, a read failure is a failed transfer, not an
+        absent artifact. Permission, transport and other errors propagate.
     """
     if remote.startswith("/artifacts"):
         raise mrl.ValidationError(f"refusing mounted path as Volume client API: {remote}")
+    chunks: list[bytes] = []
     try:
-        chunks = list(volume.read_file(remote))
-    except (FileNotFoundError, OSError, KeyError):
+        chunks.extend(volume.read_file(remote))
+    except FileNotFoundError:
+        if chunks:
+            raise
         return None
     return b"".join(chunks)
-
-
-def _not_found_types(modal_mod: object) -> tuple[type[BaseException], ...]:
-    types: list[type[BaseException]] = [FileNotFoundError, KeyError]
-    not_found = getattr(getattr(modal_mod, "exception", None), "NotFoundError", None)
-    if isinstance(not_found, type) and issubclass(not_found, BaseException):
-        types.append(not_found)
-    extra = getattr(modal_mod, "NotFoundError", None)
-    if isinstance(extra, type) and issubclass(extra, BaseException):
-        types.append(extra)
-    return tuple(dict.fromkeys(types))
 
 
 def lookup_volume(modal_module: object | None = None):
@@ -103,23 +93,18 @@ def lookup_volume(modal_module: object | None = None):
     `modal_module` is the seam tests inject a fake through; production passes
     nothing and gets the real `modal`.
 
-    PITFALL: there is no single not-found class to catch. `_not_found_types`
-    looks for `NotFoundError` in two places on whichever module was passed
-    (`modal.exception` and `modal` itself), and a class-name fallback covers
-    the test fake's `FakeNotFoundError`. Anything not recognised is re-raised
-    untouched — do not widen this to a bare `except Exception: raise
-    ValidationError`, which would report an auth or network failure as a
-    missing Volume.
+    PITFALL: from_name returns a lazy handle. Explicit public hydration puts
+    missing-Volume translation at the lookup operation, before file APIs can
+    report a missing path. Only the SDK's NotFoundError means absent here;
+    permission, transport and unexpected failures retain their diagnostics.
     """
     modal_mod = modal if modal_module is None else modal_module
     try:
-        return modal_mod.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
-    except Exception as err:
-        if isinstance(err, _not_found_types(modal_mod)) or type(err).__name__ in {
-                "NotFoundError", "FakeNotFoundError"
-        }:
-            raise mrl.ValidationError("artifact volume is missing") from err
-        raise
+        volume = modal_mod.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
+        volume.hydrate()
+    except modal.exception.NotFoundError as err:
+        raise mrl.ValidationError("artifact volume is missing") from err
+    return volume
 
 
 class VolumeIndex:
@@ -251,9 +236,14 @@ def download_run(
         raise mrl.ValidationError(f"refusing to overwrite existing download: {dest}")
     volume = lookup_volume(modal_module)
     prefix = _client_path(mrl.RUNS_ROOT / run_id)
+    entries: list[object] = []
     try:
-        entries = list(volume.iterdir(prefix, recursive=True))
-    except Exception as err:
+        entries.extend(volume.iterdir(prefix, recursive=True))
+    except modal.exception.NotFoundError as err:
+        # A missing path before any entries is an absent run; partial listing
+        # failure must keep its original diagnosis and never publish a download.
+        if entries:
+            raise
         raise mrl.ValidationError(f"run not found: {run_id}") from err
     dest_root.mkdir(parents=True, exist_ok=True)
     staging = dest_root / f".{run_id}.tmp-{uuid.uuid4().hex}"

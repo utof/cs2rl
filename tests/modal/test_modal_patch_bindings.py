@@ -1,5 +1,6 @@
 """Deterministic, per-site observations of the real patch consumers."""
 import ast
+import dataclasses
 import inspect
 import json
 import os
@@ -14,7 +15,6 @@ from tests.conftest import REPO_ROOT
 from tests.modal.modal_patch_binding_campaign import BINDING_SITES, binding_target
 from tests.modal.modal_test_helpers import FakeChild, _aware, _noop_heartbeat
 from tests.modal.test_modal_training import (
-    _consume_training_kwargs,
     _prepared_source,
     _training_kwargs,
 )
@@ -291,13 +291,16 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
         child = FakeChild(returncode=2)
         sleeps = []
         waits = []
-        kwargs = _consume_training_kwargs(
-            _training_kwargs(tmp_path,
-                             child=child,
-                             signal_signal=lambda *args: None,
-                             sleep=sleeps.append,
-                             prepared=_prepared_source(tmp_path, heartbeat=_noop_heartbeat()),
-                             wait=lambda *call: waits.append(call)))
+        kwargs = _training_kwargs(tmp_path,
+                                  prepared=_prepared_source(tmp_path, heartbeat=_noop_heartbeat()))
+        kwargs["process"] = dataclasses.replace(kwargs["process"],
+                                                spawn=lambda *_a, **_k: child,
+                                                install_signal=lambda *args: None)
+        kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
+                                                clock=dataclasses.replace(
+                                                    kwargs["attempt"].clock,
+                                                    sleep=sleeps.append,
+                                                    wait=lambda *call: waits.append(call)))
         threading = training.threading
         monkeypatch.setattr(
             training, "threading",
@@ -360,9 +363,8 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
         # that polled would depend on timing. `waits` watches the attempt's
         # `Clock.wait`, which only the fallback heartbeat reads: the row hands
         # the attempt a prepared `_noop_heartbeat()`, so no fallback starts and
-        # the record stays empty. That absence is evidence only because
-        # `test_training_kwargs_routes_every_override` pins that the `wait=`
-        # override reaches `attempt.clock.wait`.
+        # the record stays empty. The heartbeat test in test_modal_training.py
+        # positively observes the same native Clock.wait injection at its consumer.
         assert (sleeps, child.wait_timeouts) == ([], []), "attempt rows must not poll"
         assert waits == [], "attempt rows must not start the fallback heartbeat"
     elif site == "client-mount":
@@ -375,7 +377,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
         pytest.fail(f"unknown binding site: {site}")
 
 
-@pytest.mark.slow                      # 7 pytest child sessions per binding site (~1 min)
+@pytest.mark.slow                      # Seven isolated child sessions per binding site.
 def test_patch_binding_campaign(tmp_path):
     """The executable instrument must report every original site and own bite.
 

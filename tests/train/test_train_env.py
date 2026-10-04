@@ -507,7 +507,7 @@ def test_target_entropy_schedule_applied():
     from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
     from tests._helpers.trainer_harness import _build_trainer_for_test
 
-    trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
+    trainer, cleanup = _build_trainer_for_test(num_envs=4, with_selfplay=True)
     try:
 
         expected_max_discrete = sum(math.log(n) for n in ACTION_HEAD_SIZES)

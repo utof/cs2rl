@@ -15,6 +15,7 @@ import importlib
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -25,6 +26,7 @@ from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 
 import pytest
+from modal.exception import NotFoundError, PermissionDeniedError, ServiceError
 
 from tests.conftest import REPO_ROOT
 
@@ -86,8 +88,8 @@ class FakeModal:
             Volume=self.Volume,
             Dict=self.Dict,
             Secret=self.Secret,
-            exception=SimpleNamespace(NotFoundError=FakeNotFoundError),
-            NotFoundError=FakeNotFoundError,
+            exception=SimpleNamespace(NotFoundError=NotFoundError),
+            NotFoundError=NotFoundError,
             __version__=self.__version__,
         )
 
@@ -147,7 +149,8 @@ class FakeModal:
                     if create_if_missing:
                         fake.volumes[name] = FakeVolume(fake, name)
                     else:
-                        raise FakeNotFoundError(f"Volume {name!r} not found")
+                        # Public SDK lookup is lazy; absence surfaces on hydration.
+                        return FakeVolume(fake, name)
                 return fake.volumes[name]
 
         return Volume
@@ -201,8 +204,8 @@ class FakeModal:
         return Secret
 
 
-class FakeNotFoundError(Exception):
-    """Stand-in for a missing named Modal object."""
+class FakeNotFoundError(NotFoundError):
+    """Legacy launcher double using the real SDK missing-resource base class."""
 
 
 class FakeImage:
@@ -216,6 +219,7 @@ class FakeImage:
         self.env_vars: dict[str, str] = {}
         self.local_files: list[tuple[str, str, bool]] = []
         self.commands: list[str] = []
+        self.uv_sync_calls: list[tuple[str, dict[str, object]]] = []
 
     @classmethod
     def from_registry(cls, tag: str, add_python: str | None = None, **kwargs):
@@ -233,6 +237,11 @@ class FakeImage:
 
     def pip_install(self, *packages: str):
         self.pips.extend(packages)
+        return self
+
+    def uv_sync(self, uv_project_dir: str, **kwargs):
+        """Record the app's public selection boundary; the SDK owns its implementation."""
+        self.uv_sync_calls.append((uv_project_dir, kwargs))
         return self
 
     def env(self, mapping: dict[str, str]):
@@ -309,8 +318,14 @@ class FakeVolume:
         self.commit_count = 0
         self.reject_next_upload = False
         self.iterdir_entries: list[object] | None = None
-        self.missing_prefix_exc: type[BaseException] | None = None
+        self.missing_prefix_exc: type[BaseException] | None = NotFoundError
         self.fail_prefix: str | None = None
+
+    def hydrate(self):
+        """Resolve a noncreating handle before file APIs, as the SDK does."""
+        if self.name not in self._fake.volumes:
+            raise NotFoundError(f"Volume {self.name!r} not found")
+        return self
 
     def _client_path(self, path) -> str:
         text = str(path)
@@ -322,6 +337,7 @@ class FakeVolume:
         return FakeBatchUpload(self, force)
 
     def read_file(self, path):
+        self.hydrate()
         key = self._client_path(path)
         self._fake.read_file_calls.append(key)
         if key not in self.files:
@@ -332,6 +348,7 @@ class FakeVolume:
         yield data
 
     def iterdir(self, path, *, recursive: bool = True):
+        self.hydrate()
         key = self._client_path(path)
         self._fake.iterdir_calls.append((key, recursive))
         if self.iterdir_entries is not None:
@@ -500,105 +517,43 @@ def test_base_function_has_no_static_named_object_dependency(fake_modal):
     assert mrl.REGISTRY_NAME == "cs2rl-training-run-registry"
 
 
-def _run_modal_image_reqs(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "modal_image_reqs.py"), *args],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-
-def _requirement_names(text: str) -> list[str]:
-    pins = [line for line in text.splitlines() if line.strip()]
-    assert pins
-    assert all("==" in line for line in pins)
-    return [line.split("==", 1)[0] for line in pins]
-
-
-def test_modal_image_reqs_from_repo_lock_includes_torch_numpy_not_pufferlib_or_modal():
-    result = _run_modal_image_reqs(str(ROOT / "uv.lock"))
-    names = _requirement_names(result.stdout)
-    assert names == sorted(names)
-    assert "torch" in names
-    assert "numpy" in names
-    assert "pufferlib" not in names
-    assert "cs2rl" not in names
-    assert "modal" not in names
-
-
-def test_modal_image_reqs_writes_minus_o(tmp_path):
-    out = tmp_path / "cs2rl-reqs.txt"
-    result = _run_modal_image_reqs(str(ROOT / "uv.lock"), "-o", str(out))
-    assert result.stdout == ""
-    names = _requirement_names(out.read_text())
-    assert names == sorted(names)
-    assert "torch" in names
-    assert "numpy" in names
-    assert "pufferlib" not in names
-    assert "modal" not in names
-
-
-def test_modal_image_reqs_walks_runtime_graph_not_dev_or_modal_groups(tmp_path):
-    lock = tmp_path / "uv.lock"
-    lock.write_text("""\
-version = 1
-[[package]]
-name = "cs2rl"
-version = "0.1.0"
-dependencies = [
-    { name = "numpy" },
-    { name = "pufferlib" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ruff" },
-]
-modal = [
-    { name = "modal" },
-]
-
-[[package]]
-name = "numpy"
-version = "2.4.3"
-
-[[package]]
-name = "pufferlib"
-version = "3.0.0"
-dependencies = [
-    { name = "torch" },
-    { name = "shimmy", extra = ["gym-v21"] },
-]
-
-[[package]]
-name = "torch"
-version = "2.10.0"
-
-[[package]]
-name = "shimmy"
-version = "1.3.0"
-
-[package.optional-dependencies]
-gym-v21 = [
-    { name = "pyglet" },
-]
-
-[[package]]
-name = "pyglet"
-version = "2.1.0"
-
-[[package]]
-name = "modal"
-version = "1.5.4"
-
-[[package]]
-name = "ruff"
-version = "0.11.13"
-""")
-    result = _run_modal_image_reqs(str(lock))
-    assert result.stdout == "numpy==2.4.3\npyglet==2.1.0\nshimmy==1.3.0\ntorch==2.10.0\n"
+@pytest.mark.parametrize("drift", ["none", "missing_transitive", "version", "extra", "puffer"])
+def test_image_runtime_inventory_rejects_dependency_drift(fake_modal, tmp_path, monkeypatch, drift):
+    module = _import_run_modal()
+    snapshot, check = [
+        shlex.split(command)[2] for command in module.dependency_image.commands
+        if "locked-inventory.json" in command
+    ]
+    inventory = {"torch": "2.10.0", "numpy": "2.4.3", "shimmy": "1.3.0"}
+    monkeypatch.setattr(
+        importlib.metadata, "distributions", lambda: [
+            SimpleNamespace(metadata={"Name": name}, version=version)
+            for name, version in inventory.items()
+        ])
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: inventory[name.lower()])
+    snapshot_path = str(tmp_path / "inventory.json")
+    exec(snapshot.replace("/tmp/locked-inventory.json", snapshot_path), {})
+    inventory.update({
+        "pufferlib": "3.0.0",
+        "setuptools": "82.0.1",
+        "wheel": "0.48.0",
+        "cython": "3.2.9",
+        "ziglang": "0.14.1",
+    })
+    if drift == "missing_transitive":
+        del inventory["shimmy"]
+    elif drift == "version":
+        inventory["shimmy"] = "9.9.9"
+    elif drift == "extra":
+        inventory["unexpected-package"] = "1.0.0"
+    elif drift == "puffer":
+        inventory["pufferlib"] = "4.0.0"
+    check = check.replace("/tmp/locked-inventory.json", snapshot_path)
+    if drift == "none":
+        exec(check, {})
+    else:
+        with pytest.raises(AssertionError):
+            exec(check, {})
 
 
 def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal):
@@ -610,28 +565,16 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert image.env_vars["NO_OCEAN"] == "1"
     assert "uv==0.11.1" in image.pips
     assert "ziglang==0.14.1" in image.pips
-    assert (str(ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", True) in image.local_files
-    assert (str(ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", True) in image.local_files
-    assert (str(ROOT / "scripts" / "modal_image_reqs.py"), "/opt/cs2rl/modal_image_reqs.py",
-            True) in image.local_files
+    assert image.uv_sync_calls == [(str(ROOT), {
+        "frozen":
+        True,
+        "uv_version":
+        "0.11.1",
+        "extra_options":
+        "--no-default-groups --no-install-package pufferlib",
+    })]
     commands = "\n".join(image.commands)
-    assert "modal_image_reqs.py" in commands
-    assert "uv pip install" in commands
-    assert "-r" in commands
-    locked_dep_installs = [
-        part.strip() for command in image.commands for part in command.split("&&")
-        if "uv pip install" in part and "-r" in part
-    ]
-    assert locked_dep_installs
-    assert all("--directory /tmp" in cmd for cmd in locked_dep_installs)
-    locked_dep_command = " && ".join(locked_dep_installs)
-    assert "/tmp/cs2rl-reqs.txt" in locked_dep_command
-    assert "--no-deps" in locked_dep_command
-    assert "pufferlib" not in locked_dep_command
-    assert "uv export" not in locked_dep_command
-    assert "uv sync" not in locked_dep_command
-    assert "uv export" not in commands
-    assert "uv sync" not in commands
+    assert "ln -s /.uv/.venv /opt/cs2rl/.venv" in commands
     assert "--no-build-isolation" in commands
     assert "--no-deps" in commands
     assert "--no-binary pufferlib" in commands
@@ -1738,25 +1681,42 @@ def _import_artifacts():
     return importlib.import_module("scripts.modal_artifacts")
 
 
-def test_artifact_client_never_imports_app_or_creates_objects(fake_modal):
+@pytest.mark.parametrize("consumer", ["status", "download", "backfill"])
+def test_artifact_client_never_imports_app_or_creates_objects(fake_modal, tmp_path, consumer):
+    """A lazy missing Volume must be diagnosed before any artifact read or write."""
     module = _import_artifacts()
     assert "scripts.run_modal" not in sys.modules
     assert fake_modal.images == []
     assert fake_modal.apps == []
-    with pytest.raises(mrl.ValidationError):
-        module.collect_status("ok-id")
+    with pytest.raises(mrl.ValidationError, match="^artifact volume is missing$") as info:
+        if consumer == "status":
+            module.collect_status("ok-id")
+        elif consumer == "download":
+            module.download_run("ok-id", dest_root=tmp_path)
+        else:
+            _import_backfill().backfill_sidecar("ok-id")
+    assert isinstance(info.value.__cause__, NotFoundError)
     assert fake_modal.volume_creates == []
     assert fake_modal.dict_creates == []
     assert fake_modal.volume_lookups == [(mrl.VOLUME_NAME, False)]
     assert fake_modal.configured_remote_calls == []
     assert fake_modal.base_remote_calls == []
+    assert fake_modal.read_file_calls == []
+    assert fake_modal.batch_upload_calls == []
+    assert not (tmp_path / "ok-id").exists()
 
 
-def test_collect_status_missing_run_message(fake_modal):
+@pytest.mark.parametrize("consumer", ["status", "download"])
+def test_collect_status_missing_run_message(fake_modal, tmp_path, consumer):
+    """A missing run in an existing Volume remains a run-specific diagnosis."""
     module = _import_artifacts()
     _named_volume(fake_modal)
     with pytest.raises(mrl.ValidationError, match="run not found: missing-id"):
-        module.collect_status("missing-id", now=_aware())
+        if consumer == "status":
+            module.collect_status("missing-id", now=_aware())
+        else:
+            module.download_run("missing-id", dest_root=tmp_path)
+    assert not (tmp_path / "missing-id").exists()
 
 
 def test_status_rejects_launch_only_options_via_client(fake_modal):
@@ -1862,13 +1822,48 @@ def test_download_stages_renames_and_refuses_overwrite(fake_modal, tmp_path):
     assert not (dest_root / "secret").exists()
 
 
-def test_detached_run_can_be_downloaded_later_by_id(fake_modal, tmp_path):
+@pytest.mark.parametrize("phase,error_type", [
+    ("present", None),
+    *[(phase, error_type) for phase in ("call", "iterator", "midway")
+      for error_type in (NotFoundError, PermissionError, OSError, KeyError, PermissionDeniedError,
+                         ServiceError, RuntimeError)],
+])
+def test_detached_run_can_be_downloaded_later_by_id(fake_modal, tmp_path, monkeypatch, phase,
+                                                    error_type):
+    """Listing errors retain their diagnosis, including after a yielded entry."""
     module = _import_artifacts()
     assert "scripts.run_modal" not in sys.modules
     volume = _named_volume(fake_modal)
     volume.files["runs/detached-1/result.json"] = b'{"status":"completed"}\n'
-    dest = module.download_run("detached-1", dest_root=tmp_path / "outputs" / "modal")
-    assert (dest / "result.json").read_text() == '{"status":"completed"}\n'
+    dest_root = tmp_path / "outputs" / "modal"
+    if phase == "present":
+        dest = module.download_run("detached-1", dest_root=dest_root)
+        assert (dest / "result.json").read_text() == '{"status":"completed"}\n'
+    else:
+        error = error_type("list failure")
+
+        def broken_iterator():
+            if phase == "midway":
+                yield SimpleNamespace(path="runs/detached-1/result.json", type="file")
+            raise error
+
+        def broken_list(path, *, recursive):
+            assert (path, recursive) == ("runs/detached-1", True)
+            if phase == "call":
+                raise error
+            return broken_iterator()
+
+        monkeypatch.setattr(volume, "iterdir", broken_list)
+        expected = (mrl.ValidationError
+                    if error_type is NotFoundError and phase != "midway" else error_type)
+        message = "run not found: detached-1" if expected is mrl.ValidationError else "list failure"
+        with pytest.raises(expected, match=message) as info:
+            module.download_run("detached-1", dest_root=dest_root)
+        if expected is mrl.ValidationError:
+            assert info.value.__cause__ is error
+        else:
+            assert info.value is error
+        assert not dest_root.exists()
     assert fake_modal.apps == []
     assert fake_modal.images == []
     assert fake_modal.configured_remote_calls == []
@@ -1995,7 +1990,19 @@ def test_launch_upload_failure_records_failure_code_without_freeing_id(fake_moda
         module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
 
 
-def test_lookup_helpers_chain_unexpected_errors(fake_modal):
+@pytest.mark.parametrize("phase", ["from-name", "hydrate"])
+@pytest.mark.parametrize("error_type", [
+    RuntimeError,
+    PermissionError,
+    OSError,
+    KeyError,
+    PermissionDeniedError,
+    ServiceError,
+    type("NotFoundError", (Exception, ), {}),
+    type("FakeNotFoundError", (Exception, ), {}),
+])
+def test_lookup_helpers_chain_unexpected_errors(fake_modal, phase, error_type):
+    """SDK exception identity, not a lookalike name, determines volume absence."""
     launch = _import_run_modal()
     artifacts = _import_artifacts()
 
@@ -2010,21 +2017,38 @@ def test_lookup_helpers_chain_unexpected_errors(fake_modal):
         launch._lookup_named(BoomFactory, mrl.VOLUME_NAME, missing="artifact volume is missing")
     assert launch_info.value.__cause__ is None
 
+    error = error_type("volume backend exploded")
+
     class BoomModal:
 
         class Volume:
 
             @staticmethod
             def from_name(name, create_if_missing=False):
-                del name, create_if_missing
-                raise RuntimeError("volume backend exploded")
+                assert (name, create_if_missing) == (mrl.VOLUME_NAME, False)
+                if phase == "from-name":
+                    raise error
+                return SimpleNamespace(hydrate=hydrate)
 
-    with pytest.raises(RuntimeError, match="volume backend exploded") as artifact_info:
-        artifacts.lookup_volume(BoomModal)
+    def hydrate():
+        raise error
+
+    with pytest.raises(error_type, match="volume backend exploded") as artifact_info:
+        artifacts.collect_status("ok-id", modal_module=BoomModal)
+    assert artifact_info.value is error
     assert artifact_info.value.__cause__ is None
 
 
-def test_corrupt_volume_json_is_validation_error(fake_modal):
+@pytest.mark.parametrize("consumer", ["status", "backfill", "download"])
+@pytest.mark.parametrize("phase,error_type", [
+    *[(phase, error_type) for phase in ("call", "midway")
+      for error_type in (PermissionError, OSError, KeyError, PermissionDeniedError, ServiceError,
+                         RuntimeError)],
+    ("midway", FileNotFoundError),
+])
+def test_artifact_read_errors_preserve_diagnostics(fake_modal, tmp_path, monkeypatch, consumer,
+                                                   phase, error_type):
+    """Read failures reach status/backfill and roll back staged downloads."""
     module = _import_artifacts()
     volume = _named_volume(fake_modal)
     volume.files["runs/ok-id/STATUS.json"] = b"{not-json"
@@ -2034,6 +2058,35 @@ def test_corrupt_volume_json_is_validation_error(fake_modal):
     volume.files["runs/ok-id/reservation.json"] = b'{"created_at":"not-a-timestamp"}'
     with pytest.raises(mrl.ValidationError):
         module.collect_status("ok-id", now=_aware())
+    volume.files.clear()
+    volume.files["runs/ok-id/a-first.txt"] = b"preserve atomic rollback"
+    volume.files["runs/ok-id/b-broken.txt"] = b"unreadable"
+    error = error_type("read failure")
+    original_read = volume.read_file
+
+    def broken_iterator():
+        if phase == "midway":
+            yield b"partial"
+        raise error
+
+    def broken_read(path):
+        if path == "runs/ok-id/a-first.txt":
+            return original_read(path)
+        if phase == "call":
+            raise error
+        return broken_iterator()
+
+    monkeypatch.setattr(volume, "read_file", broken_read)
+    with pytest.raises(error_type, match="read failure") as info:
+        if consumer == "status":
+            module.collect_status("ok-id", now=_aware())
+        elif consumer == "backfill":
+            _import_backfill().backfill_sidecar("ok-id", now=_aware())
+        else:
+            module.download_run("ok-id", dest_root=tmp_path)
+    assert info.value is error
+    assert fake_modal.batch_upload_calls == []
+    assert list(tmp_path.iterdir()) == []
 
 
 # ── Client-side sidecar backfill ───────────────────────────────────────────
@@ -2308,8 +2361,8 @@ def test_gate_a_criterion_3_package_imports_on_a_container_equivalent_interprete
     The separate PYTHONPATH arms preserve the packaged-vs-bare spelling contrast.
 
     `runner_image is dependency_image` under FakeImage (`add_local_file`
-    returns self), so the recorded list holds every mount: the three
-    /opt/cs2rl build inputs, scripts/run_modal.py and the package files.
+    returns self), so the recorded list holds scripts/run_modal.py and the
+    package files. The SDK owns uv_sync's project/lock build inputs.
 
     DO NOT CREATE scripts/__init__.py. The repository has none, so `scripts` is
     a PEP 420 namespace package: an unmounted `from scripts import X` fails as
@@ -2321,8 +2374,8 @@ def test_gate_a_criterion_3_package_imports_on_a_container_equivalent_interprete
     module = _import_run_modal()
     runner = module.runner_image
     assert runner is module.dependency_image
-    # Four non-package mounts plus __init__.py and each RUNNER_MODULES module.
-    assert len(runner.local_files) == 4 + 1 + len(RUNNER_MODULES)
+    # One non-package mount plus __init__.py and each RUNNER_MODULES module.
+    assert len(runner.local_files) == 1 + 1 + len(RUNNER_MODULES)
     prefix, neutral = tmp_path / 'image', tmp_path / 'cwd'
     neutral.mkdir()
     written = _materialise_recorded_mounts(prefix, runner.local_files)
@@ -2386,8 +2439,8 @@ def test_gate_a_criterion_3_reddens_on_an_unmounted_intra_repo_import(fake_modal
     neutral = tmp_path / 'cwd'
     neutral.mkdir()
     plants = {
-        'from_import': 'from scripts import modal_image_reqs as _unmounted\n',
-        'dotted_import': 'import scripts.modal_image_reqs as _unmounted\n'
+        'from_import': 'from scripts import modal_artifacts as _unmounted\n',
+        'dotted_import': 'import scripts.modal_artifacts as _unmounted\n'
     }
     for label, plant in plants.items():
         prefix = tmp_path / label
@@ -2395,7 +2448,7 @@ def test_gate_a_criterion_3_reddens_on_an_unmounted_intra_repo_import(fake_modal
         status, stderr = _container_equivalent_import(prefix,
                                                       runner.env_vars['PYTHONPATH'],
                                                       cwd=neutral)
-        assert status != 0 and 'modal_image_reqs' in stderr, (label, stderr)
+        assert status != 0 and 'modal_artifacts' in stderr, (label, stderr)
         assert 'ImportError' in stderr or 'ModuleNotFoundError' in stderr, (label, stderr)
 
 
@@ -2497,13 +2550,13 @@ def test_gate_a_criterion_3_minus_p_and_the_neutral_cwd_are_load_bearing(fake_mo
     prefix = tmp_path / 'image'
     _materialise_recorded_mounts(prefix,
                                  runner.local_files,
-                                 plant='from scripts import modal_image_reqs as _unmounted\n')
+                                 plant='from scripts import modal_artifacts as _unmounted\n')
     assert _container_equivalent_import(prefix,
                                         runner.env_vars['PYTHONPATH'],
                                         cwd=ROOT,
                                         isolate_cwd=False) == (0, '')
     status, stderr = _container_equivalent_import(prefix, runner.env_vars['PYTHONPATH'], cwd=ROOT)
-    assert status != 0 and 'modal_image_reqs' in stderr
+    assert status != 0 and 'modal_artifacts' in stderr
 
 
 # ── Gate (d), criterion 4: exact package mount triples ──
@@ -2592,8 +2645,8 @@ def test_gate_d_criterion_4_scripts_mounts_are_a_bijection_onto_the_declared_set
     module = _import_run_modal()
     runner = module.runner_image
     assert runner is module.dependency_image
-    # Four non-package mounts plus __init__.py and each RUNNER_MODULES module.
-    assert len(runner.local_files) == len(set(runner.local_files)) == 4 + 1 + len(RUNNER_MODULES)
+    # One non-package mount plus __init__.py and each RUNNER_MODULES module.
+    assert len(runner.local_files) == len(set(runner.local_files)) == 1 + 1 + len(RUNNER_MODULES)
     assert _mount_bijection_violations(runner.local_files,
                                        ROOT,
                                        dependency_mounts=module.dependency_image.local_files) == []
@@ -2607,7 +2660,7 @@ def test_gate_d_criterion_4_reddens_on_an_undeclared_destination_and_on_a_rename
     source = tmp_path / 'nope.py'
     source.write_text('fixture = 1\n', encoding='utf-8')
     for triple in ((str(source), '/opt/app/scripts/nope.py', True),
-                   (str(ROOT / 'scripts/modal_image_reqs.py'), '/opt/app/scripts/run_modal.py',
+                   (str(ROOT / 'scripts/modal_artifacts.py'), '/opt/app/scripts/run_modal.py',
                     True)):
         violations = _mount_bijection_violations([*recorded, triple], ROOT)
         assert len(violations) == 1 and violations[0].startswith('(B) unexpected exact mount')

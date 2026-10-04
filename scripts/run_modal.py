@@ -49,66 +49,62 @@ dependency_image = (modal.Image.from_registry(
     "7.5;8.6;8.9",
     "NO_OCEAN":
     "1",
-}).add_local_file(str(
-    _REPO_ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", copy=True).add_local_file(
-        str(_REPO_ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", copy=True).add_local_file(
-            str(_REPO_ROOT / "scripts" / "modal_image_reqs.py"),
-            "/opt/cs2rl/modal_image_reqs.py",
-            copy=True
-        ).run_commands(
-            "cd /opt/cs2rl && uv venv .venv --python /usr/local/bin/python3 && "
-            "python3 /opt/cs2rl/modal_image_reqs.py /opt/cs2rl/uv.lock -o /tmp/cs2rl-reqs.txt && "
-            "uv pip install --python /opt/cs2rl/.venv/bin/python --directory /tmp "
-            "--no-deps -r /tmp/cs2rl-reqs.txt",
-            "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
-            "inventory={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
-            "pathlib.Path('/tmp/locked-inventory.json').write_text("
-            "json.dumps(inventory, sort_keys=True))\"",
-            "uv pip install --python /opt/cs2rl/.venv/bin/python --no-deps "
-            "setuptools==82.0.1 wheel==0.48.0 Cython==3.2.9 ziglang==0.14.1",
-            "python3 -c \""
-            "import hashlib, tarfile, urllib.request; "
-            "from pathlib import Path; "
-            f"spec={PUFFERLIB_SDIST!r}; "
-            "url, _, digest = spec.partition('#sha256='); "
-            "archive = Path('/tmp/pufferlib-3.0.0.tar.gz'); "
-            "urllib.request.urlretrieve(url, archive); "
-            "got = hashlib.sha256(archive.read_bytes()).hexdigest(); "
-            "assert got == digest, got; "
-            "tf = tarfile.open(archive); "
-            "tf.extractall('/tmp', filter='data'); "
-            "tf.close(); "
-            "p = Path('/tmp/pufferlib-3.0.0/setup.py'); "
-            "text = p.read_text(); "
-            "old = 'c_extensions = []'; "
-            "assert old in text; "
-            "p.write_text(text.replace(old, old + chr(10) + 'c_extension_paths = []', 1))"
-            "\" && "
-            "CC=gcc CXX=g++ uv pip install --python /opt/cs2rl/.venv/bin/python "
-            "--no-build-isolation --no-deps --no-binary pufferlib "
-            "/tmp/pufferlib-3.0.0",
-            "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
-            "base=json.loads(pathlib.Path('/tmp/locked-inventory.json').read_text()); "
-            "now={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
-            "allowed={'setuptools','wheel','cython','ziglang','pufferlib'}; "
-            "assert {k:v for k,v in now.items() if k not in allowed} == "
-            "{k:v for k,v in base.items() if k not in allowed}; "
-            "assert set(now) <= set(base) | allowed; "
-            "expected={'torch':'2.10.0','numpy':'2.4.3','pufferlib':'3.0.0',"
-            "'setuptools':'82.0.1','wheel':'0.48.0','Cython':'3.2.9',"
-            "'ziglang':'0.14.1'}; actual={k:m.version(k) for k in expected}; "
-            "assert actual == expected, actual\"",
-            "/opt/cs2rl/.venv/bin/python -c \"import importlib.util, pathlib, subprocess, "
-            "sysconfig, torch; "
-            "import pufferlib._C; so=importlib.util.find_spec('pufferlib._C').origin; "
-            "header=pathlib.Path(sysconfig.get_paths()['include'])/'Python.h'; "
-            "assert header.is_file(), header; "
-            "nvcc=subprocess.check_output(['nvcc','--version'], text=True); "
-            "assert 'release 12.8' in nvcc, nvcc; "
-            "assert hasattr(torch.ops.pufferlib,'compute_puff_advantage'); "
-            "elf=subprocess.check_output(['cuobjdump','--list-elf',so], text=True); "
-            "assert all('sm_'+arch in elf for arch in ('75','86','89')), elf\"",
-        ))
+}).uv_sync(
+    str(_REPO_ROOT),
+    frozen=True,
+    uv_version="0.11.1",
+    extra_options="--no-default-groups --no-install-package pufferlib",
+).run_commands(
+    "mkdir -p /opt/cs2rl && ln -s /.uv/.venv /opt/cs2rl/.venv",
+    "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
+    "inventory={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
+    "pathlib.Path('/tmp/locked-inventory.json').write_text("
+    "json.dumps(inventory, sort_keys=True))\"",
+    "uv pip install --python /opt/cs2rl/.venv/bin/python --no-deps "
+    "setuptools==82.0.1 wheel==0.48.0 Cython==3.2.9 ziglang==0.14.1",
+    "python3 -c \""
+    "import hashlib, tarfile, urllib.request; "
+    "from pathlib import Path; "
+    f"spec={PUFFERLIB_SDIST!r}; "
+    "url, _, digest = spec.partition('#sha256='); "
+    "archive = Path('/tmp/pufferlib-3.0.0.tar.gz'); "
+    "urllib.request.urlretrieve(url, archive); "
+    "got = hashlib.sha256(archive.read_bytes()).hexdigest(); "
+    "assert got == digest, got; "
+    "tf = tarfile.open(archive); "
+    "tf.extractall('/tmp', filter='data'); "
+    "tf.close(); "
+    "p = Path('/tmp/pufferlib-3.0.0/setup.py'); "
+    "text = p.read_text(); "
+    "old = 'c_extensions = []'; "
+    "assert old in text; "
+    "p.write_text(text.replace(old, old + chr(10) + 'c_extension_paths = []', 1))"
+    "\" && "
+    "CC=gcc CXX=g++ uv pip install --python /opt/cs2rl/.venv/bin/python "
+    "--no-build-isolation --no-deps --no-binary pufferlib "
+    "/tmp/pufferlib-3.0.0",
+    "/opt/cs2rl/.venv/bin/python -c \"import importlib.metadata as m, json, pathlib; "
+    "base=json.loads(pathlib.Path('/tmp/locked-inventory.json').read_text()); "
+    "now={d.metadata['Name'].lower():d.version for d in m.distributions()}; "
+    "allowed={'setuptools','wheel','cython','ziglang','pufferlib'}; "
+    "assert {k:v for k,v in now.items() if k not in allowed} == "
+    "{k:v for k,v in base.items() if k not in allowed}; "
+    "assert set(now) <= set(base) | allowed; "
+    "expected={'torch':'2.10.0','numpy':'2.4.3','pufferlib':'3.0.0',"
+    "'setuptools':'82.0.1','wheel':'0.48.0','Cython':'3.2.9',"
+    "'ziglang':'0.14.1'}; actual={k:m.version(k) for k in expected}; "
+    "assert actual == expected, actual\"",
+    "/opt/cs2rl/.venv/bin/python -c \"import importlib.util, pathlib, subprocess, "
+    "sysconfig, torch; "
+    "import pufferlib._C; so=importlib.util.find_spec('pufferlib._C').origin; "
+    "header=pathlib.Path(sysconfig.get_paths()['include'])/'Python.h'; "
+    "assert header.is_file(), header; "
+    "nvcc=subprocess.check_output(['nvcc','--version'], text=True); "
+    "assert 'release 12.8' in nvcc, nvcc; "
+    "assert hasattr(torch.ops.pufferlib,'compute_puff_advantage'); "
+    "elf=subprocess.check_output(['cuobjdump','--list-elf',so], text=True); "
+    "assert all('sm_'+arch in elf for arch in ('75','86','89')), elf\"",
+))
 runner_image = dependency_image
 for _runner_module in sorted((_REPO_ROOT / "scripts" / "modal_runner").glob("*.py")):
     runner_image = runner_image.add_local_file(
