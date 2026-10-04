@@ -81,6 +81,7 @@ def _force_floor_above_entropy(trainer, floor=1e6):
     trainer._entropy_floor = float(floor)
 
 
+@pytest.mark.training
 def test_floor_stays_disarmed_during_grace_even_below_floor():
     """gh#96: the min=0.5 floor clamp must NOT re-arm inside the warm-start window.
 
@@ -104,6 +105,7 @@ def test_floor_stays_disarmed_during_grace_even_below_floor():
         cleanup()
 
 
+@pytest.mark.training
 def test_floor_clamps_effective_alpha_when_mode_off():
     """gh#96: the other half of the gate — with the mode off the floor still bites.
 
@@ -125,6 +127,7 @@ def test_floor_clamps_effective_alpha_when_mode_off():
         cleanup()
 
 
+@pytest.mark.training
 def test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off():
     """Positive control for the floor READ (PR #261 review): the floor forced BELOW the
     entropy, and the clamp must not fire.
@@ -164,6 +167,7 @@ def test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off():
         cleanup()
 
 
+@pytest.mark.training
 def test_grace_pins_effective_alpha_and_freezes_log_alpha():
     trainer, cleanup = _build_ws_trainer(warmstart_grace_steps=10**12,
                                          warmstart_ramp_steps=10_000_000)
@@ -191,6 +195,7 @@ def test_grace_pins_effective_alpha_and_freezes_log_alpha():
         cleanup()
 
 
+@pytest.mark.training
 def test_grace_zero_anchors_on_second_update_and_ramps():
     trainer, cleanup = _build_ws_trainer(warmstart_grace_steps=0, warmstart_ramp_steps=10**12)
     try:
@@ -230,6 +235,7 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
         cleanup()
 
 
+@pytest.mark.training
 def test_mode_off_is_unchanged_behavior():
     from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=4, with_selfplay=True)

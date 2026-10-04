@@ -106,6 +106,7 @@ def _foreign_tree(tmp_path: Path) -> Path:
     return other
 
 
+@pytest.mark.slow
 def test_a_foreign_tests_dir_on_the_path_stops_the_session_and_is_named(tmp_path):
     """(c), end to end: the entry and the name are named, and nothing is collected."""
     other = _foreign_tree(tmp_path)
@@ -148,6 +149,7 @@ def _check_own_modules_pass(tmp_path: Path, extra_args: tuple[str, ...]) -> None
     assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
 
 
+@pytest.mark.slow
 def test_a_module_imported_from_a_foreign_tests_dir_fails_the_session_and_is_named(tmp_path):
     """(d), end to end: a foreign dir that reaches sys.path mid-session, after (c) ran.
 
@@ -158,16 +160,19 @@ def test_a_module_imported_from_a_foreign_tests_dir_fails_the_session_and_is_nam
     _check_foreign_import_fails_the_session(tmp_path, ())
 
 
+@pytest.mark.slow
 def test_negative_control_this_checkouts_own_tests_and_scripts_modules_pass(tmp_path):
     """Neither half fires on this checkout's own `tests.*` and `scripts.*` modules."""
     _check_own_modules_pass(tmp_path, ())
 
 
+@pytest.mark.slow
 def test_a_foreign_module_imported_on_an_xdist_worker_fails_the_session_and_is_named(tmp_path):
     """(d) at `-n 2`: the worker sees the foreign module, the controller must report it."""
     _check_foreign_import_fails_the_session(tmp_path, _XDIST)
 
 
+@pytest.mark.slow
 def test_negative_control_this_checkouts_own_modules_pass_on_xdist_workers(tmp_path):
     """The negative control at `-n 2`: own modules are green and no worker is reported lost."""
     _check_own_modules_pass(tmp_path, _XDIST)

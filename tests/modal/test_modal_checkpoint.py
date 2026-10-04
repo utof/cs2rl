@@ -122,6 +122,7 @@ def test_validate_completed_run_rejects_bad_evidence(tmp_path, defect):
 # them can see this. These do: they force the torch-less runner condition.
 
 
+@pytest.mark.slow
 def test_completed_run_validates_without_runner_torch(tmp_path, monkeypatch):
     """validate_completed_run torch-loads too: without the fallback every clean
     exit is misfiled as failed/invalid_evidence and no run can ever complete."""

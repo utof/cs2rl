@@ -10,7 +10,10 @@ round. Wall time per test must stay under ~5s; if it regresses past ~10s,
 revisit the segments / num_envs defaults in _build_trainer_for_test.
 """
 
+import pytest
 
+
+@pytest.mark.training
 def test_build_trainer_for_test_smoke():
     """Harness produces a trainer with the Batch-1-consumed attribute surface.
 
@@ -65,6 +68,7 @@ def test_build_trainer_for_test_smoke():
         cleanup()
 
 
+@pytest.mark.training
 def test_build_trainer_for_test_with_selfplay():
     """Harness can engage self-play — required for Task 6c.
 

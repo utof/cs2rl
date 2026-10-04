@@ -6,6 +6,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 from tests.conftest import REPO_ROOT
 
 ROOT = REPO_ROOT
@@ -20,6 +22,7 @@ def test_pytest_resolves_nvml_from_maintained_distribution():
     assert Path(pynvml.__file__).resolve() == OFFICIAL_MODULE.resolve()
 
 
+@pytest.mark.slow
 def test_fresh_process_torch_import_uses_maintained_nvml_without_deprecation_warning():
     """A fresh process run from the repo root catches shadowing and the deprecated import hook."""
     child = subprocess.run(

@@ -160,6 +160,7 @@ def _kill_child_and_count_survivors(tmp_path, *, noguard: bool) -> tuple[list[in
             time.sleep(0.05)
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "linux", reason="prctl + /proc")
 @pytest.mark.timeout(90)
 def test_pool_workers_die_with_parent(tmp_path):
@@ -167,6 +168,7 @@ def test_pool_workers_die_with_parent(tmp_path):
     assert survivors == [], f"orphaned vis-cache workers {survivors} of {workers} survived the parent"
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "linux", reason="prctl + /proc")
 @pytest.mark.timeout(90)
 def test_pool_workers_survive_without_the_guard(tmp_path):
@@ -176,6 +178,7 @@ def test_pool_workers_survive_without_the_guard(tmp_path):
     )
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "linux", reason="prctl + /proc")
 @pytest.mark.timeout(90)
 def test_guard_does_not_kill_a_healthy_build(tmp_path):
@@ -205,6 +208,7 @@ def test_guard_does_not_kill_a_healthy_build(tmp_path):
     assert vis.shape == (N_AREAS, N_AREAS) and vis.all()               # stub says everything is visible
 
 
+@pytest.mark.slow
 @pytest.mark.skipif(sys.platform != "linux", reason="prctl")
 @pytest.mark.timeout(30)
 def test_guard_kills_a_worker_whose_parent_is_already_gone():

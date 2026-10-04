@@ -23,6 +23,8 @@ gh#168 W2a), same pattern as tests/train/test_train_env.py. One harness build se
 (builds cost ~5s each on the VM).
 """
 
+import pytest
+
 
 def _run_train_once(trainer):
     """One evaluate()+train() cycle; force the log-flush path so the losses
@@ -33,6 +35,7 @@ def _run_train_once(trainer):
     return trainer.losses
 
 
+@pytest.mark.training
 def test_kl_break_metrics_and_granularity():
     from tests._helpers.trainer_harness import _build_trainer_for_test
 
@@ -80,6 +83,7 @@ def test_kl_break_metrics_and_granularity():
         cleanup()
 
 
+@pytest.mark.training
 def test_clipfrac_halves_and_event_fraction_are_logged():
     from tests._helpers.trainer_harness import _build_trainer_for_test
 

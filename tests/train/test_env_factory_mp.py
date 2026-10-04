@@ -163,6 +163,7 @@ def test_train_closure_builds_envs_in_forked_workers():
         multiprocessing.active_children()
 
 
+@pytest.mark.slow
 def test_build_env_for_works_from_a_cold_interpreter():
     """A fresh process with NOTHING of the training stack imported builds an env.
 

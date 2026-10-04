@@ -23,6 +23,7 @@ _WARMSTART_KEYS = (
 )
 
 
+@pytest.mark.training
 @pytest.mark.parametrize("layout", ["old", "current", "old-first", "current-first"])
 def test_disk_resume_preserves_warmstart_update_and_saves_current_keys(layout):
     """Missing migration loses the ramp anchor or repeats the one-shot alpha reset.

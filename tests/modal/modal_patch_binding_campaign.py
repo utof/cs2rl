@@ -102,6 +102,7 @@ def binding_target(site):
 def _run_probe(repo_root, evidence_root, site, mode, label):
     """Run one isolated pytest and retain its own observation and failure clause.
 
+    Clear the parent's marker filter so every intended child consumer runs.
     Each child gets its own `--basetemp`, JUnit report and full log under
     `evidence_root / label`. Each of these failures to produce evidence raises
     a RuntimeError naming the site, the phase (`mode`), the probe label and the
@@ -143,7 +144,7 @@ def _run_probe(repo_root, evidence_root, site, mode, label):
                 sys.executable, "-m", "pytest", "--disable-plugin-autoload", "-p", "pytest_timeout",
                 "-p", "xdist.plugin",
                 f"tests/modal/test_modal_patch_bindings.py::test_patch_binding_observation[{site}]",
-                "-q", "--tb=short", "-p", "no:cacheprovider", "-o", "junit_family=legacy",
+                "-q", "-m", "", "--tb=short", "-p", "no:cacheprovider", "-o", "junit_family=legacy",
                 f'--basetemp={directory / "pytest"}', f"--junitxml={report}"
             ],
             cwd=repo_root,

@@ -110,6 +110,7 @@ def _assert_stopped_before_collection(child: subprocess.CompletedProcess, output
     assert "passed" not in child.stdout, f"the planted test ran: collection was not stopped\n{output}"
 
 
+@pytest.mark.slow
 def test_a_foreign_cs2rl_first_on_the_path_stops_the_session_and_names_the_fix(tmp_path):
     """(a): `cs2rl` resolves somewhere other than this checkout's src/."""
     fake = tmp_path / "foreign"
@@ -123,6 +124,7 @@ def test_a_foreign_cs2rl_first_on_the_path_stops_the_session_and_names_the_fix(t
         f"the message does not name the fix\n{output}")
 
 
+@pytest.mark.slow
 def test_a_stray_name_in_a_checkouts_src_stops_the_session_and_names_it(tmp_path):
     """(b): a checkout's src/ on sys.path holds an importable name beside cs2rl."""
     other = tmp_path / "other_checkout"
@@ -136,6 +138,7 @@ def test_a_stray_name_in_a_checkouts_src_stops_the_session_and_names_it(tmp_path
     assert "(a)" not in child.stderr, f"cs2rl should still resolve to this checkout\n{output}"
 
 
+@pytest.mark.slow
 def test_negative_control_the_same_session_without_either_runs(tmp_path):
     """Neither condition: the tripwire is silent and the planted test passes."""
     child, output = _session(tmp_path)
@@ -519,6 +522,7 @@ def _assert_names_the_dead_file(child: subprocess.CompletedProcess, output: str,
         f"the session stopped for another reason too\n{output}")
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("tracked", [False, True], ids=["untracked", "tracked"])
 def test_e_a_module_beside_its_package_stops_the_session(tmp_path, tracked):
     """(e1) KO2(a) of #205 part 3: the old `train.py` left at src/cs2rl/train.py beside the new
@@ -537,6 +541,7 @@ def test_e_a_module_beside_its_package_stops_the_session(tmp_path, tracked):
                                 root / "src" / "cs2rl" / "train" / "__init__.py")
 
 
+@pytest.mark.slow
 def test_e_a_source_beside_a_built_extension_stops_the_session(tmp_path):
     """(e2) The extension beats source: a `binding.py` beside the built binding.<abi>.so, one
     directory below src/cs2rl, never loads. Planted untracked, as a leftover is."""
@@ -547,6 +552,7 @@ def test_e_a_source_beside_a_built_extension_stops_the_session(tmp_path):
                                 root / "src" / "cs2rl" / "env" / "c" / f"binding{_SO}")
 
 
+@pytest.mark.slow
 def test_e_negative_control_the_same_checkout_without_a_plant_passes(tmp_path):
     """The two plants' checkout, unplanted: its session runs, and the tripwire is silent."""
     root = _leftover_checkout(tmp_path / "checkout")

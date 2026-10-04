@@ -31,14 +31,27 @@ observation and reward is finite, and prints steps/sec. It reads `~/.awpy/navs/d
 `vis_cache*.npy` into `src/cs2rl/`, and the visibility half reads `~/.awpy/tris/de_dust2.tri`
 with one worker process per CPU core, at about 900 MB each. Later runs load the cache.
 
-The whole test suite is one session on two workers (several minutes):
+Normal validation uses the fast selection on two workers:
 
 ```bash
 uv run python -m pytest -n 2 --dist loadgroup tests -q
 ```
 
+Run real training integration when trainer, learning or checkpoint continuation
+changes: add `-m training`. Run expensive non-training checks (fresh child campaigns,
+native compiler variants and process isolation) with `-m "slow and not training"`.
+For releases or substantial training changes, run the complete suite in one session:
+
+```bash
+uv run python -m pytest -n 2 --dist loadgroup tests -m "" -q
+```
+
+These filters deselect coverage; they preserve every test's workload and assertions.
+For a single training test or file, clear the default filter and use no workers:
+`uv run python -m pytest tests/train/test_resume_state.py -m "" -n 0 -q`.
+
 Always pass `tests` or files under it: `pyproject.toml` names no test paths. `CONTRIBUTING.md`
-says why 2 workers, what the fast `-m "not slow"` loop drops, and how to add an action head.
+says why 2 workers, which coverage each selection omits, and how to add an action head.
 `tests/CONTEXT.md` says where a new test goes and what the session guards check.
 
 See the [public documentation index](docs/README.md) for architecture, ADRs, format contracts and validation limits.

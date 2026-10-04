@@ -139,6 +139,7 @@ def test_ppo_loss_entropy_bonus_switch():
     assert torch.allclose(ent_pin, torch.full((B, ), disc + gauss), atol=1e-5)
 
 
+@pytest.mark.training
 def test_parked_rows_do_not_move_objective(simple_map):
     """Spec §2.2(ii): with parked rows, adv-norm/objective ignore them.
     Setup: n_active=1, entropy bonus off; run one train(); then perturb the

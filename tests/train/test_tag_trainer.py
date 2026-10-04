@@ -17,6 +17,7 @@ import math
 import re
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 
@@ -37,6 +38,7 @@ def _run_once(trainer):
     trainer.train()
 
 
+@pytest.mark.training
 def test_flag_off_is_inert(monkeypatch):
     """Spec §5 test 1: flag off ⇒ helper never called, no _tag_metrics."""
     # PATCH THE MODULE THE CALL SITE RESOLVES THROUGH, NOT `train` or
@@ -62,6 +64,7 @@ def test_flag_off_is_inert(monkeypatch):
         cleanup()
 
 
+@pytest.mark.training
 def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
     """Positive pin on the PATCH POINT used by test_flag_off_is_inert above.
 
@@ -132,6 +135,7 @@ _KEY_RE = re.compile(r"^tag/(cossim_cross|cossim_cross_half|cossim_within_t|coss
                      r"|^tag/(selfplay_active|mbL_index)$")
 
 
+@pytest.mark.training
 def test_flag_on_emits_final_key_names():
     """Spec §5 tests 1+4 (positive half): the hook fires at mb0 AND mbL,
     every emitted key matches the FINAL metric-name contract the analyzer
@@ -163,6 +167,7 @@ def test_flag_on_emits_final_key_names():
         cleanup()
 
 
+@pytest.mark.training
 def test_row_mask_matches_obs_team_bit():
     """Spec §5 test 3: (segment % 10) < 5 ⇔ team T, pinned against the
     INDEPENDENT obs-side team bit obs[24] = (team == 0) the C env writes
@@ -187,6 +192,7 @@ def test_row_mask_matches_obs_team_bit():
         cleanup()
 
 
+@pytest.mark.training
 def test_flag_on_does_not_perturb_training_bitwise():
     """Spec §5 test 4: one evaluate+train with the flag on vs off, identical
     seeds, CPU ⇒ bitwise-equal post-step parameters. CPU keeps this exact —
@@ -210,6 +216,7 @@ def test_flag_on_does_not_perturb_training_bitwise():
         cleanup_b()
 
 
+@pytest.mark.training
 def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
     """Spec §5 test 4b: the team-identity INVARIANT re-pinned on the split
     path.
@@ -248,6 +255,7 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
         cleanup()
 
 
+@pytest.mark.training
 def test_row_mask_matches_obs_team_bit_on_a_both_flags_trainer():
     """Spec §5 test 4 (trunk half): re-pin obs[24] == ((idx % 10) < 5)
     on a both-flags trainer.

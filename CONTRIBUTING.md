@@ -107,16 +107,46 @@ package it tests; a file at the `tests/` root is only for a flat module such as 
 what the session guards in `tests/conftest.py` check.
 
 ```bash
-uv run python -m pytest -n 2 --dist loadgroup tests -q        # the full suite, one session
+uv run python -m pytest -n 2 --dist loadgroup tests -q        # fast default
+uv run python -m pytest -n 2 --dist loadgroup tests -m training -q
+uv run python -m pytest -n 2 --dist loadgroup tests -m "slow and not training" -q
+uv run python -m pytest -n 2 --dist loadgroup tests -m "" -q  # complete, one session
 uv run python -m pytest tests/env/test_env_config.py -q -n 0  # one test or file: no workers
+uv run python -m pytest tests/train/test_resume_state.py -m "" -q -n 0
 uv run python -m cs2rl.train --smoke                          # env sanity check
 ```
 
-The full suite is one session on 2 pytest-xdist workers (`-n 2`); it is the run that HEAD, verifiers and post-merge checks use.
-- **Why 2.** Memory. Two workers took 2.9 GB more than a serial session on a 15 GB machine that also runs the owner's work, and four left 74 MB above the 2.5 GB kill line and needed a torch thread cap. `-n auto` is capped to 2 by `tests/conftest.py` when the args name `tests` or a path under it (`PYTEST_XDIST_AUTO_NUM_WORKERS` overrides it), so a mistyped `-n auto` does not start one worker per core. `-n`, `--dist` and `-m` are never in `addopts`: a full run must not depend on undoing them.
+The default expression in pytest's native configuration is `not slow and not training`.
+Ordinary domain, configuration and light numerical tests stay fast, including cheap
+trainer construction, return-statistics, seed/RNG and checkpoint-unit checks. Real
+trainer rollouts, learning loops and checkpoint continuation carry `training`;
+expensive non-training campaigns, native builds and fresh-process checks use `slow`.
+Some training tests retain `slow` as well: `-m training` selects them together.
+
+At this selection change, collection is 1948 fast, 57 training and 65 extended
+non-training cases; the complete command collects 2070 (2063 original cases plus
+seven selection regressions). The tiers are disjoint and their union is complete.
+The fast and complete `tests` invocations both retain the expected performance-smoke
+opt-in skip; naming its file explicitly still opts in. Counts describe this revision
+and will change as tests are added. Deselection omits real coverage; it is not a skip
+or a cheaper workload for an omitted test.
+
+Use fast validation for ordinary edits and routine HEAD/verifier/post-merge checks.
+Add the training tier when trainer, learning or checkpoint-continuation behavior
+changes, and the extended tier when the affected native-build, child campaign or
+process-isolation behavior changes. Releases and substantial training changes use
+the complete command. A single file/node still inherits the default expression:
+use `-m "" -n 0` to run every intended case, including training. pytest's last CLI
+`-m` overrides the configured expression; nested repo-configured child sessions must
+clear it explicitly when their intended consumer belongs to another selection.
+
+Broad selections use 2 pytest-xdist workers (`-n 2`), with the complete suite in one session.
+- **Why 2.** Memory. Two workers took 2.9 GB more than a serial session on a 15 GB machine that also runs the owner's work, and four left 74 MB above the 2.5 GB kill line and needed a torch thread cap. `-n auto` is capped to 2 by `tests/conftest.py` when the args name `tests` or a path under it (`PYTEST_XDIST_AUTO_NUM_WORKERS` overrides it), so a mistyped `-n auto` does not start one worker per core. `-n` and `--dist` stay out of `addopts`; the default `-m` selection is cleared by the documented complete command.
 - **Why `--dist loadgroup`.** `tests/train/test_reward_loop_equivalence.py` carries `xdist_group("gpu")`, so that file's CUDA work runs in one worker and opens one context there instead of up to two (other files can still open CUDA in either worker). loadgroup appends `@gpu` to those test ids.
 - **The guards.** The session-end guards in `tests/conftest.py` (one module object per file, the namespace guard) relay each worker's facts to the controller, so they hold under `-n`. Their `-n 2` tests need pytest-xdist in the environment: run `uv sync --all-groups --inexact` in the main checkout, or they fail with that remedy.
-- **No separate sessions.** The four files that used to run each alone (`tests/env/test_arena_duel.py`, `tests/env/c/test_binding.py`, `tests/train/test_pitch_pin.py`, `tests/train/test_train_cli.py`) run inside the `-n 2` session. The recorded reason for "each alone" (cold vis-cache orphans, #251/#254) is closed, and the full session with them passed with MemAvailable never below 6.6 GB from a 10.1 GB start (about 3.5 GB used, no swap growth). Start a full run with at least 7 GB of MemAvailable, which leaves about 1 GB above a 2.5 GB floor. One hazard remains: a cold vis cache. Copy the `vis_cache*.npy` files from the main checkout's `src/cs2rl/` into a fresh worktree before any test run.
-- **Fast loop.** `-m "not slow"` (with `-n 2`) is for intermediate per-commit checks only. The `slow` marker (over about 15 s of wall) drops real coverage: the patch-binding campaign, the seed positive control and the fast-math builds. HEAD, verifiers and post-merge run the full suite.
+- **One complete session.** The four files that used to run each alone (`tests/env/test_arena_duel.py`, `tests/env/c/test_binding.py`, `tests/train/test_pitch_pin.py`, `tests/train/test_train_cli.py`) run inside the complete `-n 2` session. The recorded reason for "each alone" (cold vis-cache orphans, #251/#254) is closed. The historical 7 GiB available-memory cutoff was a conservative launch estimate, not measured suite usage. Later native accounting measured 3.801693 GiB charged memory peak and a separate 0.684212 GiB swap peak in one full run; these are not a reusable launch requirement or total host/GPU usage. One hazard remains: a cold vis cache. Copy the `vis_cache*.npy` files from the main checkout's `src/cs2rl/` into a fresh worktree before any test run.
 
-A full run takes several minutes: measured on one development machine on 2026-09-30, about 5.5 min for the full suite at `-n 2` (one run, 1782 tests), against about 8-9 min serial (main session plus the four former each-alone files).
+The latest historical complete run after PR #346 reported 2062 passed and one expected
+skip in 735.94 s. The unmatched slowdown investigation is owner-deferred in
+[#347](https://github.com/utof/cs2rl/issues/347); selection alone establishes no controlled
+whole-suite speedup. Preserve workloads and timeouts when choosing a tier.

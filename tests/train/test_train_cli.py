@@ -20,6 +20,7 @@ def run_train_command(*args, timeout=600):
     )
 
 
+@pytest.mark.slow
 def test_train_help_shows_current_cli():
     result = run_train_command("--help", timeout=30)
     assert result.returncode == 0, f"--help failed:\n{result.stderr}"
@@ -68,6 +69,7 @@ def test_train_help_shows_current_cli():
         assert legacy_flag not in result.stdout, f"{legacy_flag} should not be exposed anymore"
 
 
+@pytest.mark.slow
 def test_dump_config_without_checkpoint_dir_uses_default(tmp_path):
     """R0-C made --checkpoint-dir default=None; --dump-config must still resolve
     it to CHECKPOINTS_DIR instead of crashing on Path(None). CHECKPOINTS_DIR is
@@ -83,6 +85,7 @@ def test_dump_config_without_checkpoint_dir_uses_default(tmp_path):
     assert (tmp_path / "outputs" / "checkpoints" / "config.json").exists(), r.stdout
 
 
+@pytest.mark.slow
 def test_dump_config_writes_json(tmp_path):
     """--dump-config writes <checkpoint_dir>/config.json and exits without training.
 
@@ -132,6 +135,7 @@ def _dump_config(tmp_path, *extra_args):
     return json.loads((ckpt / "config.json").read_text())
 
 
+@pytest.mark.slow
 def test_env_knob_cli_defaults(tmp_path):
     """An unflagged run keeps env-selected numeric knobs and enabled stance actions.
 
@@ -145,6 +149,7 @@ def test_env_knob_cli_defaults(tmp_path):
         assert cfg[key] == 1 and type(cfg[key]) is int, key
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("flag,key,field,value,expected", [
     ("--round-time-ticks", "round_time_ticks", "round_time", "160", 160),
     ("--laser-range", "laser_range", "laser_range", "300.5", 300.5),
@@ -173,6 +178,7 @@ def test_env_knob_cli_overrides_round_trip(tmp_path, flag, key, field, value, ex
     assert type(actual) is type(expected), field
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("flag,value,error", [
     ("--round-time-ticks", "160.5", "invalid int value"),
     ("--laser-range", "not-a-number", "invalid float value"),
@@ -204,6 +210,7 @@ def test_env_knob_cli_rejects_invalid_values(tmp_path, flag, value, error):
     assert not (tmp_path / "config.json").exists()
 
 
+@pytest.mark.slow
 def test_warmstart_entropy_config_keys(tmp_path):
     cfg = _dump_config(tmp_path)
     assert cfg["warmstart_entropy"] is False
@@ -224,6 +231,7 @@ def test_warmstart_entropy_config_keys(tmp_path):
     assert cfg["warmstart_alpha_ceiling"] == 0.25
 
 
+@pytest.mark.slow
 def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     """Every threaded weight lands in config.json at its make_env default.
 
@@ -242,6 +250,7 @@ def test_reward_weight_config_keys_default_to_make_env_values(tmp_path):
     assert cfg["reward_symmetrize"] is False
 
 
+@pytest.mark.slow
 def test_reward_weight_cli_overrides_round_trip(tmp_path):
     """Representative overrides + the symmetrize flag survive CLI → config.json.
 
@@ -269,6 +278,7 @@ FIXTURE_DUMP_CONFIG = REPO_ROOT / "tests" / "fixtures" / "dump_config_pre_165.js
 PRE_165_CAPTURE_COMMIT = "54d7da01b7df28414dbcda346a2f8c4f6d2b2ee7"
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("arm", ["default", "non_default"])
 def test_dump_config_matches_the_pre_165_fixture(tmp_path, arm):
     """config.json is byte-identical to the pre-#165 capture (spec Phase B R7).
@@ -326,6 +336,7 @@ def test_dump_config_matches_the_pre_165_fixture(tmp_path, arm):
         "purpose — otherwise this is the provenance regression it exists to catch.")
 
 
+@pytest.mark.slow
 def test_tag_diagnostic_config_keys(tmp_path):
     """TAG flags land in config.json (provenance) — spec 2026-08-13 §4.1.
 
@@ -342,6 +353,7 @@ def test_tag_diagnostic_config_keys(tmp_path):
     assert cfg["tag_every"] == 2
 
 
+@pytest.mark.slow
 def test_tct_split_heads_config_key(tmp_path):
     """Batch 7 flag lands in config.json (provenance) — spec 2026-08-13 §2.
 
@@ -358,6 +370,7 @@ def test_tct_split_heads_config_key(tmp_path):
     assert cfg["tct_split_heads"] is True
 
 
+@pytest.mark.slow
 def test_tct_split_trunk_config_key(tmp_path):
     """Trunk-split flag lands in config.json (provenance) — spec 2026-08-15.
 
@@ -374,6 +387,7 @@ def test_tct_split_trunk_config_key(tmp_path):
     assert cfg["tct_split_trunk"] is True
 
 
+@pytest.mark.slow
 def test_opponent_config_key_and_budget(tmp_path):
     """Rung 1a T3 test (iv): --opponent reaches config.json through the REAL
     argparse surface, and the budget it selects travels with it.
@@ -395,6 +409,7 @@ def test_opponent_config_key_and_budget(tmp_path):
     assert noop["total_timesteps"] == 10_000_000
 
 
+@pytest.mark.slow
 def test_opponent_noop_without_no_self_play_is_refused_at_startup(tmp_path):
     """Rung 1a T3 test (iii). The guard sits ABOVE the --dump-config exit, so
     the Modal / run_rung1 fingerprint step refuses the launch in milliseconds
@@ -433,6 +448,7 @@ def test_opponent_flag_declared_with_both_modes():
     assert 'OPPONENT_MODES = ("self", "noop")' in config_src
 
 
+@pytest.mark.slow
 def test_train_smoke_returns_zero():
     result = run_train_command("--smoke")
     assert result.returncode == 0, (

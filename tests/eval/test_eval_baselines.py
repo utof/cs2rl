@@ -147,6 +147,7 @@ def test_eval_keys_and_selfplay_receives_elimination_only_rate():
     assert elimination_only_win_rates({}) == (0.0, 0.0)
 
 
+@pytest.mark.training
 def test_policy_actor_from_live_policy_fills_all_rows(simple_map):
     from cs2rl.eval.baselines import BaselineEvaluator, PolicyActor
     from tests._helpers.trainer_harness import _build_trainer_for_test
@@ -192,6 +193,7 @@ def test_policy_actor_from_live_policy_fills_all_rows(simple_map):
         cleanup()
 
 
+@pytest.mark.training
 def test_evaluate_emits_all_eval_keys_and_keeps_training_rng(simple_map):
     """The eval/* key set is the contract analysis reads; and evaluate() must
     not perturb the training torch RNG stream (spec §6 seeding)."""
@@ -246,6 +248,7 @@ class _StubEvaluator:
         return {"eval/win_vs_random": 0.5, "eval/win_vs_oracle": 0.25}
 
 
+@pytest.mark.training
 def test_scheduled_eval_survives_log_throttle(simple_map):
     """Binding ruling: eval runs on the eval epoch even when PuffeRL's 0.25 s
     log throttle returns logs=None, and its keys land on the NEXT logged row
