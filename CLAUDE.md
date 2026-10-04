@@ -10,6 +10,8 @@
 
 ## Measure first, then spec/plan
 
+Existing-capability evidence belongs before custom infrastructure: the prototyper, or implementer when no prototype is needed, checks existing project code, standard-library facilities and installed dependencies against current official documentation and supported versions. In the existing report, record the candidate API/version/source, a small executed comparison including the relevant failure case, requirements met, and the specific unmet behavior justifying custom code. Use the existing capability when it fits. The brief carries the evidence; the reviewer independently checks the riskiest claim. Missing evidence blocks acceptance of the custom abstraction. Include this rule explicitly in relevant delegated prompts, including nested delegation; unavailable evidence is unverified, not proof no capability fits. Keep the check bounded and add no research agent or enforcement framework solely for it.
+
 - Before writing a spec or plan, run a measure-only experiment in a worktree. Prototype the change, or a sketch of it, and run the suite and knock-outs against it. Census the real call sites. Try the library, tool or API in a playground. Write the spec/plan FROM those measurements, so it names functions, flags and syntax that were actually run, not guessed.
 - Why: prose plans do not converge. Review folds produced the next round's Criticals roughly 1:1 (memory: gate plans must be executed). The #205 part 2a/2b experiments found what no prose draft had:
   - 17 silent stale sites;
