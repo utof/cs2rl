@@ -23,8 +23,11 @@ WHAT this module owns:
     out or leaves no usable JUnit evidence (`_run_probe` lists those cases).
 
 WHY it lives under tests/: it is test harness, not production code. Production
-never imports it, and the Modal image mounts only scripts/run_modal.py,
-scripts/modal_runner/*.py and the /opt/cs2rl build inputs.
+never imports it. scripts/run_modal.py builds the image with runner modules copied
+under /opt/app/scripts; native dependency setup copies pyproject.toml and uv.lock
+into the SDK-managed /.uv context. /opt/cs2rl/.venv is a compatibility
+symlink to /.uv/.venv. Training source arrives separately as a content-addressed
+archive.
 
 Run from the repository root (`test_patch_binding_campaign` is the checked-in
 caller): python -m tests.modal.modal_patch_binding_campaign --repo-root .
