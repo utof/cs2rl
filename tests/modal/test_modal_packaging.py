@@ -359,31 +359,15 @@ def _module_level_names(tree):
 
 
 def _module_level_binding_counts(tree):
-    """{name: how many module-level statements bind it} -- the LIST-shaped census.
+    """{name: number of module-level bindings}, retaining shadowed definitions.
 
-    WHY THIS EXISTS NEXT TO `_module_level_names`, which looks like it already
-    answers the question: that function returns a DICT, so two module-level
-    definitions of one name inside ONE file collapse to a single entry, and
-    everything built on it inherits the blindness. The placement gate's
-    `duplicated` check counts FILES and therefore cannot see the case at all.
-    Measured by review at `84622fc`: appending a second `PINNED_CUDA_IMAGE` to
-    tests/test_modal_client.py, shadowing the real digest with
-    `...@sha256:deadbeef`, left the whole seam at `3 passed`.
+    `_module_level_names` returns a dict and collapses repeated bindings inside
+    one module. Counting statements detects that loss, including reassigned
+    constants such as PINNED_CUDA_IMAGE. Separate Python modules have separate
+    namespaces; a same-named private helper elsewhere is not a local rebinding.
 
-    THE PITFALL, and it is the failure the seam was built to stop rather than a
-    new one: two copies of a pinned digest that drift apart. Python does not let
-    you have two LIVE definitions of a name across two files -- one import wins
-    and the other is dead -- but it lets you have them inside one file, where the
-    second silently shadows the first and both are in the source a reader greps.
-    So the intra-file shape is the only one the failure can actually take at run
-    time, and it was the one shape nothing watched.
-
-    Mirrors `_module_level_names`' branches exactly: defs and classes via
-    `_DEFS`, `Assign` targets walked so tuple unpacking counts each name, and
-    `AnnAssign`. It counts where that function assigns, so the two cannot come to
-    disagree about what a module-level binding is -- which matters, because a
-    census that disagreed with the one the gate uses everywhere else would report
-    duplicates nobody else believes in.
+    Mirror the definition, assignment and annotated-assignment branches of
+    `_module_level_names`, including tuple-unpacking targets.
     """
     counts = {}
     for node in tree.body:
@@ -806,47 +790,17 @@ def _seam_sources(root=ROOT, runner_files=RUNNER_TEST_FILES):
 
 
 def _names_defined_under_tests():
-    """{name: [files]} for every module-level name in the files the seam governs
-    plus every OTHER collected modal test file.
+    """{name: [files]} for module-level bindings in test files and the shared helper.
 
-    The glob is the point. Review moved one test into a brand-new
-    `tests/test_modal_stray.py` and the first draft of this gate stayed green,
-    because it only ever looked at files the manifest itself names. A
-    destination the manifest does not know about has to be reachable, or the
-    check is asking the suspect for the list of places to search.
+    The recursive glob sees undeclared destinations as well as the seam. Public
+    governed names retain the outside-file check; private helpers are scoped by
+    their owned files in the placement guards. An unrelated module's `_git`
+    does not replace the seam's `_git`.
 
-    CALLED BY `test_no_governed_name_is_defined_outside_the_seams_own_files`, and
-    the reason that matters is a second review finding: for one round this
-    function shipped with no caller in the committed suite at all, so the same
-    stray-file plant still left the file green and the only certification was a
-    gitignored script. Task 4's placement gate is the other caller. If you are
-    about to remove the last caller, delete the function with it.
-
-    Scope is every `tests/**/test_*.py` plus the shared helper module: a stray file that
-    pytest never collects is not the threat, and measured, widening past
-    `test_*.py` pulled in `tests/capture_dump_config_pre_165.py` (until its
-    deletion in #207; `git show 6db06b5:tests/capture_dump_config_pre_165.py`)
-    and `tests/capture_env_config_pre_165b.py` (until its deletion; `git show
-    9878725:tests/capture_env_config_pre_165b.py`), which each defined a `_git`
-    of their own and made a gate built on this red for an unrelated reason.
-
-    CONTRACT for the caller: the return value is a SUPERSET of the seam. It
-    covers every `tests/**/test_*.py` in the repo, not just the seam's destination
-    files (`RUNNER_TEST_FILES`, `CLIENT_FILE`, `SHARED_FILE` and `PACKAGING_FILE`),
-    which is exactly what makes an undeclared file visible -- and exactly why a
-    caller comparing it against the manifest must scope the disk-to-manifest
-    direction to names it actually governs rather than flagging every unrelated
-    test file's helpers.
-
-    NO EXISTENCE FILTER. The glob's entries exist by construction, so a filter
-    here could only ever skip `SHARED_FILE`, a declared seam file, and a
-    declared seam file must fail when it is missing, never be skipped. A
-    missing shared file fails at `read_text`, naming the path.
-
-    RECURSIVE (#207 part 2): tests/ mirrors src/cs2rl/, so a flat `glob` would
-    see only the root's test files and pass on a stray name one directory down.
-    The floor below makes a narrower scan red: every tracked test file must be
-    in it.
+    The tracked-file floor below rejects an incomplete scan. SHARED_FILE is
+    read without an existence filter, so a missing declared file raises.
+    The two placement guards call this scanner; the classifier probe also uses
+    it to describe unrelated ROOT bindings if its assertion fails.
     """
     found = {}
     paths = sorted(set((ROOT / "tests").rglob("test_*.py")) | {ROOT / SHARED_FILE})
@@ -2298,137 +2252,57 @@ def test_seam_manifest_agrees_with_the_classifier():
         }))
 
 
-def test_no_governed_name_is_defined_outside_the_seams_own_files():
-    """A name the manifest governs may not be defined under `tests/` elsewhere.
+def test_governed_names_stay_in_their_owned_scope():
+    """Every declared definition exists at its home; private names are module-local.
 
-    WHY THIS EXISTS, and it is not the obvious reason. `_names_defined_under_tests`
-    scans by GLOB over the test directory rather than by the manifest's own list
-    of destination files, because a check that asks the manifest where to look
-    cannot see a file the manifest does not know about. Review demonstrated the
-    hole on the previous revision: a governed name (`_git`) moved into a
-    brand-new `tests/test_modal_stray.py` left this file green, because nothing
-    committed here called the scanner at all. It is called now.
+    Public governed names retain their repository-wide placement policy.
+    Private helpers outside the seam are independent bindings, even when their
+    names match. Their existence cannot satisfy a missing manifest home.
+    Exact body duplication is a branch-review finding, not helper ownership.
 
-    WHAT IT CATCHES: every governed name lives in one of the seam's four legal
-    homes, so a governed name appearing in a FIFTH file is either a copy or a
-    migration nothing declared. Written pre-split, when the sentence read "every
-    governed name lives in `tests/test_modal_runner.py` ... one legal home" and
-    "WHAT IT BECOMES after Task 4" was the four-home version; W2 made the second
-    half the live rule. Current destination counts are derived from the manifest,
-    rather than duplicated in prose:
-    `test_seam_manifest_agrees_with_the_classifier` is what verifies that
-    manifest against the source.
-
-    WHAT IT DELIBERATELY DOES NOT CATCH: a BRAND-NEW name in a stray file. That
-    name is not governed, and an unrelated new test module is legal. Only
-    `governed` is in scope -- which is also why the scan's superset (every
-    `tests/**/test_*.py` plus the shared helper module) does not turn this red for
-    every helper in those files.
-
-    PITFALL, and it is the one this repo keeps paying for: a scan that reached
-    nothing would pass this silently. So the scope controls come FIRST and are
-    not decoration. `outside` proves the glob reaches past the seam's own files,
-    without which nothing could ever be found straying; `unseen` proves the scan
-    actually sees the governed names rather than passing on an empty
-    intersection. Both are stated as failures of THIS TEST's instrument, not of
-    the tree, because that is what they would mean.
+    The outside-file control verifies the public scan's reach. Checking homes
+    against the manifest also prevents an empty or partial scan passing.
     """
-    governed = set(json.loads(MANIFEST.read_text(encoding="utf-8")))
+    manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     seam_files = {*RUNNER_TEST_FILES, CLIENT_FILE, SHARED_FILE, PACKAGING_FILE}
     found = _names_defined_under_tests()
 
     outside = {f for files in found.values() for f in files} - seam_files
-    assert outside, ("the scan reached no file outside the seam's own files (`RUNNER_TEST_FILES`, "
-                     "`CLIENT_FILE`, `SHARED_FILE` and `PACKAGING_FILE`), so it could not report "
-                     "a strayed name even if one existed. `_names_defined_under_tests` rglobs "
-                     "`test_*.py` under tests/; if that returned only seam files the glob is "
-                     "broken, not the tree.")
-    unseen = governed - set(found)
-    assert not unseen, ("names the manifest governs are defined nowhere the scan can see, so the "
-                        "check below would pass by looking at nothing. Either the scan lost a "
-                        "file it should cover, or these names were deleted from the tree without "
-                        f"being deleted from the manifest: {sorted(unseen)}")
+    assert outside, "the scan reached no file outside the seam's own files"
+    missing_homes = {
+        name: home
+        for name, home in manifest.items() if home not in found.get(name, ())
+    }
+    assert not missing_homes, ("governed definitions are missing from their declared homes: "
+                               f"{missing_homes}. Restore them or " + _manifest_edits())
 
     strayed = {
         name: sorted(set(files) - seam_files)
-        for name, files in found.items() if name in governed and set(files) - seam_files
+        for name, files in found.items()
+        if name in manifest and not name.startswith("_") and set(files) - seam_files
     }
-    assert not strayed, ("these names are governed by the seam manifest but are ALSO defined in a "
-                         "file the seam does not own, so a reader has no way to tell which "
-                         "definition the suite runs and Task 4's split would silently pick one. "
-                         f"{strayed}. Delete (or rename) the copy outside the seam; the governed "
-                         "definition stays where its manifest value says, so " + _manifest_edits())
+    assert not strayed, ("public governed names are defined outside the seam's owned files: "
+                         f"{strayed}. Restore their declared placement or " + _manifest_edits())
 
 
 def test_the_modal_test_split_matches_concern_recomputed_from_source():
-    """Every governed name lives in the file its RECOMPUTED concern says.
+    """Declared definitions match recomputed concern without global private-name ownership.
 
-    THE PITFALL THIS EXISTS FOR, measured: a check that compares the split
-    against a frozen manifest is green on a maximally wrong split. Review
-    reassigned all 250 non-guard, non-shared names runner/client by even/odd
-    source index, split the file to match its own shuffled manifest, and got
-    `1 passed`. A manifest is a record of a decision; it is not evidence the
-    decision was right. So this test re-runs `classify_seam` over the files ON
-    DISK and compares the answer to where each name actually sits. The reference
-    graph does not change when you shuffle names between two files -- which is
-    exactly why the shuffle cannot hide from it.
+    The manifest records placement; the classifier re-derives concern. Private
+    helper definitions in unrelated modules cannot satisfy a seam definition,
+    nor are they duplicates of it merely because their names match.
 
-    Three more holes the first draft had, all demonstrated, all closed here:
-
-    * DELETION, in the shape that leaves the manifest naming the deleted test:
-      iterating disk->manifest never examines a manifest name with no definition
-      anywhere. Deleting `test_allowed_gpus` outright gave `1 passed`. Hence the
-      manifest->disk direction below.
-    * A FOURTH FILE was invisible: the scan set was the manifest's own value
-      set. Moving a test into a new `tests/test_modal_stray.py` gave
-      `1 passed`. Hence `_names_defined_under_tests`'s glob.
-    * The HEADER EXCLUSION could hide a loss: `ROOT` is ungoverned, so dropping
-      it from a destination would be silent. Hence the last assertion.
-
-    TWO MORE SHAPES THIS GATE SHIPPED GREEN ON, found by review at `84622fc` by
-    running them rather than reading them, and closed here. Both are the same
-    defect class as each other and as the reason this file exists: a bullet above
-    claimed a hole was closed when only ONE SHAPE of that hole was.
-
-    * DELETION THAT ALSO EDITS THE MANIFEST -- which is the shape a real deleting
-      commit produces, because leaving the manifest stale reddens
-      `test_seam_manifest_agrees_with_the_classifier` and the author fixes that
-      before pushing. Excising `test_allowed_gpus` from the file AND removing its
-      manifest key gave `3 passed`. Every assertion here iterates `manifest`, and
-      the agreement test compares `set(manifest)` against `set(computed)`, so a
-      name absent from BOTH is examined by nothing at all. Hence
-      `GOVERNED_NAME_COUNT`: the seam's size is pinned, so a deletion can no
-      longer be absorbed by regenerating the manifest -- it has to move a number
-      a reviewer reads in the diff.
-    * AN INTRA-FILE DUPLICATE. `duplicated` counts FILES, and the `on_disk` lists
-      come from `_module_level_names`, which is a DICT -- so two module-level
-      definitions of one name inside ONE file collapse to a single entry and the
-      list length stays 1. Appending a second `PINNED_CUDA_IMAGE` to
-      tests/modal/test_modal_client.py gave `3 passed`. That is precisely the failure
-      `duplicated`'s own message describes, in the only arrangement Python
-      actually permits: you cannot have two live definitions across two files,
-      but you can inside one, where the second silently shadows the first. Step
-      6's control (d) covered only the cross-file shape. Hence
-      `_module_level_binding_counts` and `redefined` below.
-
-    AND THE REACH FLOOR, over the same union namespace (`reach_floor_violations`,
-    whose docstring states what it cannot catch, with figures). For a runner
-    test, `concern says` is simply the runner file that defines it, so the
-    `misplaced` check below compares on-disk with on-disk for tests and cannot
-    see a test in the wrong runner file; the floor and the core rule are what
-    object to one. Before them, every runner import in the seam files must
-    bind the facade or a whole runner module, the only aliases the two rules
-    resolve through (`_runner_imports_the_floor_cannot_resolve`). The
-    floor's own scope is asserted last: the (file, test)
-    pairs it examined must be exactly the manifest's runner-half tests, in
-    whatever file the manifest puts them, and every runner test file must hold
-    one, or a floor over a partial file list, or a seam reading a runner file
-    the floor does not, would pass here unseen (`_floor_scope_problems`).
+    Retain the governed count, declared homes, within-seam placement and
+    within-file rebinding checks. The header, reach floor, resolvable imports
+    and exact floor population remain independent checks of the split.
     """
     manifest = json.loads(MANIFEST.read_text(encoding="utf-8"))
     sources = _seam_sources()
     computed, _ = classify_seam(sources, RUNNER_TEST_FILES)
-    on_disk = _names_defined_under_tests()
+    on_disk = {
+        name: [rel for rel in files if not name.startswith("_") or rel in sources]
+        for name, files in _names_defined_under_tests().items()
+    }
     trees = {
         rel: ast.parse((ROOT / rel).read_text(encoding="utf-8"))
         for rel in sorted(set(manifest.values()))
@@ -2440,9 +2314,9 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
         "loss is invisible -- that is the shape this pin exists for. If the change is intended, "
         "move the number and say why in the commit; if it is not, you have lost a test.")
 
-    missing = sorted(n for n in manifest if n not in on_disk)
+    missing = sorted(n for n in manifest if not on_disk.get(n))
     assert not missing, (
-        "the manifest names definitions that exist nowhere under tests/. Either "
+        "the manifest names definitions missing from their owned scope. Either "
         f"they were deleted or they were moved out of reach of this scan: {missing}. "
         "Restore them, or, if the deletion is intended: " + _manifest_edits(delete=missing))
 
@@ -2456,7 +2330,7 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
 
     duplicated = {n: on_disk[n] for n in manifest if len(on_disk[n]) > 1}
     assert not duplicated, (
-        "a governed name is defined in two files. Two copies of a pinned digest "
+        "a governed name has multiple definitions in its owned scope. Copies of a pinned digest "
         f"or a fixture drift apart and every other check here stays green: {duplicated}")
 
     redefined = {}
@@ -2466,8 +2340,7 @@ def test_the_modal_test_split_matches_concern_recomputed_from_source():
                 redefined[name] = {"file": rel, "module-level definitions": times}
     assert not redefined, (
         "a governed name is defined more than once at module level INSIDE one file, so the second "
-        "definition silently shadows the first. `duplicated` above counts files and cannot see "
-        "this; it is the same drift, in the only arrangement Python permits. Two copies of a "
+        "definition silently shadows the first. The file count cannot see this. Two copies of a "
         f"pinned digest is the case that motivated the seam: {redefined}")
 
     misplaced = {
