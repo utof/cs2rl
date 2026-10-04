@@ -134,7 +134,7 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # setup returns only production keywords. The two flat-routing self-tests
 # are replaced by native setup/default safety tests in their original files;
 # their key changes do not change the population or any behavioral test home.
-GOVERNED_NAME_COUNT = 299
+GOVERNED_NAME_COUNT = 295
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.
@@ -321,7 +321,7 @@ SEAM_HEADER_NAMES = frozenset({"ROOT"})
 # `classify_seam`'s stage-1 note. Every member of both sets has a dedicated case
 # in `_SEAM_CLASSIFIER_PROBE`, because before those cases existed, deleting
 # `"module"` was measured to leave the whole file green.
-_CLIENT_BINDINGS = frozenset({"_import_run_modal", "_run_modal_image_reqs", "module"})
+_CLIENT_BINDINGS = frozenset({"_import_run_modal", "module"})
 _CLIENT_MODULES = ("scripts.run_modal", "scripts.modal_artifacts", "scripts.modal_backfill_sidecar")
 
 _DEFS = (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
@@ -557,8 +557,8 @@ def classify_seam(sources, runner_files):
        moves 0, and attribute-root resolution moves 0. Knock out the closure
        AND `"module"` together and 30 names move, 13 of them tests -- the two
        cover the same 13 client tests, so each looks like dead weight until the
-       other is gone. `_run_modal_image_reqs` is the one seed that is
-       load-bearing alone (5 names). The string seed and attribute-root
+       other is gone. The retired image resolver seed was load-bearing alone
+       on that historical monolith (5 names). The string seed and attribute-root
        resolution move 0 even jointly with the closure disabled: they are
        over-coverage, kept because an extra edge can only merge two names into
        one destination while a missing one strands a helper.
@@ -1725,9 +1725,6 @@ def test_probe_runner_via_shared():
 def test_probe_client_direct():
     return _import_run_modal()
 
-def test_probe_client_by_image_reqs():
-    return _run_modal_image_reqs("lock")
-
 def test_probe_client_by_module_binding():
     module = _import_backfill()
     return module.App
@@ -1758,11 +1755,11 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
     Each of the four destinations is exercised by a name that can only land
     there for the stated reason:
 
-    - six SINGLE-SIGNAL cases -- `_direct`, `_by_image_reqs`,
+    - five SINGLE-SIGNAL cases -- `_direct`,
       `_by_module_binding` and the three `_by_*_string` -- carry exactly one
       client signal each, one per member of `_CLIENT_BINDINGS` and
       `_CLIENT_MODULES`. Deleting any member of either set turns one of them red
-      by name; all six deletions were run and each has an objector.
+      by name; each remaining seed has an objector.
     - `test_probe_client_transitive` and `test_probe_client_via_shared` carry no
       signal at all and are client purely because they call something that is.
       That is the whole reason this is a closure and not a marker list, and the
@@ -1825,7 +1822,6 @@ def test_the_seam_classifier_places_a_planted_name_by_its_reference_graph():
 
     # One per member of _CLIENT_BINDINGS, then one per member of _CLIENT_MODULES.
     assert destinations["test_probe_client_direct"] == CLIENT_FILE
-    assert destinations["test_probe_client_by_image_reqs"] == CLIENT_FILE
     assert destinations["test_probe_client_by_module_binding"] == CLIENT_FILE, (
         "a test whose only client signal is binding and dereferencing `module` "
         "was classified as runner. On the monolith 13 client tests carry that "

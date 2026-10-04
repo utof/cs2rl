@@ -15,6 +15,7 @@ import importlib
 import io
 import json
 import os
+import shlex
 import signal
 import subprocess
 import sys
@@ -218,6 +219,7 @@ class FakeImage:
         self.env_vars: dict[str, str] = {}
         self.local_files: list[tuple[str, str, bool]] = []
         self.commands: list[str] = []
+        self.uv_sync_calls: list[tuple[str, dict[str, object]]] = []
 
     @classmethod
     def from_registry(cls, tag: str, add_python: str | None = None, **kwargs):
@@ -235,6 +237,11 @@ class FakeImage:
 
     def pip_install(self, *packages: str):
         self.pips.extend(packages)
+        return self
+
+    def uv_sync(self, uv_project_dir: str, **kwargs):
+        """Record the app's public selection boundary; the SDK owns its implementation."""
+        self.uv_sync_calls.append((uv_project_dir, kwargs))
         return self
 
     def env(self, mapping: dict[str, str]):
@@ -510,105 +517,43 @@ def test_base_function_has_no_static_named_object_dependency(fake_modal):
     assert mrl.REGISTRY_NAME == "cs2rl-training-run-registry"
 
 
-def _run_modal_image_reqs(*args: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        [sys.executable, str(ROOT / "scripts" / "modal_image_reqs.py"), *args],
-        cwd=ROOT,
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-
-
-def _requirement_names(text: str) -> list[str]:
-    pins = [line for line in text.splitlines() if line.strip()]
-    assert pins
-    assert all("==" in line for line in pins)
-    return [line.split("==", 1)[0] for line in pins]
-
-
-def test_modal_image_reqs_from_repo_lock_includes_torch_numpy_not_pufferlib_or_modal():
-    result = _run_modal_image_reqs(str(ROOT / "uv.lock"))
-    names = _requirement_names(result.stdout)
-    assert names == sorted(names)
-    assert "torch" in names
-    assert "numpy" in names
-    assert "pufferlib" not in names
-    assert "cs2rl" not in names
-    assert "modal" not in names
-
-
-def test_modal_image_reqs_writes_minus_o(tmp_path):
-    out = tmp_path / "cs2rl-reqs.txt"
-    result = _run_modal_image_reqs(str(ROOT / "uv.lock"), "-o", str(out))
-    assert result.stdout == ""
-    names = _requirement_names(out.read_text())
-    assert names == sorted(names)
-    assert "torch" in names
-    assert "numpy" in names
-    assert "pufferlib" not in names
-    assert "modal" not in names
-
-
-def test_modal_image_reqs_walks_runtime_graph_not_dev_or_modal_groups(tmp_path):
-    lock = tmp_path / "uv.lock"
-    lock.write_text("""\
-version = 1
-[[package]]
-name = "cs2rl"
-version = "0.1.0"
-dependencies = [
-    { name = "numpy" },
-    { name = "pufferlib" },
-]
-
-[package.dev-dependencies]
-dev = [
-    { name = "ruff" },
-]
-modal = [
-    { name = "modal" },
-]
-
-[[package]]
-name = "numpy"
-version = "2.4.3"
-
-[[package]]
-name = "pufferlib"
-version = "3.0.0"
-dependencies = [
-    { name = "torch" },
-    { name = "shimmy", extra = ["gym-v21"] },
-]
-
-[[package]]
-name = "torch"
-version = "2.10.0"
-
-[[package]]
-name = "shimmy"
-version = "1.3.0"
-
-[package.optional-dependencies]
-gym-v21 = [
-    { name = "pyglet" },
-]
-
-[[package]]
-name = "pyglet"
-version = "2.1.0"
-
-[[package]]
-name = "modal"
-version = "1.5.4"
-
-[[package]]
-name = "ruff"
-version = "0.11.13"
-""")
-    result = _run_modal_image_reqs(str(lock))
-    assert result.stdout == "numpy==2.4.3\npyglet==2.1.0\nshimmy==1.3.0\ntorch==2.10.0\n"
+@pytest.mark.parametrize("drift", ["none", "missing_transitive", "version", "extra", "puffer"])
+def test_image_runtime_inventory_rejects_dependency_drift(fake_modal, tmp_path, monkeypatch, drift):
+    module = _import_run_modal()
+    snapshot, check = [
+        shlex.split(command)[2] for command in module.dependency_image.commands
+        if "locked-inventory.json" in command
+    ]
+    inventory = {"torch": "2.10.0", "numpy": "2.4.3", "shimmy": "1.3.0"}
+    monkeypatch.setattr(
+        importlib.metadata, "distributions", lambda: [
+            SimpleNamespace(metadata={"Name": name}, version=version)
+            for name, version in inventory.items()
+        ])
+    monkeypatch.setattr(importlib.metadata, "version", lambda name: inventory[name.lower()])
+    snapshot_path = str(tmp_path / "inventory.json")
+    exec(snapshot.replace("/tmp/locked-inventory.json", snapshot_path), {})
+    inventory.update({
+        "pufferlib": "3.0.0",
+        "setuptools": "82.0.1",
+        "wheel": "0.48.0",
+        "cython": "3.2.9",
+        "ziglang": "0.14.1",
+    })
+    if drift == "missing_transitive":
+        del inventory["shimmy"]
+    elif drift == "version":
+        inventory["shimmy"] = "9.9.9"
+    elif drift == "extra":
+        inventory["unexpected-package"] = "1.0.0"
+    elif drift == "puffer":
+        inventory["pufferlib"] = "4.0.0"
+    check = check.replace("/tmp/locked-inventory.json", snapshot_path)
+    if drift == "none":
+        exec(check, {})
+    else:
+        with pytest.raises(AssertionError):
+            exec(check, {})
 
 
 def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal):
@@ -620,28 +565,16 @@ def test_image_pins_cuda_digest_arch_list_and_hashed_pufferlib_sdist(fake_modal)
     assert image.env_vars["NO_OCEAN"] == "1"
     assert "uv==0.11.1" in image.pips
     assert "ziglang==0.14.1" in image.pips
-    assert (str(ROOT / "pyproject.toml"), "/opt/cs2rl/pyproject.toml", True) in image.local_files
-    assert (str(ROOT / "uv.lock"), "/opt/cs2rl/uv.lock", True) in image.local_files
-    assert (str(ROOT / "scripts" / "modal_image_reqs.py"), "/opt/cs2rl/modal_image_reqs.py",
-            True) in image.local_files
+    assert image.uv_sync_calls == [(str(ROOT), {
+        "frozen":
+        True,
+        "uv_version":
+        "0.11.1",
+        "extra_options":
+        "--no-default-groups --no-install-package pufferlib",
+    })]
     commands = "\n".join(image.commands)
-    assert "modal_image_reqs.py" in commands
-    assert "uv pip install" in commands
-    assert "-r" in commands
-    locked_dep_installs = [
-        part.strip() for command in image.commands for part in command.split("&&")
-        if "uv pip install" in part and "-r" in part
-    ]
-    assert locked_dep_installs
-    assert all("--directory /tmp" in cmd for cmd in locked_dep_installs)
-    locked_dep_command = " && ".join(locked_dep_installs)
-    assert "/tmp/cs2rl-reqs.txt" in locked_dep_command
-    assert "--no-deps" in locked_dep_command
-    assert "pufferlib" not in locked_dep_command
-    assert "uv export" not in locked_dep_command
-    assert "uv sync" not in locked_dep_command
-    assert "uv export" not in commands
-    assert "uv sync" not in commands
+    assert "ln -s /.uv/.venv /opt/cs2rl/.venv" in commands
     assert "--no-build-isolation" in commands
     assert "--no-deps" in commands
     assert "--no-binary pufferlib" in commands
@@ -2428,8 +2361,8 @@ def test_gate_a_criterion_3_package_imports_on_a_container_equivalent_interprete
     The separate PYTHONPATH arms preserve the packaged-vs-bare spelling contrast.
 
     `runner_image is dependency_image` under FakeImage (`add_local_file`
-    returns self), so the recorded list holds every mount: the three
-    /opt/cs2rl build inputs, scripts/run_modal.py and the package files.
+    returns self), so the recorded list holds scripts/run_modal.py and the
+    package files. The SDK owns uv_sync's project/lock build inputs.
 
     DO NOT CREATE scripts/__init__.py. The repository has none, so `scripts` is
     a PEP 420 namespace package: an unmounted `from scripts import X` fails as
@@ -2441,8 +2374,8 @@ def test_gate_a_criterion_3_package_imports_on_a_container_equivalent_interprete
     module = _import_run_modal()
     runner = module.runner_image
     assert runner is module.dependency_image
-    # Four non-package mounts plus __init__.py and each RUNNER_MODULES module.
-    assert len(runner.local_files) == 4 + 1 + len(RUNNER_MODULES)
+    # One non-package mount plus __init__.py and each RUNNER_MODULES module.
+    assert len(runner.local_files) == 1 + 1 + len(RUNNER_MODULES)
     prefix, neutral = tmp_path / 'image', tmp_path / 'cwd'
     neutral.mkdir()
     written = _materialise_recorded_mounts(prefix, runner.local_files)
@@ -2506,8 +2439,8 @@ def test_gate_a_criterion_3_reddens_on_an_unmounted_intra_repo_import(fake_modal
     neutral = tmp_path / 'cwd'
     neutral.mkdir()
     plants = {
-        'from_import': 'from scripts import modal_image_reqs as _unmounted\n',
-        'dotted_import': 'import scripts.modal_image_reqs as _unmounted\n'
+        'from_import': 'from scripts import modal_artifacts as _unmounted\n',
+        'dotted_import': 'import scripts.modal_artifacts as _unmounted\n'
     }
     for label, plant in plants.items():
         prefix = tmp_path / label
@@ -2515,7 +2448,7 @@ def test_gate_a_criterion_3_reddens_on_an_unmounted_intra_repo_import(fake_modal
         status, stderr = _container_equivalent_import(prefix,
                                                       runner.env_vars['PYTHONPATH'],
                                                       cwd=neutral)
-        assert status != 0 and 'modal_image_reqs' in stderr, (label, stderr)
+        assert status != 0 and 'modal_artifacts' in stderr, (label, stderr)
         assert 'ImportError' in stderr or 'ModuleNotFoundError' in stderr, (label, stderr)
 
 
@@ -2617,13 +2550,13 @@ def test_gate_a_criterion_3_minus_p_and_the_neutral_cwd_are_load_bearing(fake_mo
     prefix = tmp_path / 'image'
     _materialise_recorded_mounts(prefix,
                                  runner.local_files,
-                                 plant='from scripts import modal_image_reqs as _unmounted\n')
+                                 plant='from scripts import modal_artifacts as _unmounted\n')
     assert _container_equivalent_import(prefix,
                                         runner.env_vars['PYTHONPATH'],
                                         cwd=ROOT,
                                         isolate_cwd=False) == (0, '')
     status, stderr = _container_equivalent_import(prefix, runner.env_vars['PYTHONPATH'], cwd=ROOT)
-    assert status != 0 and 'modal_image_reqs' in stderr
+    assert status != 0 and 'modal_artifacts' in stderr
 
 
 # ── Gate (d), criterion 4: exact package mount triples ──
@@ -2712,8 +2645,8 @@ def test_gate_d_criterion_4_scripts_mounts_are_a_bijection_onto_the_declared_set
     module = _import_run_modal()
     runner = module.runner_image
     assert runner is module.dependency_image
-    # Four non-package mounts plus __init__.py and each RUNNER_MODULES module.
-    assert len(runner.local_files) == len(set(runner.local_files)) == 4 + 1 + len(RUNNER_MODULES)
+    # One non-package mount plus __init__.py and each RUNNER_MODULES module.
+    assert len(runner.local_files) == len(set(runner.local_files)) == 1 + 1 + len(RUNNER_MODULES)
     assert _mount_bijection_violations(runner.local_files,
                                        ROOT,
                                        dependency_mounts=module.dependency_image.local_files) == []
@@ -2727,7 +2660,7 @@ def test_gate_d_criterion_4_reddens_on_an_undeclared_destination_and_on_a_rename
     source = tmp_path / 'nope.py'
     source.write_text('fixture = 1\n', encoding='utf-8')
     for triple in ((str(source), '/opt/app/scripts/nope.py', True),
-                   (str(ROOT / 'scripts/modal_image_reqs.py'), '/opt/app/scripts/run_modal.py',
+                   (str(ROOT / 'scripts/modal_artifacts.py'), '/opt/app/scripts/run_modal.py',
                     True)):
         violations = _mount_bijection_violations([*recorded, triple], ROOT)
         assert len(violations) == 1 and violations[0].startswith('(B) unexpected exact mount')
