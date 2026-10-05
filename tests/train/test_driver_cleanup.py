@@ -142,6 +142,12 @@ def run_driver(monkeypatch, tmp_path):
             self.global_step += 10
             return None if self.epoch == 1 else {"losses/entropy": 2.0}
 
+        def close_resources(self):
+            """Setup cleanup has no checkpoint side effect."""
+            events.append("trainer.resources.close")
+            self.vecenv.close()
+            hit("trainer.resources.close")
+
         def close(self):
             events.append("trainer.close")
             self.vecenv.close()
@@ -233,10 +239,10 @@ def test_success_preserves_order_scheduling_and_outputs(run_driver):
     ("spawn.check", ["vec.close", "metrics.close"]),
     ("policy", ["vec.close", "metrics.close"]),
     ("trainer.init", ["vec.close", "metrics.close"]),
-    ("pin.check", ["trainer.close", "vec.close", "metrics.close"]),
-    ("eval.make", ["trainer.close", "vec.close", "metrics.close"]),
-    ("eval.check", ["trainer.close", "vec.close", "eval.close", "metrics.close"]),
-    ("evaluator.init", ["trainer.close", "vec.close", "eval.close", "metrics.close"]),
+    ("pin.check", ["trainer.resources.close", "vec.close", "metrics.close"]),
+    ("eval.make", ["trainer.resources.close", "vec.close", "metrics.close"]),
+    ("eval.check", ["trainer.resources.close", "vec.close", "eval.close", "metrics.close"]),
+    ("evaluator.init", ["trainer.resources.close", "vec.close", "eval.close", "metrics.close"]),
     ("collect", ["trainer.close", "vec.close", "eval.close", "metrics.close"]),
     ("update", ["trainer.close", "vec.close", "eval.close", "metrics.close"]),
     ("eval.run", ["trainer.close", "vec.close", "eval.close", "metrics.close"]),
@@ -270,25 +276,25 @@ def test_failed_ownership_transfer_closes_previous_owner(run_driver, monkeypatch
         loop.train(run.args)
     assert caught.value is error
     assert run.events == (["vec.close"] if owner == "HybridAimVecEnv" else [
-        "trainer.close", "vec.close", "eval.close"
+        "trainer.resources.close", "vec.close", "eval.close"
     ]) + ["metrics.close", ("wandb.finish", 1)]
 
 
-@pytest.mark.parametrize(
-    "failure",
-    [RuntimeError("update"), KeyboardInterrupt("interrupt"),
-     SystemExit(3)])
-def test_primary_failure_survives_all_cleanup_failures(run_driver, failure):
+@pytest.mark.parametrize("failure_type", [RuntimeError, KeyboardInterrupt, SystemExit])
+@pytest.mark.parametrize("stage", ["update", "evaluator.init"])
+def test_primary_failure_survives_all_cleanup_failures(run_driver, failure_type, stage):
     """Later cleanup runs and cannot replace the failure that ended training."""
+    failure = failure_type(3 if failure_type is SystemExit else stage)
     run = run_driver
-    run.failures["update"] = failure
-    for stage in ("trainer.close", "eval.close", "metrics.close", "wandb.finish"):
-        run.failures[stage] = OSError(stage)
+    run.failures[stage] = failure
+    trainer_close = "trainer.close" if stage == "update" else "trainer.resources.close"
+    for close in (trainer_close, "eval.close", "metrics.close", "wandb.finish"):
+        run.failures[close] = OSError(close)
     with pytest.raises(type(failure)) as caught:
         loop.train(run.args)
     assert caught.value is failure
     assert run.events == [
-        "trainer.close", "vec.close", "eval.close", "metrics.close",
+        trainer_close, "vec.close", "eval.close", "metrics.close",
         ("wandb.finish", 3 if isinstance(failure, SystemExit) else 1)
     ]
     assert len(failure.__notes__) == 4

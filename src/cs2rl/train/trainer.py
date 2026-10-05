@@ -214,6 +214,18 @@ class Cs2PuffeRL(PuffeRL):
                 utilization.stop()
             raise
 
+    def close_resources(self):
+        """Release vector/thread without publishing an unaccepted setup/resume state.
+
+        PuffeRL.close also publishes a checkpoint. Before setup is accepted, its
+        resource operations are safe; stop Utilization even if vector close fails.
+        """
+        try:
+            self.vecenv.close()
+        finally:
+            if not self.utilization.stopped:
+                self.utilization.stop()
+
     def close(self):
         """Keep PufferLib's shutdown/save contract and stop its thread on failure.
 

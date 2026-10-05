@@ -683,7 +683,9 @@ def train(args):
                                  participating_rows=_participating_rows,
                                  self_play_mgr=self_play_mgr)
             train_cleanup.pop_all()
-            train_cleanup.push(partial(_close_on_exit, trainer.close))
+            # Rejected or partial resumes must release resources without letting
+            # PuffeRL.close overwrite the input checkpoint with incomplete state.
+            train_cleanup.push(partial(_close_on_exit, trainer.close_resources))
             # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
             # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
             trainer.logger.run_id = run_id
@@ -805,6 +807,10 @@ def train(args):
             dead_run_detector = DeadRunDetector(kills_expected=_kills_expected)
 
             print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
+            # All setup and resume checks succeeded. Normal completion and
+            # training/dead-run failures retain PuffeRL's checkpoint-on-close.
+            train_cleanup.pop_all()
+            train_cleanup.push(partial(_close_on_exit, trainer.close))
             while trainer.epoch < trainer.total_epochs:
                 trainer._tag_metrics = None            # TAG: drop any un-injected measurement
                 t0 = time.perf_counter()

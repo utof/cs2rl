@@ -32,7 +32,8 @@ def test_dashboard_failure_during_base_init_stops_thread(monkeypatch, tmp_path):
             utilization.join(timeout=5)
 
 
-def test_vector_close_failure_still_stops_thread(monkeypatch):
+@pytest.mark.parametrize("method", ["close", "close_resources"])
+def test_vector_close_failure_still_stops_thread(monkeypatch, method):
     """A raised vector shutdown must not strand PuffeRL's non-daemon thread."""
     trainer, cleanup = _build_trainer_for_test(num_envs=16)
     error = KeyboardInterrupt("shutdown interrupted")
@@ -44,7 +45,7 @@ def test_vector_close_failure_still_stops_thread(monkeypatch):
         with monkeypatch.context() as patch:
             patch.setattr(trainer.vecenv, "close", fail)
             with pytest.raises(KeyboardInterrupt) as caught:
-                trainer.close()
+                getattr(trainer, method)()
             assert caught.value is error
             assert trainer.utilization.stopped
             trainer.utilization.join(timeout=5)
