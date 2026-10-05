@@ -163,17 +163,9 @@ static void compute_masks(Dust2Env* env) {
             m[moff[HEAD_WEAPON] + 1] = 0;
             m[moff[HEAD_WEAPON] + 2] = 0;
         }
-        /* Use mask: T needs bomb+bombsite; CT needs planted bomb nearby */
-        if (a->team == 0 && a->has_bomb && !g->bomb_planted) {
-            int at_site = (a->area_idx >= 0) ? sd->bombsite_by_idx[a->area_idx] : 0;
-            if (!at_site)
-                m[moff[HEAD_USE] + 1] = 0;
-        } else if (a->team == 1 && g->bomb_planted) {
-            if (a->area_idx != g->bomb_area_idx)
-                m[moff[HEAD_USE] + 1] = 0;
-        } else {
-            m[moff[HEAD_USE] + 1] = 0;
-        }
+        /* Eligibility is shared with bomb actions; masks still describe the
+         * next step and do not gate on round_over or an in-progress lock. */
+        m[moff[HEAD_USE] + 1] = (int8_t)(bomb_can_plant(sd, g, a) || bomb_can_defuse(g, a));
     }
 }
 
@@ -478,21 +470,6 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     } else if (!ct_alive && !g->round_over) {
         g->round_over = 1;
         g->winner     = 0;
-    }
-
-    /* Drop bomb if carrier was killed */
-    {
-        AgentState* carrier = (g->bomb_carrier_id >= 0 && g->bomb_carrier_id < TEAM_SIZE)
-                                  ? &g->agents[g->bomb_carrier_id]
-                                  : NULL;
-        if (carrier && !carrier->alive && !g->bomb_planted && !g->bomb_is_dropped) {
-            g->bomb_x          = carrier->x;
-            g->bomb_y          = carrier->y;
-            g->bomb_z          = carrier->z;
-            carrier->has_bomb  = 0;
-            g->bomb_carrier_id = -1;
-            g->bomb_is_dropped = 1;
-        }
     }
 
     process_bomb(env,
