@@ -112,3 +112,7 @@ pyrefly-baseline.json
 # import-linter's on-disk cache, written into cwd by a bare `lint-imports`. The suite
 # and the documented checks pass --no-cache, but the default run does not.
 .import_linter_cache/
+
+# Optional mutation tooling and native generated copies/results.
+/.venv-mutmut/
+/mutants/
