@@ -67,6 +67,22 @@ modal = [
     "modal>=1.4.3,<2",
 ]
 
+[tool.mutmut]
+# Optional manual check: `bash scripts/check_namespace_mutations.sh help`.
+# requirements-mutation.txt belongs to a separate environment so the default
+# project's lock/runtime graph does not absorb mutmut's newer Click requirement.
+source_paths = ["tests/conftest.py"]
+# The entrypoint supplies a Git pointer for index reads instead of copying .git history.
+also_copy = ["src", "scripts"]
+pytest_add_cli_args_test_selection = [
+    "tests/integration/test_namespace_guard.py::test_the_start_check_names_each_foreign_entry_and_name",
+    "tests/integration/test_namespace_guard.py::test_the_start_check_is_silent_on_the_root_and_on_entries_holding_neither_name",
+    "-m", "",
+]
+pytest_add_cli_args = ["-n", "0", "-p", "no:cacheprovider"]
+# Show test outcomes and startup errors for manual interpretation.
+debug = true
+
 [tool.setuptools.packages.find]
 # One package, cs2rl, under src/. Explicit because automatic src-layout discovery
 # also scans PEP 420 namespace directories (src/cs2rl/env/c/demo_assets, zig-out,

@@ -1,0 +1,6 @@
+# Optional, separate environment only: see scripts/check_namespace_mutations.sh help.
+# The pytest pin preserves the importlib-mode contract measured for this guard.
+mutmut==3.8.0
+pytest==9.0.2
+# The native pytest configuration passes -n 0 to keep every session serial.
+pytest-xdist>=3.8.0,<4

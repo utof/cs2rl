@@ -229,6 +229,11 @@ def test_the_start_check_names_each_foreign_entry_and_name(tmp_path, monkeypatch
     assert _heads(problems) == [
         f"(c) sys.path entry {shown} holds `{name}` ({entry / held})" for name, held in expected
     ], problems
+    # These are case-sensitive remediation identifiers; ordinary explanation
+    # wording is free to change without breaking the detection/naming contract.
+    for problem in problems:
+        assert "PYTHONPATH" in problem, problem
+        assert "python -m pytest" in problem, problem
 
 
 def test_the_start_check_is_silent_on_the_root_and_on_entries_holding_neither_name(
