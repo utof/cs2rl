@@ -190,6 +190,7 @@ def test_bc_forward_contract_is_ppo_sequence_unroll(policy):
         "carrying state, so BC and PPO would again optimise different functions")
 
 
+@pytest.mark.training
 def test_train_bc_feeds_sequences_not_shuffled_ticks(policy):
     """`train_bc` must hand the policy 3D (B, T, OBS_DIM) batches.
 
@@ -274,6 +275,7 @@ def test_bc_loss_ignores_entropy_bonus_when_coef_zero(policy):
                                             rel=1e-5)
 
 
+@pytest.mark.training
 def test_bc_loss_decreases_on_tiny_fit(policy):
     """Overfit 2 short fixed sequences: the loss must fall substantially.
     Uses a deep copy so the module-scoped policy stays at init for the other
@@ -311,6 +313,7 @@ def test_bc_gradient_reaches_the_lstm(policy):
         "no through-time gradient reached lstm.weight_hh_l0 — BC is not training sequences"
 
 
+@pytest.mark.training
 def test_aim_log_std_is_frozen_during_bc(policy):
     """Spec D-6: σ must not train. Checked two ways — no gradient reaches the
     parameter, and its value is bit-identical after real optimizer steps."""
@@ -335,6 +338,7 @@ def test_aim_log_std_is_frozen_during_bc(policy):
     assert not torch.equal(p.aim_mu.weight.detach(), policy.aim_mu.weight.detach())
 
 
+@pytest.mark.training
 def test_train_bc_history_decreases_and_returns_eval_mode_policy(policy):
     """train_bc's own loop (sequence minibatches) on a synthetic DemoSet:
     history must show the loss falling from first to last epoch."""

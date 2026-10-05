@@ -41,6 +41,7 @@ def test_c_env_smoke():
     assert sps >= 300_000, f"SPS {sps:.0f} below 300_000 target"
 
 
+@pytest.mark.training
 def test_training_smoke_runs_without_nan():
     """Batch 1 integration smoke (plan §Task 10).
 

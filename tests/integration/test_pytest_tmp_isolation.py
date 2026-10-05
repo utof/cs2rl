@@ -29,6 +29,8 @@ from collections.abc import Iterable
 from pathlib import Path
 from typing import Any, NamedTuple
 
+import pytest
+
 from tests.conftest import REPO_ROOT
 
 REPO = REPO_ROOT
@@ -217,6 +219,7 @@ def _checked_basetemp(child: _Child, tails: str) -> Path:
     return Path(child.report["basetemp"])
 
 
+@pytest.mark.slow
 def test_concurrent_sessions_do_not_delete_each_others_tmp_path(tmp_path):
     """Two sessions started together each keep their own tmp_path (gh#219).
 
@@ -244,6 +247,7 @@ def test_concurrent_sessions_do_not_delete_each_others_tmp_path(tmp_path):
             f"basetemp {basetemp} ignores PYTEST_DEBUG_TEMPROOT={root}\n{tails}")
 
 
+@pytest.mark.slow
 def test_default_temp_root_is_under_home_cache(tmp_path):
     """With PYTEST_DEBUG_TEMPROOT unset, basetemp is numbered under ~/.cache/cs2rl-pytest.
 
@@ -264,6 +268,7 @@ def test_default_temp_root_is_under_home_cache(tmp_path):
         f"the conftest created {home / '.pytest_tmp'}, the directory old conftests wipe\n{tails}")
 
 
+@pytest.mark.slow
 def test_explicit_temp_root_is_not_overridden(tmp_path):
     """An explicit PYTEST_DEBUG_TEMPROOT wins, and the default root is not even created."""
     custom = (tmp_path / "custom").resolve()

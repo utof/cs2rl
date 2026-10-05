@@ -188,6 +188,7 @@ def _session(tmp_path: Path, plant_files: dict[str, str], *extra_args:
     return child, output
 
 
+@pytest.mark.slow
 @pytest.mark.parametrize("collect_only", [False, True], ids=["session", "collect-only"])
 @pytest.mark.parametrize("spellings", [("cs2rl.spec.paths", "paths"), ("cs2rl.spec.paths", )],
                          ids=["two-names", "one-name"])
@@ -212,6 +213,7 @@ def test_a_session_that_loads_a_repo_file_under_two_names_fails(tmp_path, collec
         assert _REPORT_TITLE not in child.stdout, f"the guard reported one name\n{output}"
 
 
+@pytest.mark.slow
 def test_two_names_in_one_test_on_an_xdist_worker_fail_the_session_and_are_named(tmp_path):
     """dup at `-n 2`: the worker holds both names, and only the relay lets the controller see it."""
     child, output = _session(
@@ -224,6 +226,7 @@ def test_two_names_in_one_test_on_an_xdist_worker_fail_the_session_and_are_named
     assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
 
 
+@pytest.mark.slow
 def test_two_names_in_two_workers_fail_the_session_and_are_named(tmp_path):
     """split at `-n 2 --dist loadgroup`: no process holds both names, so only the union does.
 
@@ -253,6 +256,7 @@ def test_two_names_in_two_workers_fail_the_session_and_are_named(tmp_path):
     assert _LOST_TITLE not in child.stdout, f"a worker failed to report\n{output}"
 
 
+@pytest.mark.slow
 def test_one_name_on_xdist_workers_passes(tmp_path):
     """NEGATIVE CONTROL at `-n 2`: one name is green and no worker is reported lost."""
     child, output = _session(
@@ -278,6 +282,7 @@ def pytest_sessionfinish(session):
 """
 
 
+@pytest.mark.slow
 def test_a_worker_that_sends_no_findings_fails_the_session_and_is_named(tmp_path):
     """SENDS-NOTHING at `-n 2`: the guard fails closed, naming the worker that went quiet.
 
@@ -301,6 +306,7 @@ def test_a_worker_that_sends_no_findings_fails_the_session_and_is_named(tmp_path
     assert _REPORT_TITLE not in child.stdout, f"the guard reported a duplicate\n{output}"
 
 
+@pytest.mark.slow
 def test_an_xdist_worker_does_not_import_torch_for_its_thread_cap(tmp_path):
     """The cap only touches a torch that a test module already loaded (conftest, pitfall 2)."""
     plant = 'import sys\n\n\ndef test_plant():\n    assert "torch" not in sys.modules\n'

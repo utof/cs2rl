@@ -295,10 +295,12 @@ def _ratio_c_after_rollout(pin_pitch, map_data, num_envs=8):
         cleanup()
 
 
+@pytest.mark.training
 def test_ratio_c_identity_simple_map_unpinned(simple_map):
     assert _ratio_c_after_rollout(0, simple_map) == [1.0, 1.0]
 
 
+@pytest.mark.training
 def test_ratio_c_identity_arena_pinned():
     from cs2rl.env.map import make_arena_duel_map
     assert _ratio_c_after_rollout(1, make_arena_duel_map()) == [1.0, 0.0]

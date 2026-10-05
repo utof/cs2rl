@@ -6,6 +6,7 @@
 - IMPORTS edges can be false on a name collision: `from cs2rl.experiment.gate import main` showed an edge to scripts/analyze_experiment.py (another module defining `main`). Confirm an importer census with an AST scan over `git ls-files`. IMPORTS edges also undercount: for train.py the graph gave 8 importer files, the AST 33, and 0 for a module with 17 (#205 part 3 prototype). Importer counts are AST-only.
 
 - Use the setup in README and CONTRIBUTING. In a shared-venv worktree, use its own `src/` on PYTHONPATH with UV_NO_SYNC=1 and the venv interpreter; never sync the shared environment there.
+- Normal validation is `python -m pytest tests -n 2 --dist loadgroup`: pytest defaults to `not slow and not training`. Add `-m training` for real trainer/learning/checkpoint-continuation changes, or `-m "slow and not training"` for affected expensive non-training checks. Releases and substantial training changes use one complete session: `python -m pytest tests -n 2 --dist loadgroup -m ""`. A focused training file/node also needs `-m "" -n 0`. These are explicit deselections, with every original test/workload retained; preserve performance-smoke opt-in and child-session isolation. See CONTRIBUTING for the selection census and commands.
 - Read issue bodies AND every comment; comments often re-scope an issue. Use the owner-local issue helper when available, otherwise the GitHub issue page/API with complete comment pagination. In clean clones, private memory and helpers may be unavailable: use committed AGENTS.md, this workflow, public docs and issue history.
 
 ## Measure first, then spec/plan
@@ -31,7 +32,7 @@ Existing-capability evidence belongs before custom infrastructure: the prototype
   - why: retyping a measured prototype discards both its implementation and the evidence tied to it.
 - How:
   - pre-register what you will measure and which result would change the plan. Order the questions by risk: the one most likely to kill the approach runs first. Mark each VALIDATED / PARTIAL / INVALIDATED with one line of nuance. At the first INVALIDATED, stop and report instead of measuring the rest (owner 2026-09-30);
-  - the implementer's final diff is verified in full either way;
+  - the implementer's final diff is reviewed in full either way; execute the applicable validation tiers above and state every tier not executed;
   - include knock-outs: a guard that does not go red when broken is not a guard;
   - check every zero against a known count;
   - pin the base sha, and re-measure if main moves;

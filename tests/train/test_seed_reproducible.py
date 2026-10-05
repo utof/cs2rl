@@ -3,12 +3,11 @@
 WHAT: pins (a) the C-side seed mixing in env_init (adjacent seeds used to
 alias: `seed ? seed : 1` mapped 0 and 1 onto the same xorshift32 stream),
 (b) the Python-side seed derivation handed to pufferlib.vector.make, and
-(c) end-to-end reproducibility of a one-epoch training run — the seed-3
-same-seed case is always-on (~20 s), the seed-0 case and the differ test are
-`slow`, (d) seed_everything (python/numpy/torch) in-process.
+(c) end-to-end reproducibility of a one-epoch training run in the explicit
+`training` selection, (d) seed_everything (python/numpy/torch) in-process.
 
-PITFALL: the subprocess tests need the C extension built in-place; the `slow`
-ones (registered in tests/conftest.py) are deselected with `-m 'not slow'`.
+PITFALL: the subprocess tests need the C extension built in-place. Run both
+same-seed proofs and their different-seed control with `-m training` or `-m ''`.
 """
 
 import json
@@ -97,7 +96,7 @@ def test_seed_everything_is_deterministic():
     seed_everything(3) twice yields identical draws, seed_everything(4) differs.
     Before this test, deleting those calls from train() passed the default
     suite (only the 2-subprocess e2e test noticed;
-    test_two_runs_same_seed_identical[3] now runs in the default suite)."""
+    test_two_runs_same_seed_identical[3] supplies that proof in the training tier)."""
     import random
 
     import torch
@@ -205,10 +204,11 @@ def test_in_process_env_determinism(simple_map):
         assert np.array_equal(o1, o2) and np.array_equal(r1, r2)
 
 
+@pytest.mark.training
 @pytest.mark.parametrize(
     "seed",
     [
-        3,                                             # always-on: the one e2e determinism proof (~20 s)
+        3,                                             # e2e determinism proof in the training tier
         pytest.param(0, marks=pytest.mark.slow),
     ])
 @pytest.mark.timeout(1800)
@@ -227,6 +227,7 @@ def test_two_runs_same_seed_identical(tmp_path_factory, seed):
     assert not diff, diff
 
 
+@pytest.mark.training
 @pytest.mark.slow                      # 2 subprocess trainings
 @pytest.mark.timeout(1800)
 def test_two_runs_different_seed_differ(tmp_path):

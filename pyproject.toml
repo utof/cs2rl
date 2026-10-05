@@ -114,7 +114,8 @@ exclude-dependencies = ["pynvml"]
 # among the dots, and hid the fast-math guard for a whole refactor wave).
 # PITFALL: -r chars REPLACE pytest's default `fE`, they do not add to it. `-rs` alone
 # drops every FAILED/ERROR line from the summary, so keep the f and the E.
-addopts = ["--import-mode=importlib", "-rfEs"]
+# CLI -m training selects real integration; -m "" restores complete coverage.
+addopts = ["--import-mode=importlib", "-rfEs", "-m", "not slow and not training"]
 pythonpath = ["."]
 
 [tool.ruff]

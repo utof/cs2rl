@@ -42,7 +42,9 @@ def _make(num_envs=16, seed=3):
 
 
 def _snapshot(trainer, mgr):
-    from cs2rl.train.resume import _WARMSTART_ATTRS                                # defined beside collect/restore_train_state
+    # Defined beside collect/restore_train_state.
+    from cs2rl.train.resume import _WARMSTART_ATTRS
+
     return {
         "global_step": trainer.global_step,
         "epoch": trainer.epoch,
@@ -72,6 +74,7 @@ def _snapshot(trainer, mgr):
     }
 
 
+@pytest.mark.training
 def test_save_writes_three_files_and_never_early_returns():
     trainer, mgr, cleanup = _make()
     try:
@@ -94,6 +97,7 @@ def test_save_writes_three_files_and_never_early_returns():
         cleanup()
 
 
+@pytest.mark.training
 def test_round_trip_restores_everything():
     trainer, mgr, cleanup = _make()
     try:
@@ -145,6 +149,7 @@ def test_round_trip_restores_everything():
         cleanup_a()
 
 
+@pytest.mark.training
 def test_resumed_schedule_matches_uninterrupted():
     """The restored run's NEXT epoch must land where an uninterrupted run
     lands — not merely "loads without error". Env sampling is not bit-exact
@@ -183,6 +188,7 @@ def test_resumed_schedule_matches_uninterrupted():
         cleanup_b()
 
 
+@pytest.mark.training
 def test_scheduler_restore_adopts_new_t_max():
     """The sidecar stores CosineAnnealingLR.state_dict(), which includes the
     OLD T_max. A --timesteps extension (allowlisted) must keep last_epoch but
@@ -372,9 +378,9 @@ def test_analyze_tplant_last_row_wins():
                                                                ("s", 200, 4)]
 
 
-# always-on (~27 s, over the `slow` threshold): the only subprocess `--resume-run` proof left
-# in the fast loop (`-m 'not slow'`); its flat-map sibling below is `slow`. It drives the real
+# Explicit training integration: this and its flat-map sibling drive the real
 # CLI through a fresh run, a resume and the config.json mismatch refusals.
+@pytest.mark.training
 @pytest.mark.timeout(1800)
 def test_subprocess_resume_run(tmp_path):
     ckpt = tmp_path / "run"
@@ -460,6 +466,7 @@ def test_subprocess_resume_run(tmp_path):
     assert "gamma" in (r.stderr + r.stdout)
 
 
+@pytest.mark.training
 @pytest.mark.slow
 def test_subprocess_resume_run_flat_map_without_pin_pitch_flag(tmp_path):
     """Task 12 (R0-H) binding ruling: a flag-less `--resume-run` of a PINNED run

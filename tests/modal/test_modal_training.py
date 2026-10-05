@@ -553,6 +553,7 @@ def _publish(run_root: Path):
     return outcome, commits
 
 
+@pytest.mark.slow
 def test_publish_validates_via_prebuilt_interpreter_when_runner_lacks_torch(tmp_path, monkeypatch):
     """A valid checkpoint must still publish when the runner cannot import torch."""
     run_root = tmp_path / "run"
@@ -570,6 +571,7 @@ def test_publish_validates_via_prebuilt_interpreter_when_runner_lacks_torch(tmp_
     assert json.loads(sidecar.read_text())["sha256"] == core.sha256_file(ckpt)
 
 
+@pytest.mark.slow
 def test_prebuilt_validation_still_rejects_a_torn_checkpoint(tmp_path, monkeypatch):
     """The fallback must not become a rubber stamp: garbage still fails to load."""
     run_root = tmp_path / "run"

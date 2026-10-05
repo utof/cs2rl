@@ -76,6 +76,7 @@ def test_as_sequences_round_trips_the_real_episodes(demo_dir):
         off += n
 
 
+@pytest.mark.training
 def test_cli_trains_and_saves_a_bare_state_dict(demo_dir, tmp_path):
     """2 epochs through main() — the deliverable is the checkpoint CONTRACT:
     a bare state_dict that loads into the RL policy architecture unchanged

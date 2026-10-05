@@ -177,6 +177,7 @@ def test_compute_game_metrics_new_keys():
     assert gm0["game/min_enemy_distance"] == 0.0
 
 
+@pytest.mark.training
 def test_environment_episodes_counts_terminal_infos():
     """One evaluate() is far shorter than a round, so no real terminal info
     arrives; inject a synthetic window and assert the count is forwarded

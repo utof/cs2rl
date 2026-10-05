@@ -616,10 +616,13 @@ def pytest_configure(config):
     # Unregistered markers are an error under --strict-markers.
     config.addinivalue_line(
         "markers",
-        "slow: over ~15 s of wall. Deselecting it DROPS coverage (the patch-binding campaign, "
-        "the seed positive control, the fast-math builds), so `-m 'not slow'` is only for "
-        "intermediate per-commit checks and never goes in addopts. A test over ~15 s that "
-        "stays unmarked carries an `always-on: <why>` comment.",
+        "slow: expensive checks, including fresh-process campaigns and native builds; "
+        "run non-training checks with -m 'slow and not training', or all checks with -m ''.",
+    )
+    config.addinivalue_line(
+        "markers",
+        "training: real trainer rollout, learning or checkpoint-continuation integration; "
+        "run with -m training, or include with -m ''.",
     )
 
     # The default pytest tmp_path lives under /tmp on the system root

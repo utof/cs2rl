@@ -144,6 +144,7 @@ def test_return_stats_update_on_participating_rows_only():
         cleanup()
 
 
+@pytest.mark.training
 def test_harness_n_active_1_masks_four_fifths_of_rows():
     from tests._helpers.trainer_harness import _build_trainer_for_test
 
@@ -172,6 +173,7 @@ def test_harness_n_active_1_masks_four_fifths_of_rows():
         cleanup()
 
 
+@pytest.mark.training
 @pytest.mark.slow
 def test_twenty_update_ratio_identity_n_active_1():
     """Spec §2.2 (ii): at n_active=1 with the aim entropy bonus OFF, parked rows are
@@ -367,6 +369,7 @@ def test_noop_budget_doubles_total_timesteps_and_records_the_mode():
         assert legacy["total_timesteps"] == 1_000_000 * 5 // n
 
 
+@pytest.mark.training
 def test_noop_opponent_rows_are_statues_excluded_from_global_step():
     """Spec §2 T3 test (i), end-to-end through the PRODUCTION rollout path.
 

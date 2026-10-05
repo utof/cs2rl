@@ -69,6 +69,7 @@ itself did not break.
 """
 import ast
 import re
+from functools import lru_cache
 from pathlib import Path
 
 import pytest
@@ -120,9 +121,9 @@ _UNDECLARED_MODULE_REMEDY = (
 # How many times each control below plants its defect. Each pass starts by
 # re-checking the unplanted package (or its tmp_path copy), so the second pass's
 # check proves the first pass's plant-and-restore left the sources, or the copied
-# files, as it found them. The gates hold no state between calls, so this is only
-# about the tree. A control whose restore step broke would otherwise pass once
-# and hide it.
+# files, as it found them. Each call recomputes diagnostics from its source input;
+# only read-only parsed trees may be reused, never verdicts or caller state.
+# A control whose restore step broke would otherwise pass once and hide it.
 _CONTROL_PASSES = 2
 # The facade's repo-relative path, as `_facade_source` reads it and messages name it.
 FACADE_FILE = "scripts/modal_runner/__init__.py"
@@ -176,6 +177,13 @@ _IMPORT_TIME_KINDS = (ast.Attribute, ast.BinOp, ast.Call, ast.Constant, ast.Dict
                       ast.FormattedValue, ast.JoinedStr, ast.List, ast.Name, ast.Set, ast.Starred,
                       ast.Tuple, ast.UnaryOp)
 
+# Only the read-only helpers below share these trees. Cache exact source text
+# and ast.parse arguments, never paths: copied-package controls edit and restore
+# the same filename. Source reads, tables and returned diagnostics stay fresh.
+# PITFALL: lru_cache returns the same mutable AST; a plant/NodeTransformer must
+# use ast.parse instead. None of these helpers may mutate or return its tree.
+_parse_source = lru_cache(maxsize=128)(ast.parse)
+
 
 def _segments(source):
     """{top-level name: its exact declaration text} for one module's source.
@@ -193,7 +201,7 @@ def _segments(source):
     """
     lines = source.encode().splitlines(keepends=True)
     found = {}
-    for name, node in _module_level_names(ast.parse(source)).items():
+    for name, node in _module_level_names(_parse_source(source)).items():
         first = min([node.lineno] + [d.lineno for d in getattr(node, "decorator_list", [])])
         while first > 1 and lines[first - 2].lstrip().startswith(b"#"):
             first -= 1
@@ -262,7 +270,7 @@ def _structure_violations(sources, manifest=MANIFEST):
         if filename.removesuffix(".py") in GRAB_BAG_MODULE_NAMES:
             violations.append(("forbidden-name", filename))
         declared = set(manifest.get(filename, []))
-        tree = ast.parse(source)
+        tree = _parse_source(source)
         examined, shape = _module_scope_shape_violations(tree)
         assert examined == len(tree.body), (
             f"the header instrument examined {examined} of {len(tree.body)} module-scope "
@@ -480,7 +488,7 @@ def _absolute_imports_of(source: str, module: str) -> list[tuple[int, str]]:
         return dotted == module or dotted.startswith(module + ".")
 
     hits: list[tuple[int, str]] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(_parse_source(source)):
         if isinstance(node, ast.Import):
             hits.extend((node.lineno, "import") for alias in node.names if names_module(alias.name))
         elif isinstance(node, ast.ImportFrom) and node.level == 0:
@@ -524,7 +532,7 @@ def _dependency_edges(sources):
         runtime[module], annotations[module] = set(), set()
         if _absolute_imports_of(source, PACKAGED):
             runtime[module].add(PACKAGED)
-        stack = [(ast.parse(source), False)]
+        stack = [(_parse_source(source), False)]
         while stack:
             node, checking = stack.pop()
             if isinstance(node, ast.If) and _is_type_checking_test(node.test):
@@ -671,7 +679,10 @@ def _seam_violations(sources, seams=QUALIFIED_SEAMS):
     fails closed, as a spurious `seam-undeclared` or reader, and no package
     module has such a local today (census, gh#221 review).
     """
-    trees = {filename.removesuffix(".py"): ast.parse(text) for filename, text in sources.items()}
+    trees = {
+        filename.removesuffix(".py"): _parse_source(text)
+        for filename, text in sources.items()
+    }
     violations: list[tuple] = []
     readers: dict[str, set[str]] = {seam: set() for seam in seams}
     for module, tree in trees.items():
@@ -715,7 +726,7 @@ def _facade_source():
 
 def _facade_paragraph(facade, heading):
     """The facade docstring's paragraph that starts with `heading`, or "" if none does."""
-    docstring = ast.get_docstring(ast.parse(facade)) or ""
+    docstring = ast.get_docstring(_parse_source(facade)) or ""
     if heading not in docstring:
         return ""
     return docstring.split(heading, 1)[1].split("\n\n", 1)[0]
@@ -751,7 +762,7 @@ def _facade_violations(source):
     definition, which belongs in the module that owns it.
     """
     violations: list[tuple] = []
-    for index, node in enumerate(ast.parse(source).body):
+    for index, node in enumerate(_parse_source(source).body):
         docstring = (index == 0 and isinstance(node, ast.Expr)
                      and isinstance(node.value, ast.Constant) and isinstance(node.value.value, str))
         relative = (isinstance(node, ast.ImportFrom) and node.level == 1
@@ -945,7 +956,7 @@ def _hoist_type_checking_imports(source):
     else; a stdlib import there is legal and moves harmlessly.
     """
     lines = source.splitlines(keepends=True)
-    block = next(n for n in ast.parse(source).body if isinstance(n, ast.If))
+    block = next(n for n in _parse_source(source).body if isinstance(n, ast.If))
     assert all(isinstance(n, (ast.Import, ast.ImportFrom)) for n in block.body), (
         f"the TYPE_CHECKING block at line {block.lineno} holds more than imports")
     moved = "".join("".join(lines[n.lineno - 1:n.end_lineno]).replace("    ", "", 1)
@@ -1890,6 +1901,56 @@ def test_package_import_purity_recursive_controls(tmp_path, live_sources, contai
             f"the tree.body-only instrument was expected to be blind to the {container} plant")
         target.write_text(live_sources["training.py"], encoding="utf-8")
         assert _nonstdlib_module_scope_imports(tmp_path)[1] == [], "the copy was not restored"
+
+
+def test_package_gates_observe_same_path_edit_and_restore(tmp_path, live_sources):
+    """Parsing reuse must still see edits after a copied file has already been checked.
+
+    A cache keyed only by path, or shared source/verdict state, can make the
+    planted missing owner, new dependency and captured seam silently pass.
+    Keep actual reads and restores here: dictionary-only plants cannot expose
+    that invalidation failure.
+    """
+    package = _copy_live_package(tmp_path)
+    targets = {name: package / name for name in ("core.py", "training.py")}
+    original = {name: path.read_bytes() for name, path in targets.items()}
+    segment = _segments(live_sources["core.py"])["VOLUME_NAME"]
+    gates = (_structure_violations, _dependency_violations, _seam_violations)
+    contracts = ("test_package_structure_contract or test_package_dependency_contract or "
+                 "test_package_seam_contract")
+    for _ in range(_CONTROL_PASSES):
+        sources = _package_sources(tmp_path)
+        assert sources == live_sources, "the copy was not restored"
+        for gate in gates:
+            _assert_no_violations(gate(sources), _precondition(contracts, "the package copy"))
+        try:
+            targets["core.py"].write_text(sources["core.py"].replace(segment, "", 1) +
+                                          "\nfrom . import training\n",
+                                          encoding="utf-8")
+            targets["training.py"].write_text(sources["training.py"] +
+                                              "\n_HASH = core.sha256_file\n",
+                                              encoding="utf-8")
+            changed = _package_sources(tmp_path)
+            failures = [gate(changed) for gate in gates]
+            _assert_rejected(failures[0], ("membership", "core.py"), "same-path missing owner")
+            _assert_rejected(failures[1], ("runtime-edges", "core"), "same-path new dependency")
+            _assert_rejected(failures[2], ("seam-import-time", "training"),
+                             "same-path captured seam")
+            # A caller may edit its source map and diagnostics. Later calls
+            # must get fresh maps/lists even when their parsed text is reused.
+            changed.clear()
+            for gate, result in zip(gates, failures, strict=True):
+                expected = list(result)
+                result.clear()
+                assert gate(_package_sources(tmp_path)) == expected, (
+                    "caller state contaminated a later gate")
+        finally:
+            for name, path in targets.items():
+                path.write_bytes(original[name])
+        restored = _package_sources(tmp_path)
+        assert restored == live_sources, "the copy was not restored"
+        for gate in gates:
+            _assert_no_violations(gate(restored), "the restored package copy")
 
 
 @pytest.mark.parametrize("defect", ["missing", "unreadable"])

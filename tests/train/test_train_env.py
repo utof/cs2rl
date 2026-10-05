@@ -7,6 +7,7 @@ trainer setup — those tests only need to verify the Task 6c changes to the
 self-play state (``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
 """
 import numpy as np
+import pytest
 
 from cs2rl import policy as policy_mod
 from cs2rl.env.c.cs2_env import make_env
@@ -135,6 +136,7 @@ def test_selfplay_init_attaches_welford_and_event_mask():
         cleanup()
 
 
+@pytest.mark.training
 def test_rewards_not_clamped_to_unit_range():
     """Task 6c: after removing torch.clamp(r, -1, 1) from the selfplay
     evaluate patch, rewards written into the rollout buffer should reflect
@@ -193,6 +195,7 @@ def test_rewards_not_clamped_to_unit_range():
 # correct without detection, and detection could be correct without a flush.
 
 
+@pytest.mark.training
 def test_event_mask_flushed_and_reset_at_segment_boundary():
     """Task 7: pre-set the live accumulator for one agent row to True, then
     run a full evaluate() round. After the segment closes, the corresponding
@@ -235,6 +238,7 @@ def test_event_mask_flushed_and_reset_at_segment_boundary():
         cleanup()
 
 
+@pytest.mark.training
 def test_event_mask_detects_injected_bomb_planted():
     """Task 7: when step_stats['bomb_planted']==1 arrives for any env during
     the rollout, the event_mask must contain at least one True after the
@@ -354,6 +358,7 @@ def _capture_multinomial_calls():
     return real_multinomial, wrapper, captured
 
 
+@pytest.mark.training
 def test_prio_probs_event_oversample():
     """Task 8: with ~50% of segments marked as events and OVERSAMPLE_FACTOR=4
     applied to prio_probs, the sampled minibatch must hit event segments well
@@ -413,6 +418,7 @@ def test_prio_probs_event_oversample():
         cleanup()
 
 
+@pytest.mark.training
 def test_prio_probs_no_events_fallback():
     """Task 8: when no segments are flagged as events the boost branch must
     be skipped, train() must run without crashing, and the exposed fraction
@@ -443,6 +449,7 @@ def test_prio_probs_no_events_fallback():
         cleanup()
 
 
+@pytest.mark.training
 def test_event_oversample_fraction_exposed():
     """Task 8: the metric reports the RAW event-segment fraction (mask mean),
     not the post-boost sampled fraction. With half the mask True the metric
@@ -483,6 +490,7 @@ def test_event_oversample_fraction_exposed():
 # built trainer (Task 8 tests are the same shape).
 
 
+@pytest.mark.training
 def test_target_entropy_schedule_applied():
     """Task 9A: trainer._current_target_entropy must follow the
     linear ramp warmup_frac→base_frac * max_entropy across [0, warmup_steps]
@@ -567,6 +575,7 @@ def test_target_entropy_schedule_applied():
         cleanup()
 
 
+@pytest.mark.training
 def test_log_alpha_reset_at_batch_start():
     """Task 9B: the first train() call on a freshly constructed trainer (the
     return-norm state is seeded by Cs2PuffeRL._init_return_norm, gh#168 W2a;
@@ -603,6 +612,7 @@ def test_log_alpha_reset_at_batch_start():
         cleanup()
 
 
+@pytest.mark.training
 def test_training_metrics_exposed():
     """Task 9C: evaluate() + train() expose finite numeric trainer attributes
     for inspection: log_alpha, effective_alpha, per-channel std
@@ -660,6 +670,7 @@ def test_return_norm_stats_reset_on_batch_start():
         cleanup()
 
 
+@pytest.mark.training
 def test_ret_var_reflects_symlog_scale():
     """Task 9a: after one rollout/train round, _ret_var must reflect the
     symlog-compressed scale of returns, not the raw scale.
@@ -1772,6 +1783,7 @@ def test_policy_forward_bptt_resets_on_terminal():
         env.close()
 
 
+@pytest.mark.training
 def test_train_path_logprobs_match_rollout():
     """End-to-end: after one real evaluate() rollout, re-evaluating the FULL
     buffer through _hybrid_ppo_loss (the exact training-path forward, with
