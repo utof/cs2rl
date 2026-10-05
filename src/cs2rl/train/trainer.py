@@ -178,6 +178,8 @@ class Cs2PuffeRL(PuffeRL):
     logprobs_d: torch.Tensor
     participating: torch.Tensor
     _tag_metrics: dict | None
+    # The driver pins this shared-memory owner; the trainer reads its numpy view.
+    _action_mask_shm: object
 
     def __init__(self,
                  config,
@@ -189,25 +191,12 @@ class Cs2PuffeRL(PuffeRL):
                  participating_rows,
                  self_play_mgr,
                  logger=None):
-        super().__init__(config, vecenv, policy, logger=logger)
-        # WHAT: everything after super().__init__ runs under one try that stops the
-        # Utilization thread on ANY raise, then re-raises.
-        # WHY: PuffeRL.__init__ starts ``self.utilization = Utilization()``, a
-        # NON-daemon threading.Thread whose loop only ends when its stop() is called,
-        # and the only production caller of that is PuffeRL.close(). A raise from a
-        # step below (the gh#85 segments assert, a bad view shape, a config the
-        # patcher refuses) leaves a half-built instance nobody can close(), so the thread
-        # keeps the interpreter alive at exit: pytest prints its summary and then
-        # hangs (gh#168 W1.5 review, MAJOR-1; pinned by
-        # tests/train/test_trainer_composition.py::test_a_raise_inside_init_stops_the_utilization_thread).
-        # PITFALLS: this is the ONE line of PuffeRL.close() that must run on the
-        # failure path; vecenv.close() is the caller's (the vecenv was theirs before
-        # this constructor), and save_checkpoint() would write a half-built trainer.
-        # ``except BaseException`` so KeyboardInterrupt mid-construction does not
-        # hang either. Never move the try above super().__init__: before it returns
-        # there is no ``self.utilization`` to stop (AttributeError would replace the
-        # real error). Keep the step order below unchanged (the class docstring).
+        # PufferLib can raise AFTER starting Utilization (e.g. dashboard output
+        # hits a closed pipe), so protect the base constructor too. A failed
+        # constructor never takes vecenv ownership from its caller and must not
+        # checkpoint a partially initialized trainer.
         try:
+            super().__init__(config, vecenv, policy, logger=logger)
             self._init_return_norm()
             self._init_hybrid_aim(cont_action_view_main, mask_view_main, participating_rows)
             self._init_selfplay(self_play_mgr)
@@ -219,9 +208,24 @@ class Cs2PuffeRL(PuffeRL):
             # has to exist before the first epoch.
             self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
         except BaseException:
-            # Exactly what PuffeRL.close() does to the thread; nothing else of close().
-            self.utilization.stop()
+            # Early base-constructor failures may precede thread creation.
+            utilization = getattr(self, "utilization", None)
+            if utilization is not None:
+                utilization.stop()
             raise
+
+    def close(self):
+        """Keep PufferLib's shutdown/save contract and stop its thread on failure.
+
+        Upstream closes the vector before stopping Utilization. A vector-close
+        failure must not strand that non-daemon thread. Reuse upstream's close
+        and only supply the missing stop when it has not already happened.
+        """
+        try:
+            return super().close()
+        finally:
+            if not self.utilization.stopped:
+                self.utilization.stop()
 
     def _init_hybrid_aim(self, cont_action_view_main, mask_view_main, participating_rows):
         """Allocate the nine hybrid rollout fields after stock PuffeRL buffers exist.
