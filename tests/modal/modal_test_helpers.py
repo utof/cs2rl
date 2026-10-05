@@ -280,43 +280,6 @@ def _minimal_completed_tree(tmp_path: Path, *, steps: list[int] | None = None):
     return run_root, manifest, effective, ckpt
 
 
-class FakeRegistry:
-    """In-memory Modal Dict: put_if_absent is the only atomic insert."""
-
-    def __init__(self):
-        self._lock = threading.Lock()
-        self.data: dict[str, dict[str, object]] = {}
-        self.events: list[tuple[object, ...]] = []
-
-    def put_if_absent(self, key: str, value: dict[str, object]) -> bool:
-        with self._lock:
-            self.events.append(("put_if_absent", key))
-            if key in self.data:
-                return False
-            self.data[key] = dict(value)
-            return True
-
-    def get(self, key: str) -> dict[str, object] | None:
-        with self._lock:
-            stored = self.data.get(key)
-            return None if stored is None else dict(stored)
-
-    def set_existing(self, key: str, value: dict[str, object]) -> None:
-        with self._lock:
-            current = self.data.get(key)
-            if current is None or current.get("attempt_id") != value.get("attempt_id"):
-                raise mrl.ValidationError(
-                    f"registry claim is not owned by {value.get('attempt_id')!r}")
-            self.data[key] = dict(value)
-            self.events.append(("set_existing", key))
-
-    def expire(self, key: str) -> None:
-        """Simulate Modal's seven-day inactivity eviction."""
-        with self._lock:
-            self.data.pop(key, None)
-            self.events.append(("expire", key))
-
-
 def _no_torch(monkeypatch, *, prebuilt: str) -> None:
     """Simulate the container runner: no in-process torch, prebuilt venv at `prebuilt`."""
 

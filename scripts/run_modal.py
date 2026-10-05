@@ -722,7 +722,11 @@ def launch_run(
     include_source=False,
 )
 def train_remote(payload: dict[str, object]) -> dict[str, object]:
-    """Remote training wrapper. Invoked only via with_options(...).spawn."""
+    """Own the delivery claim before preparation; invoked via with_options(...).spawn.
+
+    A duplicate must return before parsing the request, preparing source or
+    writing artifacts. Only this winner hands an attempt to the executor.
+    """
     volume = modal.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
     registry = ModalDictRegistry(modal.Dict.from_name(mrl.REGISTRY_NAME, create_if_missing=False))
     attempt_id = str(payload["attempt_id"])
@@ -759,13 +763,9 @@ def train_remote(payload: dict[str, object]) -> dict[str, object]:
     result = mrl.execute_training_attempt(
         attempt=attempt,
         prepared=prepared,
-        registry=registry,
         manifest=manifest,
         timeout=timedelta(minutes=request.timeout_minutes),
-        already_claimed=True,
     )
-    if result == mrl.REDELIVERED:
-        return {"status": mrl.REDELIVERED, "run_id": request.run_id}
     return {
         "status": result.status.value,
         "run_id": request.run_id,

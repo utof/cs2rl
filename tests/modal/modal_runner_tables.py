@@ -105,12 +105,11 @@ MANIFEST = {
         "RunResult", "CHECKPOINT_SETTLE_SECONDS", "TERM_GRACE_SECONDS", "DEAD_RUN_EXIT_CODE",
         "POLL_INTERVAL_SECONDS", "REASON_SIGNAL", "REASON_TIMEOUT", "REASON_DEAD_RUN",
         "REASON_INVALID_EVIDENCE", "REASON_NONZERO_EXIT", "REASON_ERROR", "TrainingAttemptResult",
-        "_UnusedArtifacts", "PublishOutcome", "_tee_stream", "ProcessControl",
-        "execute_training_attempt", "_checkpoint_generation", "publish_stable_checkpoint",
-        "_start_checkpoint_watcher", "_record_publish_reason", "_publish_and_note",
-        "_close_log_sink", "_is_dead_run", "_map_child_exit", "_metrics_summary",
-        "_optional_checkpoint_sha256", "_write_run_result", "_signal_process_group", "_LiveAttempt",
-        "_run_training_attempt"
+        "PublishOutcome", "_tee_stream", "ProcessControl", "execute_training_attempt",
+        "_checkpoint_generation", "publish_stable_checkpoint", "_start_checkpoint_watcher",
+        "_record_publish_reason", "_publish_and_note", "_close_log_sink", "_is_dead_run",
+        "_map_child_exit", "_metrics_summary", "_optional_checkpoint_sha256", "_write_run_result",
+        "_signal_process_group", "_LiveAttempt", "_run_training_attempt"
     ],
 }
 # Runtime import edges between package modules. core stays a leaf. A new edge

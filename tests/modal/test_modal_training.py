@@ -48,12 +48,11 @@ from tests.conftest import REPO_ROOT
 
 ROOT = REPO_ROOT
 
-import scripts.modal_runner as mrl                                                       # noqa: E402, I001
-from scripts.modal_runner import commands, core, state, training                         # noqa: E402, I001
-from tests.modal.modal_patch_binding_campaign import binding_target                      # noqa: E402, I001
-from tests.modal.modal_test_helpers import (                                             # noqa: E402
-    FakeChild, FakeRegistry, _aware, _make_manifest, _minimal_completed_tree, _no_torch,
-    _noop_heartbeat)
+import scripts.modal_runner as mrl                                     # noqa: E402, I001
+from scripts.modal_runner import commands, core, state, training       # noqa: E402, I001
+from tests.modal.modal_patch_binding_campaign import binding_target    # noqa: E402, I001
+from tests.modal.modal_test_helpers import (                           # noqa: E402
+    FakeChild, _aware, _make_manifest, _minimal_completed_tree, _no_torch, _noop_heartbeat)
 
 # ── Run result: the explicit result schema ─────────────────────────────────
 
@@ -78,7 +77,7 @@ def test_run_result_schema_is_explicit():
     assert payload["last_step"] == 29_982_720
 
 
-# ── Spawn: new session, tee to the log sink, redelivery ────────────────────
+# ── Spawn: new session and tee to the log sink ────────────────────────────
 
 
 def _prepared_source(tmp_path: Path, **overrides) -> core.PreparedSource:
@@ -152,8 +151,6 @@ def _training_kwargs(tmp_path: Path, *, prepared: core.PreparedSource) -> dict[s
         ),
         "prepared":
         prepared,
-        "registry":
-        FakeRegistry(),
         "process":
         training.ProcessControl(
             spawn=default_factory,
@@ -184,7 +181,7 @@ def test_training_setup_keeps_defaults_and_rejects_flat_overrides(tmp_path, monk
 
     monkeypatch.setattr(sys.modules[__name__], "FakeChild", recording_child)
     kwargs = _training_kwargs(tmp_path, prepared=prepared)
-    assert set(kwargs) == {"attempt", "prepared", "registry", "process", "log_sink"}
+    assert set(kwargs) == {"attempt", "prepared", "process", "log_sink"}
     assert kwargs["prepared"] is prepared
     assert not (tmp_path / "src").exists()
     assert creations == []
@@ -284,35 +281,6 @@ def test_stdout_stderr_are_teed_to_log_sink_without_truncation(tmp_path):
     assert leftover.count("x") == 200_000
     assert leftover.endswith("FIN\n") or "FIN\n" in leftover
     assert leftover.count("y") >= 200_000
-
-
-def test_same_attempt_redelivery_invokes_subprocess_once(tmp_path):
-    commits: list[str] = []
-    child = FakeChild(stdout=b"first-delivery\n")
-    kwargs = _training_kwargs(tmp_path, prepared=_prepared_source(tmp_path))
-    launches = []
-
-    def spawn(*args, **options):
-        launches.append((args, options))
-        return child
-
-    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=spawn)
-    kwargs["attempt"].volume.commit = lambda: commits.append('commit')
-    first = mrl.execute_training_attempt(**kwargs)
-    assert first != mrl.REDELIVERED
-    assert len(launches) == 1
-    status_after_first = (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes()
-    commits_after_first = list(commits)
-
-    def must_not_launch(*_args, **_kwargs):
-        raise AssertionError("redelivered container must not start training")
-
-    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=must_not_launch)
-    second = mrl.execute_training_attempt(**kwargs)
-    assert second == mrl.REDELIVERED
-    assert len(launches) == 1
-    assert (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes() == status_after_first
-    assert commits == commits_after_first
 
 
 # ── Training loop: heartbeat and checkpoint commits ────────────────────────
@@ -1118,8 +1086,11 @@ def test_cleanup_closes_log_before_final_commit(tmp_path):
     assert events.index("log_closed") < events.index("commit:interrupted")
 
 
-def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
-    """A failed terminal commit leaves the Volume at TRAINING, and a redelivery must not write.
+def test_failed_cleanup_commit_preserves_interrupted_result(tmp_path):
+    """A failed terminal commit keeps the interrupted outcome and stale-state derivation.
+
+    Redelivery after this failure is checked at the claim owner in the client
+    test `test_train_remote_redelivery_claims_before_prepare`.
 
     Production order (see `_signal_hooks`, ORDER): the retry's commit then
     always runs after the terminal STATUS, so it fails too and records nothing.
@@ -1162,16 +1133,6 @@ def test_failed_cleanup_commit_does_not_let_redelivery_write(tmp_path):
     derived = state.derive_status(last, now=_aware(minute=5))
     assert derived.stale is True
     assert derived.status is core.Status.INTERRUPTED
-    before = (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes()
-    commits_before = list(committed)
-
-    def must_not_launch(*_args, **_kwargs):
-        raise AssertionError("redelivered container must not start training")
-
-    kwargs["process"] = dataclasses.replace(kwargs["process"], spawn=must_not_launch)
-    assert mrl.execute_training_attempt(**kwargs) == mrl.REDELIVERED
-    assert (kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_bytes() == before
-    assert committed == commits_before
 
 
 def test_post_spawn_failure_kills_child_and_writes_terminal_status(tmp_path):
@@ -3058,8 +3019,8 @@ class _KillSeamClauses:
         """The ids of every node in `function`'s body, nested defs, lambdas and classes
         followed into their bodies only.
 
-        The resolution sits in the nested `train()`, so the whole body subtree
-        counts. A default value, a decorator, an annotation or a base class does
+        The whole body subtree counts, including any nested helper body.
+        A default value, a decorator, an annotation or a base class does
         not: the function's own run at import, and a nested def's are evaluated
         where that def statement runs, which the rule keeps out on purpose.
         """
@@ -3370,7 +3331,7 @@ def test_kill_seam_static_safety():
             getpgid=os.getpgid, killpg=os.killpg, install_signal=signal.signal.
       (vi)  In training.py an attribute named `system` is read exactly once: as
             the callee of a call `ProcessControl.system()` inside the body of
-            `execute_training_attempt` (its nested `train()` included; its
+            `execute_training_attempt` (nested helper bodies included; its
             defaults and decorators are not body). That is the `process=None`
             resolution; a module-level alias or a default would capture the real
             factory at import, out of the tripwire's reach.
@@ -3799,7 +3760,7 @@ def test_process_control_tripwire_guards_the_resolution_path(request,
     `except Exception` arm runs `finalize(kill_child=True)`, whose
     `_signal_process_group` returns at `child is None` before any getpgid or
     killpg; `release` restores no handler, since none was installed; and
-    `deliver_attempt` re-raises the error unchanged. The prepared heartbeat is
+    `execute_training_attempt` propagates the error unchanged. The prepared heartbeat is
     `_noop_heartbeat()`, so no fallback heartbeat thread starts. Every other
     collaborator is the builder's fake: only `process` is popped.
     """

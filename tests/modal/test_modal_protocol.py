@@ -12,7 +12,7 @@ from tests.conftest import REPO_ROOT
 ROOT = REPO_ROOT
 
 import scripts.modal_runner as mrl                                     # noqa: E402, I001
-from scripts.modal_runner import checkpoint, training                  # noqa: E402, I001
+from scripts.modal_runner import checkpoint                            # noqa: E402, I001
 from tests.modal.test_modal_state import FakeArtifactIndex             # noqa: E402, I001
 
 NOW = datetime(2026, 8, 13, 12, 0, tzinfo=UTC)
@@ -271,8 +271,3 @@ def test_fake_artifact_index_read_file_replace_after_read():
     assert index.read_file(path) is None
     assert path not in index.committed
     assert index.read_file(PurePosixPath("runs/missing/STATUS.json")) is None
-
-
-def test_unused_artifacts_read_file_returns_none():
-    unused = training._UnusedArtifacts()
-    assert unused.read_file(PurePosixPath("runs/ok-id/STATUS.json")) is None
