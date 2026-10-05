@@ -6,7 +6,7 @@ callables was "gated by the existing multiprocessing-backend tests". It is not:
 `env.c.cs2_env.make_env` and never touches `build_env_factory`, and every other
 `build_env_factory` test in the suite is Serial or in-process. So the one path
 where the migrated closure crosses a process boundary — and therefore the only
-place `build_env_for`'s function-local import of the env constructor executes
+place the role builder's constructor lookup executes
 anywhere other than the main interpreter — had no coverage at all.
 
 WHAT COULD GO WRONG THERE, concretely. A worker whose env fell back to the field
@@ -25,7 +25,8 @@ TWO TESTS, because fork and cold import are different failures:
      nothing about the import, which is a dictionary hit there.
   2. `test_build_env_for_works_from_a_cold_interpreter` closes exactly that gap
      in a fresh subprocess that has imported NOTHING of the training stack: it
-     imports `cs2rl.env.factory` alone and calls `build_env_for`, and asserts
+     imports `cs2rl.env.factory` alone, constructs through both the compatibility
+     dispatcher and explicit smoke builder in separate children, and asserts
      that `cs2rl.train` is still absent afterwards.
 
      THAT ASSERTION IS INVERTED FROM WHAT IT USED TO BE, and the inversion is
@@ -164,18 +165,19 @@ def test_train_closure_builds_envs_in_forked_workers():
 
 
 @pytest.mark.slow
-def test_build_env_for_works_from_a_cold_interpreter():
+@pytest.mark.parametrize("construction", ["build_env_for(\"smoke\")", "build_smoke_env()"])
+def test_build_env_for_works_from_a_cold_interpreter(construction):
     """A fresh process with NOTHING of the training stack imported builds an env.
 
     The half the fork smoke above cannot prove. On Linux pufferlib's
     Multiprocessing backend forks, so its children inherit the parent's
     `sys.modules` wholesale and the function-local import is a dictionary hit
     whose real behaviour is untested. Here the child imports
-    `cs2rl.env.factory` ALONE, and the import inside
-    `build_env_for` has to do the whole job from nothing.
+    `cs2rl.env.factory` ALONE, and the lazy constructor lookup has to do the
+    whole job from nothing for both public construction paths.
 
     WHAT IT ASSERTS AFTER THE CALL IS THE INVERSE OF WHAT IT USED TO. Since #165
-    PR B2 `build_env_for` imports `env.c.cs2_env.make_env` directly, so env
+    PR B2 the factory imports `env.c.cs2_env.make_env` directly, so env
     construction has NO L3 dependency: `train` must still be ABSENT once the env
     is built, and `env.c.cs2_env` must be PRESENT. The old assertion (`train` in
     sys.modules) would now pass only if the dependency came back.
@@ -201,11 +203,11 @@ assert "cs2rl.env.c.cs2_env" not in sys.modules, (
     "env_factory pulled the C env at module scope; the post-call assertion below "
     "would then be satisfied by the import rather than by build_env_for, and the "
     "W1 import-lightness invariant is broken besides")
-env = env_factory.build_env_for("smoke")
+env = env_factory.CONSTRUCTION
 try:
     assert "cs2rl.train" not in sys.modules, (
         "building an env pulled `cs2rl.train`. Since #165 PR B2 env construction has NO L3 "
-        "dependency at all — build_env_for imports env.c.cs2_env.make_env directly — and "
+        "dependency at all — the factory resolves env.c.cs2_env.make_env directly — and "
         "this assertion is what keeps that true from a cold interpreter")
     assert "cs2rl.env.c.cs2_env" in sys.modules, "build_env_for did not import the C env module"
     obs, _ = env.reset(seed=env_factory.SMOKE_SEED)
@@ -214,6 +216,7 @@ try:
 finally:
     env.close()
 """
+    code = code.replace("CONSTRUCTION", construction)
     r = subprocess.run([sys.executable, "-c", code],
                        cwd=REPO_ROOT,
                        capture_output=True,

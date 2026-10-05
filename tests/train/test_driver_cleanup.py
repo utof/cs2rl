@@ -188,7 +188,7 @@ def run_driver(monkeypatch, tmp_path):
     monkeypatch.setattr(trainer_module, "Cs2PuffeRL", Trainer)
     monkeypatch.setattr(loop, "assert_pin_pitch_agreement", lambda *a: hit("pin.check"))
     monkeypatch.setattr(loop, "assert_max_turn_speed_agreement", lambda *a: None)
-    monkeypatch.setattr(loop, "build_env_for", make_eval)
+    monkeypatch.setattr(loop, "build_eval_env", make_eval)
     monkeypatch.setattr(loop, "assert_eval_env_agreement", lambda *a: hit("eval.check"))
     monkeypatch.setattr(baselines, "BaselineEvaluator", Evaluator)
     monkeypatch.setattr(loop, "_atomic_save_state_dict", save)

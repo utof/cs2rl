@@ -18,7 +18,7 @@ from types import TracebackType
 
 import numpy as np
 
-from cs2rl.env.factory import build_env_for
+from cs2rl.env.factory import build_eval_env
 from cs2rl.policy import (
     AGENT_IDS,
     build_policy,
@@ -777,16 +777,14 @@ def train(args):
                 from cs2rl.eval.baselines import BaselineEvaluator
                 # W3 (#154), retyped by #165 PR B2: role eval. `team_spirit=None`, the
                 # 10_000_003 seed, the load-bearing `auto_reset=False` AND the
-                # raw-reward rule all live in env.factory._build_eval; this site passes
+                # raw-reward rule all live in env.factory.build_eval_env; this site passes
                 # only what comes from THIS run's args, which is now one EnvConfig from
                 # the same resolver the workers' factory reads. Requiring that config
                 # (the builder has no default) is what stops a caller handing the eval
                 # env a bare config while the driver env has the run's knobs — a
                 # disagreement assert_eval_env_agreement right below would then have
                 # something to catch.
-                _eval_env = build_env_for("eval",
-                                          map_data=_map_data,
-                                          config=env_config_from_args(args))
+                _eval_env = build_eval_env(map_data=_map_data, config=env_config_from_args(args))
                 eval_cleanup.push(partial(_close_on_exit, _eval_env.close))
                 assert_eval_env_agreement(_eval_env, trainer.vecenv.driver_env)
                 _eval_hook = ScheduledEval(

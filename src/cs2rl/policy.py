@@ -15,7 +15,7 @@ from pathlib import Path
 
 import numpy as np
 
-from cs2rl.env.factory import build_env_for
+from cs2rl.env.factory import build_legacy_eval_env
 from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
 
 
@@ -150,7 +150,7 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
     # tests/env/test_env_config.py pins them. Passing no knobs is the behaviour, not
     # an oversight; #143 tracks whether it should change, and the factory reduces
     # that future fix to one role's knob source.
-    policy_env = build_env_for("eval_legacy")
+    policy_env = build_legacy_eval_env()
 
     # Batch 3.5 (#24, Opus I3): defensive obs_dim consistency check.
     # The function rebuilds the policy with the *checkpoint's* obs_dim
