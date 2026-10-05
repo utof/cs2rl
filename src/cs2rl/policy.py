@@ -477,6 +477,36 @@ def build_policy(vecenv,
             m = mask.to(out_t.dtype)
             return m * out_t + (1.0 - m) * out_ct
 
+        def _project_heads(self, hidden_out, mask):
+            """Project aligned features into discrete logits and bounded aim parameters.
+
+            Callers align the team mask with their flattened feature rows.
+            Reuse the registered layers and clamp each team's log std before
+            blending; the shared log std also expands to the aim batch shape.
+            Legacy action sampling keeps its interleaved projection/sampling
+            order in get_action_and_value.
+            """
+            if self.tct_split_heads:
+                logits = [
+                    self._blend(mask, ht(hidden_out), hct(hidden_out))
+                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
+                ]
+                mu_aim = self._blend(mask,
+                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
+                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
+                log_std = self._blend(
+                    mask,
+                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim),
+                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
+                                self.aim_log_std_max).expand_as(mu_aim))
+            else:
+                logits = [head(hidden_out) for head in self.action_heads]
+                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
+                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
+                                      self.aim_log_std_max).expand_as(mu_aim)
+            return logits, mu_aim, log_std
+
         def get_value(self, x, lstm_state=None, done=None):
             hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
             return self.value_head(hidden_out), lstm_state
@@ -598,29 +628,8 @@ def build_policy(vecenv,
             if lstm_state is not None:
                 state["lstm_h"], state["lstm_c"] = lstm_state
 
-            if self.tct_split_heads:
-                mask = x[:, 24:25]                                                                # 2D input (B, obs)
-                logits = [
-                    self._blend(mask, ht(hidden_out), hct(hidden_out))
-                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
-                ]
-                mu_aim = self._blend(mask,
-                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
-                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
-                log_std = self._blend(
-                    mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim))
-            else:
-                logits = [head(hidden_out) for head in self.action_heads]
-                                                                                                  # μ is bounded by tanh*max_turn_speed; log_std broadcasts to μ
-                                                                                                  # shape so callers can build Normal(mu, exp(log_std)) directly
-                                                                                                  # without an extra .expand call.
-                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
-                                      self.aim_log_std_max).expand_as(mu_aim)
+            mask = x[:, 24:25] if self.tct_split_heads else None
+            logits, mu_aim, log_std = self._project_heads(hidden_out, mask)
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
@@ -705,6 +714,7 @@ def build_policy(vecenv,
                                          y_t.transpose(0, 1).reshape(B * TT, H),
                                          y_ct.transpose(0, 1).reshape(B * TT, H))
 
+            mask = None
             if self.tct_split_heads:
                 # PITFALL (spec §3.2 — the bug class this comment exists to
                 # prevent): build the mask from the 3D x with x[..., 24].
@@ -715,24 +725,7 @@ def build_policy(vecenv,
                 # time-minor. Works unchanged for the 2D/ONNX path, where
                 # TT == 1 and x[..., 24] is already the team column.
                 mask = x[..., 24].reshape(B * TT, 1)
-                logits = [
-                    self._blend(mask, ht(hidden_out), hct(hidden_out))
-                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
-                ]
-                mu_aim = self._blend(mask,
-                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
-                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
-                log_std = self._blend(
-                    mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim))
-            else:
-                logits = [head(hidden_out) for head in self.action_heads]
-                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
-                                      self.aim_log_std_max).expand_as(mu_aim)
+            logits, mu_aim, log_std = self._project_heads(hidden_out, mask)
             value = self.value_head(hidden_out)
             return logits, mu_aim, log_std, value
 
