@@ -1568,70 +1568,85 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
     assert json.loads((run_root / core.RESULT_FILENAME).read_text())["status"] == "completed"
 
 
-def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, monkeypatch):
+@pytest.mark.parametrize("failure", [None, "prepare", "spawn", "terminal_commit"])
+def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, monkeypatch, failure):
+    """Only the claim winner may prepare or execute, even after a failed terminal commit.
+
+    Exercise the actual wrapper, registry adapter, preparation and executor.
+    Safe fakes cover service, build and process boundaries. Moving the claim
+    after request/preparation or dropping it must repeat observable work here.
+    """
     module = _import_run_modal()
-    fake_modal.invoke_remote = True
     repo = _init_source_repo(tmp_path)
     sha = _git(repo, "rev-parse", "HEAD")
     request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha))
+    mount = tmp_path / "artifacts"
+    mount.mkdir()
     factory_calls: list[object] = []
+    # This fixture uses the native mount; the binding campaign's named site
+    # remains in the post-dump manifest test. Real files below prove this patch
+    # reaches preparation and training in the remote wrapper.
+    monkeypatch.setattr(core, "VOLUME_MOUNT", mount)
     prepare_calls: list[int] = []
-
-    def fake_run_root(run_id: str) -> Path:
-        path = tmp_path / "runs" / run_id
-        path.mkdir(parents=True, exist_ok=True)
-        return path
-
-    monkeypatch.setattr(module, "_remote_run_root", fake_run_root)
+    committed: list[str] = []
+    commit_attempts: list[str] = []
+    run_root = mount / "runs" / request.run_id
+    real_prepare = mrl.prepare_remote_source
     real_execute = mrl.execute_training_attempt
 
-    def fake_prepare(**kwargs):
-        prepare_calls.append(1)
-        kwargs["attempt"].volume.commit()
-        manifest = kwargs["manifest"]
-        run_root = Path(kwargs["attempt"].run_root)
-        run_root.mkdir(parents=True, exist_ok=True)
-        lock = kwargs["attempt"].lock
-        attempt_id = kwargs["attempt"].attempt_id
-        now = _aware(minute=len(prepare_calls))
-        state.transition_status(run_root,
-                                core.Status.PREPARING,
-                                now=now,
-                                attempt_id=attempt_id,
-                                lock=lock)
-        state.atomic_write_json(run_root / core.MANIFEST_FILENAME, manifest.to_dict())
-        state.transition_status(run_root,
-                                core.Status.BUILDING,
-                                now=now,
-                                attempt_id=attempt_id,
-                                lock=lock)
-        source_dir = tmp_path / "extracted"
-        source_dir.mkdir(exist_ok=True)
-        return core.PreparedSource(
-            source_dir=source_dir,
-            child_env={
-                "PATH": "/usr/bin",
-                "OMP_NUM_THREADS": "1"
-            },
-            train_command=["python", "-c", "pass"],
-            heartbeat=_noop_heartbeat(),
-            config_hash=manifest.config_hash,
-        )
+    def materialize(self):
+        for key, data in self.files.items():
+            dest = mount.joinpath(*PurePosixPath(key).parts)
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            dest.write_bytes(data)
 
-    def fake_execute(**kwargs):
-        # Never read, on purpose: this test is about the client, and its child exits 0, so a
-        # normal exit signals nothing. Recording here keeps a stray kill inert instead of
-        # reaching a real process group.
-        kills: list[tuple[int, int]] = []
+    def commit(self):
+        status = json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"]
+        commit_attempts.append(status)
+        if failure == "terminal_commit" and status == "interrupted":
+            raise RuntimeError("volume commit failed")
+        committed.append(status)
+        self.commit_count += 1
+
+    def fake_run(cmd, **kwargs):
+        if failure == "prepare":
+            raise RuntimeError("build command failed")
+        if "--dump-config" in cmd:
+            _write_dumped_config(run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    def prepare(**kwargs):
+        prepare_calls.append(1)
+        kwargs["host"] = preflight.PreflightHost(
+            run=fake_run,
+            parent_env={"PATH": "/usr/bin"},
+            start_heartbeat=_noop_heartbeat,
+            ephemeral_parent=tmp_path / "extracted",
+        )
+        return real_prepare(**kwargs)
+
+    def execute(**kwargs):
+        child = FakeChild(returncode=2,
+                          stdout=b"first-delivery\n",
+                          hold=failure == "terminal_commit")
+        original_wait = child.wait
+
+        def interrupt_once(timeout=None):
+            child.wait = original_wait
+            raise KeyboardInterrupt
 
         def factory(*args, **factory_kwargs):
             factory_calls.append((args, factory_kwargs))
-            return FakeChild(returncode=0, stdout=b"done\n")
+            if failure == "spawn":
+                raise RuntimeError("child spawn failed")
+            if failure == "terminal_commit":
+                child.wait = interrupt_once
+            return child
 
         kwargs["process"] = training.ProcessControl(
             spawn=factory,
             getpgid=lambda pid: pid,
-            killpg=lambda pgid, sig: kills.append((pgid, sig)),
+            killpg=lambda _pgid, _sig: child.release(),
             install_signal=signal.signal,
         )
         kwargs["attempt"] = dataclasses.replace(kwargs["attempt"],
@@ -1639,39 +1654,66 @@ def test_train_remote_redelivery_claims_before_prepare(fake_modal, tmp_path, mon
                                                                  sleep=lambda _seconds: None))
         return real_execute(**kwargs)
 
-    # Client reads these package exports at call time.
-    monkeypatch.setattr(mrl, "prepare_remote_source", fake_prepare)
-    monkeypatch.setattr(mrl, "execute_training_attempt", fake_execute)
-    first = module.launch_run(request,
-                              repo=repo,
-                              app_obj=module.app,
-                              now=_aware(),
-                              stdout=_capture_stdout())
-    assert first["status"] != mrl.REDELIVERED
-    assert factory_calls
+    # Build the real launch payload, then invoke its remote wrapper locally so
+    # remote failures propagate here instead of looking like client failures.
+    module.launch_run(request,
+                      repo=repo,
+                      app_obj=module.app,
+                      now=_aware(),
+                      stdout=_capture_stdout())
     payload = fake_modal.configured_spawn_calls[0][1][0]
-    run_root = tmp_path / "runs" / request.run_id
-    status_bytes = (run_root / mrl.STATUS_FILENAME).read_bytes()
-    manifest_bytes = (run_root / core.MANIFEST_FILENAME).read_bytes()
     volume = fake_modal.volumes[mrl.VOLUME_NAME]
-    commits_after_first = volume.commit_count
-    factory_count = len(factory_calls)
-    prepare_count = len(prepare_calls)
-    second = module.train_remote.with_options(
+    monkeypatch.setattr(FakeVolume, "reload", materialize)
+    monkeypatch.setattr(FakeVolume, "commit", commit)
+    monkeypatch.setattr(mrl, "prepare_remote_source", prepare)
+    monkeypatch.setattr(mrl, "execute_training_attempt", execute)
+    fake_modal.invoke_remote = True
+    remote = module.train_remote.with_options(
         gpu=request.gpu,
         cpu=request.cpu_request_limit,
         memory=request.memory_request_limit,
         timeout=request.timeout_minutes * 60,
-        volumes={
-            "/artifacts": volume
-        },
-    ).remote(payload)
-    assert second == {"status": mrl.REDELIVERED, "run_id": request.run_id}
-    assert len(prepare_calls) == prepare_count
-    assert len(factory_calls) == factory_count
-    assert (run_root / mrl.STATUS_FILENAME).read_bytes() == status_bytes
-    assert (run_root / core.MANIFEST_FILENAME).read_bytes() == manifest_bytes
-    assert volume.commit_count == commits_after_first
+        volumes={"/artifacts": volume},
+    )
+    if failure in {"prepare", "spawn"}:
+        message = "build command failed" if failure == "prepare" else "child spawn failed"
+        with pytest.raises(RuntimeError, match=message):
+            remote.remote(payload)
+    else:
+        expected = {"status": "failed", "reason": "nonzero_exit", "run_id": request.run_id}
+        if failure == "terminal_commit":
+            expected.update(status="interrupted", reason="signal")
+        assert remote.remote(payload) == expected
+    assert len(prepare_calls) == 1
+    assert len(factory_calls) == (0 if failure == "prepare" else 1)
+    expected_status = {
+        "prepare": "build_failed",
+        "terminal_commit": "interrupted"
+    }.get(failure, "failed")
+    assert json.loads((run_root / mrl.STATUS_FILENAME).read_text())["status"] == expected_status
+    if failure == "terminal_commit":
+        assert committed[-1] == "training"
+        assert "interrupted" in commit_attempts
+    before = {
+        path.relative_to(mount): path.read_bytes()
+        for path in mount.rglob("*") if path.is_file()
+    }
+    attempts_before = list(commit_attempts)
+    commits_before = volume.commit_count
+
+    def must_not_parse(*_args, **_kwargs):
+        raise AssertionError("a losing delivery must return before parsing its request")
+
+    monkeypatch.setattr(module, "_request_from_payload", must_not_parse)
+    assert remote.remote(payload) == {"status": mrl.REDELIVERED, "run_id": request.run_id}
+    assert len(prepare_calls) == 1
+    assert len(factory_calls) == (0 if failure == "prepare" else 1)
+    assert {
+        path.relative_to(mount): path.read_bytes()
+        for path in mount.rglob("*") if path.is_file()
+    } == before
+    assert commit_attempts == attempts_before
+    assert volume.commit_count == commits_before
 
 
 # ── Artifact client: status / download without importing the launch app ────

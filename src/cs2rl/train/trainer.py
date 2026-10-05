@@ -178,6 +178,8 @@ class Cs2PuffeRL(PuffeRL):
     logprobs_d: torch.Tensor
     participating: torch.Tensor
     _tag_metrics: dict | None
+    # The driver pins this shared-memory owner; the trainer reads its numpy view.
+    _action_mask_shm: object
 
     def __init__(self,
                  config,
@@ -189,25 +191,12 @@ class Cs2PuffeRL(PuffeRL):
                  participating_rows,
                  self_play_mgr,
                  logger=None):
-        super().__init__(config, vecenv, policy, logger=logger)
-        # WHAT: everything after super().__init__ runs under one try that stops the
-        # Utilization thread on ANY raise, then re-raises.
-        # WHY: PuffeRL.__init__ starts ``self.utilization = Utilization()``, a
-        # NON-daemon threading.Thread whose loop only ends when its stop() is called,
-        # and the only production caller of that is PuffeRL.close(). A raise from a
-        # step below (the gh#85 segments assert, a bad view shape, a config the
-        # patcher refuses) leaves a half-built instance nobody can close(), so the thread
-        # keeps the interpreter alive at exit: pytest prints its summary and then
-        # hangs (gh#168 W1.5 review, MAJOR-1; pinned by
-        # tests/train/test_trainer_composition.py::test_a_raise_inside_init_stops_the_utilization_thread).
-        # PITFALLS: this is the ONE line of PuffeRL.close() that must run on the
-        # failure path; vecenv.close() is the caller's (the vecenv was theirs before
-        # this constructor), and save_checkpoint() would write a half-built trainer.
-        # ``except BaseException`` so KeyboardInterrupt mid-construction does not
-        # hang either. Never move the try above super().__init__: before it returns
-        # there is no ``self.utilization`` to stop (AttributeError would replace the
-        # real error). Keep the step order below unchanged (the class docstring).
+        # PufferLib can raise AFTER starting Utilization (e.g. dashboard output
+        # hits a closed pipe), so protect the base constructor too. A failed
+        # constructor never takes vecenv ownership from its caller and must not
+        # checkpoint a partially initialized trainer.
         try:
+            super().__init__(config, vecenv, policy, logger=logger)
             self._init_return_norm()
             self._init_hybrid_aim(cont_action_view_main, mask_view_main, participating_rows)
             self._init_selfplay(self_play_mgr)
@@ -219,9 +208,36 @@ class Cs2PuffeRL(PuffeRL):
             # has to exist before the first epoch.
             self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
         except BaseException:
-            # Exactly what PuffeRL.close() does to the thread; nothing else of close().
-            self.utilization.stop()
+            # Early base-constructor failures may precede thread creation.
+            utilization = getattr(self, "utilization", None)
+            if utilization is not None:
+                utilization.stop()
             raise
+
+    def close_resources(self):
+        """Release vector/thread without publishing an unaccepted setup/resume state.
+
+        PuffeRL.close also publishes a checkpoint. Before setup is accepted, its
+        resource operations are safe; stop Utilization even if vector close fails.
+        """
+        try:
+            self.vecenv.close()
+        finally:
+            if not self.utilization.stopped:
+                self.utilization.stop()
+
+    def close(self):
+        """Keep PufferLib's shutdown/save contract and stop its thread on failure.
+
+        Upstream closes the vector before stopping Utilization. A vector-close
+        failure must not strand that non-daemon thread. Reuse upstream's close
+        and only supply the missing stop when it has not already happened.
+        """
+        try:
+            return super().close()
+        finally:
+            if not self.utilization.stopped:
+                self.utilization.stop()
 
     def _init_hybrid_aim(self, cont_action_view_main, mask_view_main, participating_rows):
         """Allocate the nine hybrid rollout fields after stock PuffeRL buffers exist.
@@ -920,9 +936,67 @@ class Cs2PuffeRL(PuffeRL):
         profile.end()
         return self.stats
 
+    def _prepare_entropy_update(self) -> tuple[float, bool]:
+        """Resolve this update's entropy target and whether its floor is active.
+
+        Called once before minibatches: global_step is constant during train().
+        Keep the checkpointed latches and optimizer tensor on the trainer; a
+        restored reset flag prevents repeating the initial in-place alpha reset.
+        Schedule math stays in the existing pure helpers. Minibatch alpha steps
+        and post-divisor entropy-history/metric writes belong to train().
+        """
+        config = self.config
+        # Read the live entropy bound (including this run's aim settings), then
+        # mirror the scheduled target even when GRACE consumes no alpha target.
+        target_entropy = _scheduled_target_entropy(config, self.global_step, self._max_entropy)
+        self._current_target_entropy = float(target_entropy)
+
+        # Reset before phase resolution, retaining Adam's original parameter.
+        # Warm-start continuity comes from target == anchor at release, not
+        # from parking log_alpha far below its operating point.
+        if not self._log_alpha_reset_done:
+            with torch.no_grad():
+                self._log_alpha_tensor.fill_(math.log(config["ent_coef"]))
+            self._log_alpha_reset_done = True
+
+        _ws_enabled = bool(config.get("warmstart_entropy", False))
+        _ws_floor_active = True
+        if _ws_enabled:
+            _ws_grace = int(config.get("warmstart_grace_steps", 5_000_000))
+            if (self._warmstart_h_anchor is None and self.global_step >= _ws_grace
+                    and self._last_entropy_mean is not None):
+                # Latch only a finite completed-update mean; retry next update
+                # rather than poison every target/alpha loss through the ramp.
+                if math.isfinite(self._last_entropy_mean):
+                    self._warmstart_h_anchor = float(self._last_entropy_mean)
+                else:
+                    print(f"[Train] WARN warm-start: non-finite entropy mean "
+                          f"{self._last_entropy_mean} at grace end — "
+                          f"anchor capture skipped, staying in GRACE.")
+            _ws = warmstart_entropy_state(
+                self.global_step,
+                grace_steps=_ws_grace,
+                ramp_steps=int(config.get("warmstart_ramp_steps", 10_000_000)),
+                h_anchor=self._warmstart_h_anchor,
+                base_target=(config.get("entropy_target_base_frac", 0.35) * self._max_entropy))
+            self._warmstart_phase = _ws.phase
+            _ws_floor_active = _ws.floor_active
+            if _ws.phase != WS_OFF and _ws.target is not None:
+                # Override the consumed target AND its logging mirror. OFF also
+                # returns a target, but must hand back to the normal schedule:
+                # when grace+ramp ends before normal warmup, that target can
+                # still be above base_target. Retaining that handoff is deliberate.
+                target_entropy = _ws.target
+                self._current_target_entropy = float(_ws.target)
+        else:
+            # Disabling the mode in-process must release a previously frozen
+            # alpha optimizer, even if the last update was still in GRACE.
+            self._warmstart_phase = WS_OFF
+        return target_entropy, _ws_floor_active
+
     def train(self):
         """One PPO update over the rollout buffer; the return-norm patcher's inner train()
-        replacement (in cs2rl.train.update) until gh#168 W2a, moved verbatim.
+        replacement (in cs2rl.train.update) until gh#168 W2a.
 
         WHAT: return-normalised value targets, the hybrid discrete+continuous PPO loss
         (``_hybrid_ppo_loss``), the SAC-style α dual loop, the warm-start entropy mode,
@@ -931,10 +1005,9 @@ class Cs2PuffeRL(PuffeRL):
 
         WHY this replaces ``PuffeRL.train`` outright (it never calls ``super().train``):
         the stock loop cannot unpack the policy's 4-tuple output (see the F11 note in
-        cs2rl.train.loop.train). The AST oracle in
-        .superpowers/sdd/2026-09-24-168-trainer-subclass/ast_oracle.py pins this body
-        to the pre-move closure node for node (N1-N5); the byte gates pin the arms the
-        2-epoch run executes.
+        cs2rl.train.loop.train). The historical AST oracle in
+        .superpowers/sdd/2026-09-24-168-trainer-subclass/ast_oracle.py checked the
+        original move against the pre-move closure (N1-N5).
 
         PITFALLS: names that were closure variables are now attributes
         (``_ret_mean/_ret_var``, ``_log_alpha_tensor``, ``_alpha_optimizer``,
@@ -962,94 +1035,7 @@ class Cs2PuffeRL(PuffeRL):
         anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
         self.ratio[:] = 1
 
-        # Task 9A: recompute target_entropy from the linear ramp once per
-        # train() call. WHY here (not inside the minibatch loop): the schedule
-        # is keyed on global_step which is fixed for the duration of a single
-        # train() call, so recomputing per-minibatch would burn cycles for no
-        # signal. We mirror the value onto self._current_target_entropy
-        # so the wandb log layer can read it without touching this method.
-        # Fracs/warmup_steps come from config via _scheduled_target_entropy
-        # (finding 4 residual — previously hardcoded 0.7→0.5).
-        # PITFALL: read self._max_entropy, never a copy taken at
-        # construction: the value follows the run (σ cap, pinned pitch, bonus
-        # switch) and is computed from those settings when the trainer is built.
-        target_entropy = _scheduled_target_entropy(config, self.global_step, self._max_entropy)
-        self._current_target_entropy = float(target_entropy)
-
-        # Task 9B: one-shot log_alpha reset on the first train() call after
-        # construction. WHY: the entropy schedule + log_alpha are coupled — the
-        # outer training loop can leave log_alpha at a stale value from a
-        # previous run / re-init, and we need a deterministic starting point
-        # of log(ent_coef) so the SAC dual-gradient loop converges from a
-        # known floor. The flag is an instance attribute so a checkpoint-restored
-        # trainer still resets exactly once.
-        if not self._log_alpha_reset_done:
-            with torch.no_grad():
-                self._log_alpha_tensor.fill_(math.log(config["ent_coef"]))
-            self._log_alpha_reset_done = True
-
-        # ── Warm-start entropy mode: resolve phase once per train() call ───
-        # (global_step only advances in evaluate(), so it is constant here —
-        # same reasoning as the Task 9A recompute above; all transitions land
-        # on update boundaries.) Ordering vs Task 9B: 9B runs FIRST and sets
-        # log_alpha to log(ent_coef) — exactly the operating point warm-start
-        # wants (continuity comes from target==h_anchor at release, never
-        # from moving log_alpha: Adam(lr=1e-4) travels ~1e-4/minibatch, so a
-        # parked log_alpha is stranded — spec finding 1).
-        # PITFALL: keep grace+ramp >= entropy_target_warmup_steps. OFF falls
-        # through to the Task 9A schedule (see the override condition below),
-        # and 9A ramps DOWNWARD — warmup_high_frac*max (0.5) at step 0 to
-        # base_frac*max (0.35) at entropy_target_warmup_steps — so during
-        # warmup it reads strictly ABOVE the base_frac*max the warm-start ramp
-        # lands on. With defaults (grace 5M + ramp 10M = 15M >= 10M warmup) 9A
-        # has already flattened at base_frac*max and the handoff is exactly
-        # continuous. But e.g. grace=2M+ramp=3M puts ramp_end at 5M, where 9A
-        # still reads 0.425*max: the target jumps UPWARD 0.35*max -> 0.425*max,
-        # i.e. 2.87 -> 3.49 nats (+0.62, at max_entropy=8.21), at the exact
-        # boundary the spec promises is clean.
-        _ws_enabled = bool(config.get("warmstart_entropy", False))
-        _ws_floor_active = True
-        if _ws_enabled:
-            _ws_grace = int(config.get("warmstart_grace_steps", 5_000_000))
-            if (self._warmstart_h_anchor is None and self.global_step >= _ws_grace
-                    and self._last_entropy_mean is not None):
-                # one-shot anchor capture (idempotent: guarded on None).
-                # Finite-check (Task 1 review): a NaN/inf entropy mean latched
-                # here would poison target and alpha_loss for the whole ramp —
-                # skip the capture (stay GRACE) and shout instead.
-                if math.isfinite(self._last_entropy_mean):
-                    self._warmstart_h_anchor = float(self._last_entropy_mean)
-                else:
-                    print(f"[Train] WARN warm-start: non-finite entropy mean "
-                          f"{self._last_entropy_mean} at grace end — "
-                          f"anchor capture skipped, staying in GRACE.")
-            _ws = warmstart_entropy_state(
-                self.global_step,
-                grace_steps=_ws_grace,
-                ramp_steps=int(config.get("warmstart_ramp_steps", 10_000_000)),
-                h_anchor=self._warmstart_h_anchor,
-                base_target=(config.get("entropy_target_base_frac", 0.35) * self._max_entropy))
-            self._warmstart_phase = _ws.phase
-            _ws_floor_active = _ws.floor_active
-            if _ws.phase != WS_OFF and _ws.target is not None:
-                # Override the Task 9A schedule during the ramp AND mirror it,
-                # or the wandb target trace plots the unmodified base schedule
-                # (spec finding 9). Effectively RAMP-only: GRACE carries
-                # target=None (no target is consumed while alpha is ceilinged).
-                # PITFALL: the WS_OFF guard is load-bearing — the helper returns
-                # target=base_target (NOT None) once OFF, so testing target
-                # alone would pin the target at base_frac*max for the rest of
-                # the run and silently flatten the tail of the 9A warmup ramp
-                # whenever grace+ramp < entropy_target_warmup_steps. Falling
-                # through here is what makes OFF byte-for-byte pre-feature
-                # behavior at ANY config, which is what the spec promises.
-                target_entropy = _ws.target
-                self._current_target_entropy = float(_ws.target)
-        else:
-            # Config can be toggled off in-process (tests do this; production
-            # builds the config once). Re-seed the phase so a stale GRACE can
-            # never keep the alpha optimizer frozen after the mode is disabled.
-            self._warmstart_phase = WS_OFF
+        target_entropy, _ws_floor_active = self._prepare_entropy_update()
 
         # Task 8: raw event-segment fraction (mask mean) — computed once per
         # train() call because _event_mask doesn't change inside the
@@ -1091,281 +1077,293 @@ class Cs2PuffeRL(PuffeRL):
             if _kl_stop and mb % _mbs_per_epoch == 0:
                 break                  # epoch boundary: honor the KL trip
             profile("train_misc", epoch, nest=True)
-            self.amp_context.__enter__()
 
-            shape = self.values.shape
-            advantages = torch.zeros(shape, device=device)
-            advantages = compute_puff_advantage(
-                self.values,
-                self.rewards,
-                self.terminals,
-                self.ratio,
-                advantages,
-                config["gamma"],
-                config["gae_lambda"],
-                config["vtrace_rho_clip"],
-                config["vtrace_c_clip"],
-            )
+            # Own the forward/loss scope lexically: skips and exceptions must
+            # restore the caller's autocast state before either backward pass.
+            with self.amp_context:
+                shape = self.values.shape
+                advantages = torch.zeros(shape, device=device)
+                advantages = compute_puff_advantage(
+                    self.values,
+                    self.rewards,
+                    self.terminals,
+                    self.ratio,
+                    advantages,
+                    config["gamma"],
+                    config["gae_lambda"],
+                    config["vtrace_rho_clip"],
+                    config["vtrace_c_clip"],
+                )
 
-            profile("train_copy", epoch)
-            adv = advantages.abs().sum(axis=1)
-            prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
-            prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
+                profile("train_copy", epoch)
+                adv = advantages.abs().sum(axis=1)
+                prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
+                prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
 
-            # ── Batch 1 Task 8: event-biased prio_probs oversampling ──────
-            # WHAT: when the segment-level event mask is populated and at
-            #   least one segment contains a bomb-plant event, multiply the
-            #   prio_probs of those segments by OVERSAMPLE_FACTOR before
-            #   renormalising. The downstream torch.multinomial call then
-            #   draws biased samples without any further changes — and the
-            #   importance-sampling correction (mb_prio, consumed inside
-            #   _hybrid_ppo_loss) uses the BOOSTED prio_probs[idx], so the
-            #   gradient stays unbiased.
-            # WHY: bomb-plant events are sparse in early training (the exact
-            #   fraction is itself a Task 9 metric, reported via
-            #   _event_oversample_fraction). Uniform prio sampling
-            #   under-replays them; oversampling accelerates value-function
-            #   fit on the rare-but-decisive transitions. Plan §Task 8
-            #   target: event-mask hit-rate among sampled segments >= 25%.
-            # PITFALLS:
-            #   * mask absent / all-False → skip the boost so pre-Batch-1
-            #     training paths and the warm-up pass before any plant
-            #     happens still work (no division by zero, no NaN).
-            #   * Boost the prob, not the weight — boosting `prio_weights`
-            #     and re-running the (w+1e-6)/(sum+1e-6) renorm would alter
-            #     the abs-advantage prior shape; multiplying prio_probs and
-            #     dividing by sum keeps the prior intact on non-event rows.
-            #   * Cloning before the in-place mul protects callers that
-            #     might still hold a reference to the original prio_probs.
-            #   * The exposed metric is the RAW event fraction (mask mean),
-            #     NOT the post-boost sampled fraction. Written onto
-            #     losses["event_oversample_fraction"] after the divisor
-            #     loop — do not accumulate it inside this minibatch loop.
-            OVERSAMPLE_FACTOR = 4.0
-            if event_mask is not None and event_mask.any():
-                boosted = prio_probs.clone()
-                boosted[event_mask] *= OVERSAMPLE_FACTOR
-                prio_probs = boosted / boosted.sum()
-            # ──────────────────────────────────────────────────────────────
+                # ── Batch 1 Task 8: event-biased prio_probs oversampling ──────
+                # WHAT: when the segment-level event mask is populated and at
+                #   least one segment contains a bomb-plant event, multiply the
+                #   prio_probs of those segments by OVERSAMPLE_FACTOR before
+                #   renormalising. The downstream torch.multinomial call then
+                #   draws biased samples without any further changes — and the
+                #   importance-sampling correction (mb_prio, consumed inside
+                #   _hybrid_ppo_loss) uses the BOOSTED prio_probs[idx], so the
+                #   gradient stays unbiased.
+                # WHY: bomb-plant events are sparse in early training (the exact
+                #   fraction is itself a Task 9 metric, reported via
+                #   _event_oversample_fraction). Uniform prio sampling
+                #   under-replays them; oversampling accelerates value-function
+                #   fit on the rare-but-decisive transitions. Plan §Task 8
+                #   target: event-mask hit-rate among sampled segments >= 25%.
+                # PITFALLS:
+                #   * mask absent / all-False → skip the boost so pre-Batch-1
+                #     training paths and the warm-up pass before any plant
+                #     happens still work (no division by zero, no NaN).
+                #   * Boost the prob, not the weight — boosting `prio_weights`
+                #     and re-running the (w+1e-6)/(sum+1e-6) renorm would alter
+                #     the abs-advantage prior shape; multiplying prio_probs and
+                #     dividing by sum keeps the prior intact on non-event rows.
+                #   * Cloning before the in-place mul protects callers that
+                #     might still hold a reference to the original prio_probs.
+                #   * The exposed metric is the RAW event fraction (mask mean),
+                #     NOT the post-boost sampled fraction. Written onto
+                #     losses["event_oversample_fraction"] after the divisor
+                #     loop — do not accumulate it inside this minibatch loop.
+                OVERSAMPLE_FACTOR = 4.0
+                if event_mask is not None and event_mask.any():
+                    boosted = prio_probs.clone()
+                    boosted[event_mask] *= OVERSAMPLE_FACTOR
+                    prio_probs = boosted / boosted.sum()
+                # ──────────────────────────────────────────────────────────────
 
-            idx = torch.multinomial(prio_probs, self.minibatch_segments)
-            mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
-            mb_obs = self.observations[idx]
-            mb_actions = self.actions[idx]
-            mb_logprobs = self.logprobs[idx]
-            # (mb_rewards pull removed with the dead per-minibatch
-            # compute_puff_advantage recompute — see finding-1 note below)
-            mb_terminals = self.terminals[idx]
-            mb_values = self.values[idx]
-            mb_returns = advantages[idx] + mb_values
-            mb_advantages = advantages[idx]
-            # Batch 3 (T5): pull continuous actions + per-factor old logprobs
-            # from the parallel buffers allocated by _init_hybrid_aim.
-            # mb_logprobs (the SUM) stays the canonical "logp from rollout" for
-            # KL/clipfrac diagnostics below; the per-factor halves drive the
-            # per-factor PPO clip in _hybrid_ppo_loss.
-            mb_cont_actions = self.cont_actions[idx]
-            mb_old_logp_d = self.logprobs_d[idx]
-            mb_old_logp_c = self.logprobs_c[idx]
-            # F8: rollout-stored action masks (all-ones = unmasked fallback).
-            # getattr for trainers built before hybrid buffer setup
-            # ran (shouldn't happen in prod; keeps direct-call tests working).
-            _masks_buf = getattr(self, "action_masks", None)
-            mb_masks = _masks_buf[idx] if _masks_buf is not None else None
+                idx = torch.multinomial(prio_probs, self.minibatch_segments)
+                mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
+                mb_obs = self.observations[idx]
+                mb_actions = self.actions[idx]
+                mb_logprobs = self.logprobs[idx]
+                # (mb_rewards pull removed with the dead per-minibatch
+                # compute_puff_advantage recompute — see finding-1 note below)
+                mb_terminals = self.terminals[idx]
+                mb_values = self.values[idx]
+                mb_returns = advantages[idx] + mb_values
+                mb_advantages = advantages[idx]
+                # Batch 3 (T5): pull continuous actions + per-factor old logprobs
+                # from the parallel buffers allocated by _init_hybrid_aim.
+                # mb_logprobs (the SUM) stays the canonical "logp from rollout" for
+                # KL/clipfrac diagnostics below; the per-factor halves drive the
+                # per-factor PPO clip in _hybrid_ppo_loss.
+                mb_cont_actions = self.cont_actions[idx]
+                mb_old_logp_d = self.logprobs_d[idx]
+                mb_old_logp_c = self.logprobs_c[idx]
+                # F8: rollout-stored action masks (all-ones = unmasked fallback).
+                # getattr for trainers built before hybrid buffer setup
+                # ran (shouldn't happen in prod; keeps direct-call tests working).
+                _masks_buf = getattr(self, "action_masks", None)
+                mb_masks = _masks_buf[idx] if _masks_buf is not None else None
 
-            # ── Rung 0 §2.2: participating mask for this minibatch ───────────
-            # Two dtypes on purpose (see the masked_* helpers' contract):
-            # mb_part is BOOL for indexing, mb_part_f/flat_part are the FLOAT
-            # weights the reductions take. flat_part is for the flat (S*T,)
-            # tensors (entropy, ratio_d/ratio_c, per-head entropies);
-            # mb_part_f for the [S, T]-shaped ones (v_loss, value writeback).
-            # Shapes: mb_part / mb_part_f are [S, T]; flat_part is (S*T,).
-            mb_part = self.participating[idx]
-            mb_part_f = mb_part.to(torch.float32)
-            n_part = mb_part_f.sum()
-            # Empty-minibatch tripwire: only reachable with non-uniform segment
-            # sampling (prio_alpha != 0 or a marked event segment) that happens
-            # to draw an all-parked minibatch — see spec §2.2. Skipping is the
-            # right call (every reduction below would be 0/0), but it must be
-            # VISIBLE, so it is counted into losses/empty_minibatches rather
-            # than silently swallowed. The `continue` sits before _mb_run += 1,
-            # so the gh#90 divisor keeps counting only executed minibatches.
-            if n_part.item() == 0:
-                _empty_mb += 1
-                # No zero_grad here: accumulate_minibatches is always 1 today,
-                # so no partial gradient can be pending. Revisit if that changes.
-                continue
-            flat_part = mb_part_f.reshape(-1)
+                # ── Rung 0 §2.2: participating mask for this minibatch ───────────
+                # Two dtypes on purpose (see the masked_* helpers' contract):
+                # mb_part is BOOL for indexing, mb_part_f/flat_part are the FLOAT
+                # weights the reductions take. flat_part is for the flat (S*T,)
+                # tensors (entropy, ratio_d/ratio_c, per-head entropies);
+                # mb_part_f for the [S, T]-shaped ones (v_loss, value writeback).
+                # Shapes: mb_part / mb_part_f are [S, T]; flat_part is (S*T,).
+                mb_part = self.participating[idx]
+                mb_part_f = mb_part.to(torch.float32)
+                n_part = mb_part_f.sum()
+                # Empty-minibatch tripwire: only reachable with non-uniform segment
+                # sampling (prio_alpha != 0 or a marked event segment) that happens
+                # to draw an all-parked minibatch — see spec §2.2. Skipping is the
+                # right call (every reduction below would be 0/0), but it must be
+                # VISIBLE, so it is counted into losses/empty_minibatches rather
+                # than silently swallowed. The `continue` sits before _mb_run += 1,
+                # so the gh#90 divisor keeps counting only executed minibatches.
+                if n_part.item() == 0:
+                    _empty_mb += 1
+                    # No zero_grad here: accumulate_minibatches is always 1 today,
+                    # so no partial gradient can be pending. Revisit if that changes.
+                    continue
+                flat_part = mb_part_f.reshape(-1)
 
-            # ── VALUE TARGET NORMALISATION ─────────────────────────────────
-            # Normalize returns before value regression.  The value head learns
-            # to predict normalized targets; advantages are unaffected.
-            mb_returns_norm = self._normalize_returns(mb_returns, mb_part)
-            # Also normalize the stored baseline values so clipping stays valid
-            mb_values_norm = (mb_values - self._ret_mean) / (self._ret_var + 1e-8).sqrt()
-            # ──────────────────────────────────────────────────────────────
+                # ── VALUE TARGET NORMALISATION ─────────────────────────────────
+                # Normalize returns before value regression.  The value head learns
+                # to predict normalized targets; advantages are unaffected.
+                mb_returns_norm = self._normalize_returns(mb_returns, mb_part)
+                # Also normalize the stored baseline values so clipping stays valid
+                mb_values_norm = (mb_values - self._ret_mean) / (self._ret_var + 1e-8).sqrt()
+                # ──────────────────────────────────────────────────────────────
 
-            profile("train_forward", epoch)
-            if not config["use_rnn"]:
-                mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+                profile("train_forward", epoch)
+                if not config["use_rnn"]:
+                    mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
-            # LSTM-BPTT fix: lstm_h/lstm_c None → zero initial state, which
-            # is exact (each stored segment began at evaluate()'s zeroed
-            # state — see Dust2Policy.forward doc). terminals drives the
-            # mid-segment done-reset inside _lstm_bptt so the training
-            # forward replicates the rollout's (1-done)*state masking.
-            state = dict(
-                action=mb_actions,
-                lstm_h=None,
-                lstm_c=None,
-                terminals=mb_terminals,
-            )
+                # LSTM-BPTT fix: lstm_h/lstm_c None → zero initial state, which
+                # is exact (each stored segment began at evaluate()'s zeroed
+                # state — see Dust2Policy.forward doc). terminals drives the
+                # mid-segment done-reset inside _lstm_bptt so the training
+                # forward replicates the rollout's (1-done)*state masking.
+                state = dict(
+                    action=mb_actions,
+                    lstm_h=None,
+                    lstm_c=None,
+                    terminals=mb_terminals,
+                )
 
-            # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
-            # (Fan et al. IJCAI 2019). The helper does the policy forward
-            # pass (returning mu_aim/log_std + value) and assembles the
-            # clipped policy loss with INDEPENDENT discrete and continuous
-            # ratios. F16 (2026-07-06 adversarial review): it now also
-            # returns the logits it computed, killing the redundant no-grad
-            # diagnostic forward that used to run here per minibatch
-            # (halves update-forward cost). Post-F8 the returned logits are
-            # MASKED, so the per-head entropy diagnostics below report the
-            # true sampled distribution.
-            (pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c, logits) = _hybrid_ppo_loss(
-                self.policy,
-                mb_obs,
-                mb_actions,
-                mb_cont_actions,
-                mb_old_logp_d,
-                mb_old_logp_c,
-                mb_advantages,
-                clip_coef,
-                state,
-                mb_prio=mb_prio,
-                mb_masks=mb_masks,
-                mb_part=mb_part_f,
-                aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
-                aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
-            )
-            # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
-            # was used by downstream diagnostics; T5 dropped that consumer
-            # (mb_actions is the canonical stored discrete action). No
-            # rebinding here — the variable is unused after this point.
-            # (F16: the former no-grad diagnostic re-forward that lived here
-            # is gone — `logits` now comes straight from _hybrid_ppo_loss.)
+                # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
+                # (Fan et al. IJCAI 2019). The helper does the policy forward
+                # pass (returning mu_aim/log_std + value) and assembles the
+                # clipped policy loss with INDEPENDENT discrete and continuous
+                # ratios. F16 (2026-07-06 adversarial review): it now also
+                # returns the logits it computed, killing the redundant no-grad
+                # diagnostic forward that used to run here per minibatch
+                # (halves update-forward cost). Post-F8 the returned logits are
+                # MASKED, so the per-head entropy diagnostics below report the
+                # true sampled distribution.
+                # Preserve the source text used by the existing pyrefly baseline.
+                # yapf: disable
+                (pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c, logits) = _hybrid_ppo_loss(
+                     self.policy,
+                     mb_obs,
+                     mb_actions,
+                     mb_cont_actions,
+                     mb_old_logp_d,
+                     mb_old_logp_c,
+                     mb_advantages,
+                     clip_coef,
+                     state,
+                     mb_prio=mb_prio,
+                     mb_masks=mb_masks,
+                     mb_part=mb_part_f,
+                     aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+                    aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
+                )
+                # yapf: enable
+                # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
+                # was used by downstream diagnostics; T5 dropped that consumer
+                # (mb_actions is the canonical stored discrete action). No
+                # rebinding here — the variable is unused after this point.
+                # (F16: the former no-grad diagnostic re-forward that lived here
+                # is gone — `logits` now comes straight from _hybrid_ppo_loss.)
 
-            profile("train_misc", epoch)
-            newlogprob = newlogprob.reshape(mb_logprobs.shape)
-            logratio = newlogprob - mb_logprobs
-            # Batch 3: keep the joint ratio for KL/clipfrac diagnostics so the
-            # existing log surface (approx_kl, clipfrac, importance) is
-            # backwards-compatible. ratio_d is what gets stored in self.ratio
-            # because compute_puff_advantage was tuned for the discrete-head
-            # importance ratio in pre-Batch-3 runs; substituting ratio_d here
-            # preserves vtrace's behaviour.
-            ratio = logratio.exp()
-            # Batch 3 (T5): _hybrid_ppo_loss returns flat (B*T,) ratios.
-            # self.ratio is (segments, bptt_horizon); reshape ratio_d to
-            # match so the indexed-write writes the right shape. ratio
-            # (joint) is already reshaped by mb_logprobs.shape on the
-            # previous line.
-            self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
+                profile("train_misc", epoch)
+                newlogprob = newlogprob.reshape(mb_logprobs.shape)
+                logratio = newlogprob - mb_logprobs
+                # Batch 3: keep the joint ratio for KL/clipfrac diagnostics so the
+                # existing log surface (approx_kl, clipfrac, importance) is
+                # backwards-compatible. ratio_d is what gets stored in self.ratio
+                # because compute_puff_advantage was tuned for the discrete-head
+                # importance ratio in pre-Batch-3 runs; substituting ratio_d here
+                # preserves vtrace's behaviour.
+                ratio = logratio.exp()
+                # Batch 3 (T5): _hybrid_ppo_loss returns flat (B*T,) ratios.
+                # self.ratio is (segments, bptt_horizon); reshape ratio_d to
+                # match so the indexed-write writes the right shape. ratio
+                # (joint) is already reshaped by mb_logprobs.shape on the
+                # previous line.
+                self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
 
-            with torch.no_grad():
-                # Rung 0 §2.2: every diagnostic below is a mean over rows, so
-                # every one of them is masked. _pm is mb_part_f reshaped to the
-                # joint ratio's [S, T] layout; ratio_d/ratio_c are flat, hence
-                # flat_part. An unmasked KL here would be diluted 5× at
-                # n_active=1 and the target_kl early-stop would never fire.
-                _pm = mb_part_f.reshape(logratio.shape)
-                old_approx_kl = masked_mean(-logratio, _pm)
-                approx_kl = masked_mean((ratio - 1) - logratio, _pm)
-                clipfrac = masked_mean(((ratio - 1.0).abs() > config["clip_coef"]).float(), _pm)
-                # Observe-only (spec 2026-08-15 §3.4): same formula as the
-                # joint `clipfrac` above, split by the per-factor ratios
-                # `_hybrid_ppo_loss` already returns. `.item()` into the
-                # logging dict only — NEVER add these to the `loss` tensor
-                # (they are diagnostics, not a training signal). Last-
-                # minibatch-only is forbidden; they accumulate like
-                # `clipfrac` and ride the existing `_mb_run` divisor.
-                clipfrac_d = masked_mean(((ratio_d - 1.0).abs() > config["clip_coef"]).float(),
-                                         flat_part)
-                clipfrac_c = masked_mean(((ratio_c - 1.0).abs() > config["clip_coef"]).float(),
-                                         flat_part)
+                with torch.no_grad():
+                    # Rung 0 §2.2: every diagnostic below is a mean over rows, so
+                    # every one of them is masked. _pm is mb_part_f reshaped to the
+                    # joint ratio's [S, T] layout; ratio_d/ratio_c are flat, hence
+                    # flat_part. An unmasked KL here would be diluted 5× at
+                    # n_active=1 and the target_kl early-stop would never fire.
+                    _pm = mb_part_f.reshape(logratio.shape)
+                    old_approx_kl = masked_mean(-logratio, _pm)
+                    approx_kl = masked_mean((ratio - 1) - logratio, _pm)
+                    clipfrac = masked_mean(((ratio - 1.0).abs() > config["clip_coef"]).float(), _pm)
+                    # Observe-only (spec 2026-08-15 §3.4): same formula as the
+                    # joint `clipfrac` above, split by the per-factor ratios
+                    # `_hybrid_ppo_loss` already returns. `.item()` into the
+                    # logging dict only — NEVER add these to the `loss` tensor
+                    # (they are diagnostics, not a training signal). Last-
+                    # minibatch-only is forbidden; they accumulate like
+                    # `clipfrac` and ride the existing `_mb_run` divisor.
+                    clipfrac_d = masked_mean(((ratio_d - 1.0).abs() > config["clip_coef"]).float(),
+                                             flat_part)
+                    clipfrac_c = masked_mean(((ratio_c - 1.0).abs() > config["clip_coef"]).float(),
+                                             flat_part)
 
-            # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
-            # (this minibatch included — matches standard PPO's post-epoch
-            # check) and stops at the next epoch boundary via the loop-top
-            # gate, instead of the old immediate mid-pass break.
-            if target_kl is not None and approx_kl.item() > target_kl:
-                _kl_stop = True
+                # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
+                # (this minibatch included — matches standard PPO's post-epoch
+                # check) and stops at the next epoch boundary via the loop-top
+                # gate, instead of the old immediate mid-pass break.
+                if target_kl is not None and approx_kl.item() > target_kl:
+                    _kl_stop = True
 
-            # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
-            # via per-factor clipping (the pre-Batch-3 single-ratio block
-            # would over-clip — spec L8 decision). Advantage normalization +
-            # the mb_prio importance weight now live INSIDE _hybrid_ppo_loss
-            # (finding 1, 2026-07-06 adversarial review); the orphaned
-            # normalization stub and the discarded per-minibatch
-            # compute_puff_advantage recompute that used to sit here were
-            # dead compute and have been removed.
+                # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
+                # via per-factor clipping (the pre-Batch-3 single-ratio block
+                # would over-clip — spec L8 decision). Advantage normalization +
+                # the mb_prio importance weight now live INSIDE _hybrid_ppo_loss
+                # (finding 1, 2026-07-06 adversarial review); the orphaned
+                # normalization stub and the discarded per-minibatch
+                # compute_puff_advantage recompute that used to sit here were
+                # dead compute and have been removed.
 
-            newvalue = newvalue.view(mb_returns_norm.shape)
-            v_loss_unclipped = (newvalue - mb_returns_norm)**2
-            if vf_clip is not None:
-                v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
-                                                         vf_clip)
-                v_loss_clipped = (v_clipped - mb_returns_norm)**2
-                v_loss = 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped), mb_part_f)
-            else:
-                v_loss = 0.5 * masked_mean(v_loss_unclipped, mb_part_f)
+                newvalue = newvalue.view(mb_returns_norm.shape)
+                v_loss_unclipped = (newvalue - mb_returns_norm)**2
+                if vf_clip is not None:
+                    v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
+                                                             vf_clip)
+                    v_loss_clipped = (v_clipped - mb_returns_norm)**2
+                    v_loss = 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped),
+                                               mb_part_f)
+                else:
+                    v_loss = 0.5 * masked_mean(v_loss_unclipped, mb_part_f)
 
-            # Rung 0 §2.2: the entropy the SAC-α dual loop and the collapse
-            # floor react to must be the participating rows' entropy. Parked
-            # rows are noop-masked (exactly one valid bin per head ⇒ discrete
-            # entropy 0), so an unmasked mean at n_active=1 reads ~1/5 of the
-            # truth and would peg alpha at the floor forever.
-            current_entropy = masked_mean(entropy, flat_part)
-            entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)
+                # Rung 0 §2.2: the entropy the SAC-α dual loop and the collapse
+                # floor react to must be the participating rows' entropy. Parked
+                # rows are noop-masked (exactly one valid bin per head ⇒ discrete
+                # entropy 0), so an unmasked mean at n_active=1 reads ~1/5 of the
+                # truth and would peg alpha at the floor forever.
+                current_entropy = masked_mean(entropy, flat_part)
+                # Preserve this source-keyed diagnostic line across indentation too.
+                # yapf: disable
+                entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)
+                # yapf: enable
 
-            # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
-            alpha = self._log_alpha_tensor.exp()
-            # Task 9A: use the scheduled target_entropy (recomputed at top of
-            # this train() call) instead of the static fallback. target_entropy
-            # is a Python float; .detach() on a tensor minus a float is fine —
-            # autograd treats the float as a constant.
-            # alpha_loss is computed UNCONDITIONALLY (the logging block below
-            # accumulates it every minibatch — spec finding 7); during the
-            # warm-start GRACE phase only the optimizer step is skipped, so
-            # log_alpha stays at its operating point (see phase-resolution
-            # comment above for why that matters).
-            alpha_loss = (self._log_alpha_tensor *
-                          (current_entropy - target_entropy).detach()).mean()
+                # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
+                alpha = self._log_alpha_tensor.exp()
+                # Task 9A: use the scheduled target_entropy (recomputed at top of
+                # this train() call) instead of the static fallback. target_entropy
+                # is a Python float; .detach() on a tensor minus a float is fine —
+                # autograd treats the float as a constant.
+                # alpha_loss is computed UNCONDITIONALLY (the logging block below
+                # accumulates it every minibatch — spec finding 7); during the
+                # warm-start GRACE phase only the optimizer step is skipped, so
+                # log_alpha stays at its operating point (see phase-resolution
+                # comment above for why that matters).
+                alpha_loss = (self._log_alpha_tensor *
+                              (current_entropy - target_entropy).detach()).mean()
+
+                effective_alpha = alpha.detach()
+                if self._warmstart_phase == WS_GRACE:
+                    # grace: entropy pressure ceilinged (default 0.0 — pure
+                    # PPO+reward; the knob exists for a nonzero-alpha rerun if
+                    # the collapse watch fires)
+                    effective_alpha = torch.clamp(effective_alpha,
+                                                  max=float(
+                                                      config.get("warmstart_alpha_ceiling", 0.0)))
+                # Entropy floor: prevent collapse. Gated off for the ENTIRE
+                # warm-start window (grace+ramp): the BC policy lives below the
+                # floor by design, and re-arming mid-ramp would jump effective
+                # alpha ~1e-3 -> 0.5 in one minibatch (spec finding 2). It re-arms
+                # at ramp_end — a plotted boundary.
+                if _ws_floor_active and current_entropy.item() < self._entropy_floor:
+                    effective_alpha = torch.clamp(effective_alpha, min=0.5)
+                    _floor_fires += 1
+
+                entropy_loss = -effective_alpha * current_entropy
+                # ──────────────────────────────────────────────────────────────
+
+                loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
+
+            # Both backward passes run after our autocast scope. Alpha is still
+            # stepped before policy backward, using the pre-step alpha in loss.
             if self._warmstart_phase != WS_GRACE:
                 self._alpha_optimizer.zero_grad()
                 alpha_loss.backward()
                 self._alpha_optimizer.step()
-
-            effective_alpha = alpha.detach()
-            if self._warmstart_phase == WS_GRACE:
-                # grace: entropy pressure ceilinged (default 0.0 — pure
-                # PPO+reward; the knob exists for a nonzero-alpha rerun if
-                # the collapse watch fires)
-                effective_alpha = torch.clamp(effective_alpha,
-                                              max=float(config.get("warmstart_alpha_ceiling", 0.0)))
-            # Entropy floor: prevent collapse. Gated off for the ENTIRE
-            # warm-start window (grace+ramp): the BC policy lives below the
-            # floor by design, and re-arming mid-ramp would jump effective
-            # alpha ~1e-3 -> 0.5 in one minibatch (spec finding 2). It re-arms
-            # at ramp_end — a plotted boundary.
-            if _ws_floor_active and current_entropy.item() < self._entropy_floor:
-                effective_alpha = torch.clamp(effective_alpha, min=0.5)
-                _floor_fires += 1
-
-            entropy_loss = -effective_alpha * current_entropy
-            # ──────────────────────────────────────────────────────────────
-
-            loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
-            self.amp_context.__enter__()
 
             # Denormalize before writing back so advantage computation stays in raw scale
             std = (self._ret_var + 1e-8).sqrt()

@@ -61,8 +61,8 @@ suite would tell us.
 
 SCOPE. All six roles' call sites are migrated, and none of them names
 `make_puffer_env`; `tests/integration/test_env_construction_enforcement.py` asserts that
-permanently. Since PR B2 `build_env_for` imports `env.c.cs2_env.make_env`
-directly, so the stub in `_construct` is installed there.
+permanently. Since PR B2 the factory resolves `env.c.cs2_env.make_env`
+lazily, so the stub in `_construct` is installed there.
 
 FACTORY vs CALL SITE. Most of this file hands the fixture's bindings to
 `build_env_for` by hand, which measures the FACTORY only — a call site that
@@ -154,7 +154,7 @@ def _config_from(d):
 
 def _construct(monkeypatch, role, **kwargs):
     """Run `build_env_for(role, ...)` against a recording stub at
-    `env.c.cs2_env.make_env` — where build_env_for's function-local import now
+    `env.c.cs2_env.make_env` — where the builder's lazy constructor lookup
     reads from, so this also proves that import is a per-call attribute read."""
     from cs2rl.env.c import cs2_env
 
@@ -501,8 +501,6 @@ def test_every_role_builder_parameter_is_required():
 
     for role, builder in env_factory._ROLE_BUILDERS.items():
         for name, param in inspect.signature(builder).parameters.items():
-            if param.kind is param.POSITIONAL_ONLY:
-                continue                                                                          # the injected `_make`
             assert param.kind is param.KEYWORD_ONLY, f"{role}.{name} is not keyword-only"
             if (role, name) == ("eval_legacy", "seed"):
                 assert param.default is UNSET, (
@@ -912,40 +910,40 @@ class _Captured(Exception):
     """
 
 
-def _drive(monkeypatch, module, fn, *args, **kwargs):
-    """Run `fn(*args, **kwargs)` with `module.build_env_for` recording and aborting.
+def _drive(monkeypatch, fn, *args, **kwargs):
+    """Run a real consumer until its lower-layer construction, then abort.
 
-    Returns the (role, kwargs) the call site asked for. Patching the name on the
-    CALLING module rather than on `env.factory` is deliberate: both call sites'
-    modules do `from cs2rl.env.factory import build_env_for`, so the module-global is
-    the binding production actually reads, and patching the source module would
-    not be seen.
+    Observe the complete constructor payload, including the role builder's
+    policy. Patching the lower boundary catches a consumer choosing the wrong
+    builder as well as swapped or dropped arguments without allocating an env.
     """
+    from cs2rl.env.c import cs2_env
+
     seen = []
 
-    def _record(role, **kw):
-        seen.append((role, kw))
+    def _record(**kw):
+        seen.append(kw)
         raise _Captured
 
-    monkeypatch.setattr(module, "build_env_for", _record)
+    monkeypatch.setattr(cs2_env, "make_env", _record)
     with pytest.raises(_Captured):
         fn(*args, **kwargs)
-    assert len(seen) == 1, f"{fn.__name__} reached build_env_for {len(seen)} times"
+    assert len(seen) == 1, f"{fn.__name__} reached construction {len(seen)} times"
     return seen[0]
 
 
 def test_smoke_test_call_site_asks_for_the_smoke_role(monkeypatch):
-    """`smoke_test()` builds its env through the factory and passes NO kwargs.
+    """`smoke_test()` constructs a default env with the smoke seed.
 
-    Seed 42 moved into `_build_smoke`, so the call site passing anything at all
-    would mean the role's payload had been duplicated back out of the factory.
+    Seed 42 is the smoke construction policy; another builder or a dropped
+    seed would change the payload observed at the lower-layer boundary.
     The `env.reset(seed=42)` on the next line is NOT part of construction and
     must stay — the two 42s are a coincidence, not one value.
     """
     from cs2rl.train import envs as train_envs
 
-    role, kwargs = _drive(monkeypatch, train_envs, train_envs.smoke_test)
-    assert (role, kwargs) == ("smoke", {})
+    kwargs = _drive(monkeypatch, train_envs.smoke_test)
+    assert kwargs == {"config": EnvConfig(), "team_spirit": None, "seed": 42}
 
 
 def test_make_env_delegates_to_the_external_role(monkeypatch):
@@ -955,18 +953,22 @@ def test_make_env_delegates_to_the_external_role(monkeypatch):
     parameters of the same shape, so crossing them is a one-character edit that
     every value-based comparison in this file would accept.
     """
+    from cs2rl.env.c import cs2_env
     from cs2rl.train import envs as train_envs
 
-    seen = []
-    monkeypatch.setattr(train_envs, "build_env_for", lambda role, **kw: seen.append((role, kw)))
-    train_envs.make_env("<team_spirit>", "<map_data>")
-    assert seen == [("external", {"team_spirit": "<team_spirit>", "map_data": "<map_data>"})]
+    rec = _Recorder()
+    monkeypatch.setattr(cs2_env, "make_env", rec)
+    assert train_envs.make_env("<team_spirit>", "<map_data>") == "<env>"
+    assert rec.calls == [{
+        "config": EnvConfig(),
+        "team_spirit": "<team_spirit>",
+        "map_data": "<map_data>"
+    }]
 
-    # The wrapper's own optional defaults stay on the wrapper — `_build_external`
-    # requires both, so a forwarding bug is a TypeError rather than a dust2 env.
-    seen.clear()
-    train_envs.make_env()
-    assert seen == [("external", {"team_spirit": None, "map_data": None})]
+    # Published optional defaults still belong to the public wrapper.
+    rec.calls.clear()
+    assert train_envs.make_env() == "<env>"
+    assert rec.calls == [{"config": EnvConfig(), "team_spirit": None, "map_data": None}]
 
 
 def test_external_role_returns_under_a_stub(monkeypatch):
@@ -992,12 +994,11 @@ def test_external_role_returns_under_a_stub(monkeypatch):
 
 
 def test_load_policy_from_checkpoint_asks_for_bare_eval_legacy(monkeypatch, tmp_path):
-    """The bare eval_legacy site: role only, no kwargs, no seed.
+    """The bare legacy-eval site: field defaults, with no seed forwarded.
 
     `torch.load` is stubbed because the construction sits AFTER the checkpoint
     read, and this test is about the construction. The stub returns the one key
-    the loader inspects, so the function reaches the factory the same way a real
-    checkpoint would.
+    the loader inspects, so the function reaches construction the same way a real checkpoint would.
     """
     import types
 
@@ -1011,10 +1012,11 @@ def test_load_policy_from_checkpoint_asks_for_bare_eval_legacy(monkeypatch, tmp_
         torch, "load",
         lambda *_a, **_kw: {"encoder.0.weight": types.SimpleNamespace(shape=(64, 105))})
 
-    role, kwargs = _drive(monkeypatch, policy_mod, policy_mod.load_policy_from_checkpoint, ckpt,
-                          "cpu")
-    assert (role, kwargs) == ("eval_legacy", {}), (
-        "load_policy_from_checkpoint must pass NO seed — make_env's own default is 0, and "
+    kwargs = _drive(monkeypatch, policy_mod.load_policy_from_checkpoint, ckpt, "cpu")
+    assert kwargs == {
+        "config": EnvConfig(),
+        "team_spirit": None
+    }, ("load_policy_from_checkpoint must pass NO seed — make_env's own default is 0, and "
         "forwarding None instead would build a different env that scalars cannot see")
 
 
@@ -1025,19 +1027,17 @@ def test_evaluate_checkpoint_threads_its_episode_seed(monkeypatch):
     the first loop iteration reaches the construction directly. That the seed is
     the per-episode `start_seed + episode_idx` rather than `start_seed` is not
     observable from episode 0 — the AST wiring test below is what pins the
-    expression; this pins that the seed reaches the factory at all, under the
-    right role.
+    expression; this pins that the seed and default config reach the constructor.
     """
     from cs2rl.train import evaluate as train_evaluate
 
-    role, kwargs = _drive(monkeypatch,
-                          train_evaluate,
-                          train_evaluate.evaluate_checkpoint,
-                          checkpoint_path=None,
-                          policy_mode="random",
-                          start_seed=7717,
-                          num_episodes=1)
-    assert (role, kwargs) == ("eval_legacy", {"seed": 7717})
+    kwargs = _drive(monkeypatch,
+                    train_evaluate.evaluate_checkpoint,
+                    checkpoint_path=None,
+                    policy_mode="random",
+                    start_seed=7717,
+                    num_episodes=1)
+    assert kwargs == {"config": EnvConfig(), "team_spirit": None, "seed": 7717}
 
 
 # The five attributes check (a) compares, WRITTEN DOWN rather than AST-read out
@@ -1347,14 +1347,10 @@ def test_migrated_site_still_reads_what_the_old_site_read(role, enclosing, path,
       SAME resolver build_train_env_factory uses, because that identity is what
       makes assert_eval_env_agreement's disclosure true.
     """
-    new_call = _call_in(path, enclosing, "build_env_for")
+    builder_name = "build_legacy_eval_env" if role == "eval_legacy" else f"build_{role}_env"
+    new_call = _call_in(path, enclosing, builder_name)
     new_source = ast.unparse(new_call)
-
-    assert new_call.args and isinstance(new_call.args[0], ast.Constant), (
-        f"{enclosing} calls build_env_for without a literal role: {new_source}")
-    assert new_call.args[0].value == role, (
-        f"{enclosing} asks for role {new_call.args[0].value!r}; the fixture captured it as "
-        f"{role!r}")
+    assert not new_call.args, f"{enclosing} must pass the builder's explicit keyword arguments"
 
     old_named, old_splats = _keywords(call_source)
     new_named, new_splats = _keywords(new_source)
@@ -1398,7 +1394,7 @@ def test_migrated_site_still_reads_what_the_old_site_read(role, enclosing, path,
         f"site. Constants belong to the builder now — two copies drift.\n"
         f"  pre-migration: {call_source}\n  now:           {new_source}")
 
-    assert not new_splats, (f"{role}/{enclosing} splats into build_env_for ({new_splats}); every "
+    assert not new_splats, (f"{role}/{enclosing} splats into its builder ({new_splats}); every "
                             "role builder takes explicit keywords so a typo is a TypeError")
     assert not old_splats, (
         f"{role}/{enclosing}: the captured call splatted {old_splats}, which no capture in this "

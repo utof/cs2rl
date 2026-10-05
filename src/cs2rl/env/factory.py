@@ -1,7 +1,8 @@
 """The one place a Cs2Env is constructed.
 
-Envs are keyed by the ROLE they are built for. The self-play manager is NOT built
-here any more: its single builder, `cs2rl.train.selfplay.build_selfplay_manager`
+Explicit builders name the ROLE each env is built for. The compatibility
+dispatcher remains for dynamic callers and role-parameterized tests.
+The self-play manager is NOT built here any more: its single builder, `cs2rl.train.selfplay.build_selfplay_manager`
 (one builder because its three sites turned out to differ in exactly one argument),
 moved up beside `SelfPlayManager` in #205 part 3 (#92). Left here, it had to import
 `cs2rl.train`, an upward edge the layers contract needed an ignore entry for.
@@ -73,7 +74,7 @@ here would not change that: `record_episode` would still have to be migrated ont
 it, and an enum member no call site can reach is a divergence trap — the next
 person adds a knob to it and nothing changes.
 
-WHY THE IMPORT IS FUNCTION-LOCAL. Since #165 PR B2 `build_env_for` imports
+WHY THE IMPORT IS FUNCTION-LOCAL. Since #165 PR B2 the factory imports
 `env.c.cs2_env.make_env` DIRECTLY, so the module cycle that import used to break is
 gone — env construction has no L3 dependency at all and this module never names
 `train` (#205 part 3 moved the last such name out with `build_selfplay_manager`).
@@ -96,8 +97,8 @@ nothing to alias (`tests/train/test_w1_modules.py::test_script_run_has_exactly_o
 pins that no module body runs twice). `env` sits below `train` in pyproject.toml's
 `cs2rl layers` contract, which has no `ignore_imports` entry left to hide an import back.
 
-PITFALL — the `make_env` import is INSIDE `build_env_for`, not cached at module scope,
-on purpose: `build_env_for` re-reads `env.c.cs2_env.make_env` every time, so a test
+PITFALL — the `make_env` import is INSIDE `_env_constructor`, not cached at module scope,
+on purpose: each explicit builder re-reads `env.c.cs2_env.make_env` every time, so a test
 that rebinds that attribute still sees its stand-in used, and
 tests/env/test_env_factory.py's `_construct` is built on exactly that.
 
@@ -128,14 +129,13 @@ here still hits it; the scan reads call nodes, not text.
 
 `make_env` belongs instead to `LOWER_LAYER_SITES`, the per-file DISCLOSURE census
 that `test_the_unbanned_lower_layer_census_is_accurate` asserts by exact
-equality. This file needs no entry there either: `build_env_for` imports
-`env.c.cs2_env.make_env` and hands it to the role builder as a VALUE
-(`builder(make_env, **kwargs)`), so no CALL node here names it. If the `_make`
-parameter is ever inlined into the builders, this file starts showing up in that
-census and the entry has to be added.
+equality. This file needs no entry there either: `_env_constructor` returns
+`env.c.cs2_env.make_env` as a VALUE. Each builder calls that returned callable
+through its local `_make` name, so no CALL node names `make_env`. Inlining the
+lower-layer name into the builders would add this file to that census.
 """
 # Module scope, unlike this module's one function-local import (`make_env` in
-# `build_env_for`):
+# `_env_constructor`):
 # `env.config` is the stdlib-only leaf of the config graph — it imports nothing
 # heavier than `dataclasses` — so this costs nothing on `--dump-config`'s path.
 # tests/train/test_w1_modules.py::test_only_sibling_edge_is_to_the_leaf
@@ -143,7 +143,7 @@ census and the entry has to be added.
 # `env.factory`, this module) — and `env.config` is one of them.
 from cs2rl.env.config import EnvConfig
 
-# The role names, in the order the spec lists them. Callers pass one of these
+# The compatibility role names, in the order the spec lists them. Dynamic callers pass these
 # strings; anything else is a ValueError naming the whole set, because a typo'd
 # role that silently fell through to a default would construct the WRONG env and
 # nothing downstream would notice.
@@ -176,7 +176,20 @@ class _Unset:
 UNSET = _Unset()
 
 
-def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, config):
+def _env_constructor():
+    """Read the current lower-layer constructor without loading it at import time.
+
+    The CLI imports this module on its dump-config path, which must stay light.
+    Resolve on every construction so rebinding make_env is visible to callers.
+    Returning the callable also keeps map loading owned by the lower layer.
+    """
+    from cs2rl.env.c.cs2_env import make_env
+
+    return make_env
+
+
+def build_train_env(*, shared_ts, buf, seed: int | None, _seed: int | None, map_data,
+                    config: EnvConfig):
     """The training vecenv's per-env construction.
 
     ``_seed`` (R0-D, #135) is the per-env seed train() routes through
@@ -202,6 +215,7 @@ def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, config):
     comes out identical either way. That is what made deleting the resolution
     invisible to the whole suite until the assertion was added.
     """
+    _make = _env_constructor()
     return _make(config=config,
                  team_spirit=shared_ts,
                  buf=buf,
@@ -209,7 +223,7 @@ def _build_train(_make, /, *, shared_ts, buf, seed, _seed, map_data, config):
                  map_data=map_data)
 
 
-def _build_eval(_make, /, *, map_data, config):
+def build_eval_env(*, map_data, config: EnvConfig):
     """The fixed-baseline evaluator's env.
 
     ``auto_reset=False`` is the reason this role cannot be folded into any
@@ -233,6 +247,7 @@ def _build_eval(_make, /, *, map_data, config):
     construction (`cs2rl.train.envs.assert_eval_env_agreement`). Accepting None here would
     let that check compare a default eval env against a knobbed driver.
     """
+    _make = _env_constructor()
     return _make(config=config.replace(reward_symmetrize=False),
                  team_spirit=None,
                  seed=EVAL_SEED,
@@ -240,7 +255,7 @@ def _build_eval(_make, /, *, map_data, config):
                  auto_reset=False)
 
 
-def _build_eval_legacy(_make, /, *, seed=UNSET):
+def build_legacy_eval_env(*, seed: int | None | _Unset = UNSET):
     """`load_policy_from_checkpoint` (no seed) and `evaluate_checkpoint` (seed=).
 
     Two call shapes, one role. See `_Unset` for why the absent case is not
@@ -264,24 +279,26 @@ def _build_eval_legacy(_make, /, *, seed=UNSET):
     spelling this one keeps that comparison a measurement instead of an argument
     about equivalence.
     """
+    _make = _env_constructor()
     if seed is UNSET:
         return _make(config=EnvConfig(), team_spirit=None)
     return _make(config=EnvConfig(), team_spirit=None, seed=seed)
 
 
-def _build_smoke(_make, /):
+def build_smoke_env():
     """`smoke_test`'s env: one fixed seed, nothing else.
 
     ``team_spirit=None`` is spelled explicitly for the same reason as
-    `_build_eval_legacy`'s: the pre-#165-B2 chain inherited it from
+    `build_legacy_eval_env`'s: the pre-#165-B2 chain inherited it from
     `make_puffer_env`'s parameter default, `make_env`'s own default differs, and
     `Cs2Env` maps both to the same initial team spirit — so stating it keeps the
     oracle comparing values rather than arguing equivalence.
     """
+    _make = _env_constructor()
     return _make(config=EnvConfig(), team_spirit=None, seed=SMOKE_SEED)
 
 
-def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
+def build_harness_env(*, shared_ts, buf, seed: int | None, map_data, config: EnvConfig):
     """`tests._helpers.trainer_harness._build_trainer_for_test`'s per-env construction.
 
     ``0 if seed is None else seed`` — an explicit None check, NOT ``seed or 0``:
@@ -305,6 +322,7 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
     and per-env index, and it stays at the call site — this module builds envs,
     it does not own the trainer's shared memory.
     """
+    _make = _env_constructor()
     return _make(config=config,
                  team_spirit=shared_ts,
                  buf=buf,
@@ -313,63 +331,43 @@ def _build_harness(_make, /, *, shared_ts, buf, seed, map_data, config):
                  include_step_stats_in_info=True)
 
 
-def _build_external(_make, /, *, team_spirit, map_data):
+def build_external_env(*, team_spirit, map_data):
     """The public `make_env(team_spirit, map_data)` wrapper's env.
 
     Both parameters are REQUIRED even though the PUBLIC WRAPPER `cs2rl.train.envs.make_env`
     declares its own two as optional. (Qualified deliberately: since #165 PR B2
     this module names two different `make_env`s — the wrapper, and the lower-layer
-    `env.c.cs2_env.make_env` that `build_env_for` now imports — and both default
+    `env.c.cs2_env.make_env` that `_env_constructor` imports — and both default
     those parameters, so an unqualified sentence would say nothing.) The
     defaulting belongs to the wrapper, because that is its published signature,
     and repeating it here would mean a caller that forgot to forward `map_data`
     got a dust2 env instead of a TypeError, which is the silent-default failure
     every other builder in this module is spelled to avoid.
     """
+    _make = _env_constructor()
     return _make(config=EnvConfig(), team_spirit=team_spirit, map_data=map_data)
 
 
 _ROLE_BUILDERS = {
-    "train": _build_train,
-    "eval": _build_eval,
-    "eval_legacy": _build_eval_legacy,
-    "smoke": _build_smoke,
-    "harness": _build_harness,
-    "external": _build_external,
+    "train": build_train_env,
+    "eval": build_eval_env,
+    "eval_legacy": build_legacy_eval_env,
+    "smoke": build_smoke_env,
+    "harness": build_harness_env,
+    "external": build_external_env,
 }
 
 
 def build_env_for(role, **kwargs):
-    """Construct the Cs2Env for ``role`` — the one place a role's env is built.
+    """Compatibility dispatcher for dynamic callers and role-parameterized tests.
 
-    Each role's builder has an EXPLICIT keyword signature rather than a
-    ``**kwargs`` passthrough, so a caller that misspells a knob gets a TypeError
-    naming it at the call rather than an env quietly built on defaults. That is
-    the same discipline as build_env_factory's own stray-kwargs guard, which
-    exists because a reward key routed through the wrong channel once vanished
-    and made an experiment arm train the baseline.
-
-    Import callers as ``from cs2rl.env.factory import build_env_for``, never
-    ``from cs2rl.env import factory as env_factory``: three functions this factory is
-    called from bind a LOCAL named ``env_factory`` (the nested closures in
-    `build_env_factory` and `_build_trainer_for_test`, and
-    ``env_factory = build_train_env_factory(...)`` in `train()`), and inside those
-    an attribute access on the module name would resolve to the local instead.
+    Known-role callers use the explicit builders above so their required inputs
+    are visible to readers and static checking. The dispatcher retains the same
+    role validation and delegates defaults and argument validation to those
+    builders; it has no separate construction policy.
     """
     try:
         builder = _ROLE_BUILDERS[role]
     except KeyError:
         raise ValueError(f"unknown env role {role!r}; expected one of {ROLES}") from None
-
-    # Function-local and re-read per call. Two reasons: `env.c.cs2_env` is HEAVY —
-    # ctypes plus the compiled binding — and this module is imported at module scope
-    # by cs2rl.policy and by train modules the CLI imports at its module level, so a
-    # module-scope import here would put the C env on `--dump-config`'s path and break
-    # the import-lightness invariant tests/train/test_w1_modules.py enforces; and
-    # re-reading per call keeps a test that rebinds env.c.cs2_env.make_env able to see
-    # its stand-in used. (The cycle this import used to break is gone, and so is the
-    # last `train` import in this module: see the NO `cs2rl.train` IMPORT paragraph in
-    # the module docstring.)
-    from cs2rl.env.c.cs2_env import make_env
-
-    return builder(make_env, **kwargs)
+    return builder(**kwargs)

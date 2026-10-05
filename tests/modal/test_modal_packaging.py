@@ -134,7 +134,10 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # setup returns only production keywords. The two flat-routing self-tests
 # are replaced by native setup/default safety tests in their original files;
 # their key changes do not change the population or any behavioral test home.
-GOVERNED_NAME_COUNT = 295
+# Delivery ownership: the duplicate-only training test is consolidated into
+# the remote-wrapper redelivery test (normal, preparation/spawn failure and
+# failed terminal commit). The retained cleanup-result test is renamed in place.
+GOVERNED_NAME_COUNT = 294
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.

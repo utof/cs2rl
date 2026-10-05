@@ -1,5 +1,6 @@
 #pragma once
 #include "cs2_types.h"
+#include "cs2_bomb.h"
 #include "cs2_weapons.h"
 #include "cs2_movement.h" /* SV_JUMP_IMPULSE_CS for obs[8] normalisation */
 
@@ -256,12 +257,14 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
          * +11 t_alive · +12 ct_alive · +13 designated-carrier bit. */
         int gb      = OBS_GLOBAL_BASE;
         obs[gb + 0] = g->round_ticks_left / (float)sd->round_time;
-        /* bomb status one-hot (+1..+4) */
-        int carrier = g->bomb_carrier_id;
-        if (!g->bomb_planted && !g->bomb_is_dropped) {
+        /* Bomb status one-hot (+1..+4). Dropped takes precedence here even
+         * when planted is also set; position and timer below retain their
+         * separate raw-field rules. */
+        int carrier = bomb_current_carrier(g);
+        if (carrier >= 0) {
             if (carrier == i)
                 obs[gb + 1] = 1.0f; /* carried by self */
-            else if (carrier >= 0 && a->team == 0)
+            else if (a->team == 0)
                 obs[gb + 2] = 1.0f; /* carried by teammate */
         } else if (g->bomb_is_dropped) {
             obs[gb + 3] = 1.0f;

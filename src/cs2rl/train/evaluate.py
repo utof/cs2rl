@@ -5,7 +5,7 @@ from collections import Counter
 
 import numpy as np
 
-from cs2rl.env.factory import build_env_for
+from cs2rl.env.factory import build_legacy_eval_env
 from cs2rl.policy import (
     AGENT_IDS,
     init_policy_state,
@@ -67,7 +67,7 @@ def evaluate_checkpoint(checkpoint_path=None,
         # UNSET sentinel rather than seed=None — env.c.cs2_env.make_env's own
         # default is 0 (not cs2rl.train.envs.make_env, which takes no seed), so spelling the other site's absent seed as None would have changed
         # the env it builds, invisibly to static_data_scalars().
-        env = build_env_for("eval_legacy", seed=seed)
+        env = build_legacy_eval_env(seed=seed)
         obs, _ = env.reset(seed=seed)
         policy_state = init_policy_state(policy, device)
 

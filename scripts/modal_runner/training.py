@@ -11,7 +11,7 @@ import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
-from pathlib import Path, PurePosixPath
+from pathlib import Path
 
 from . import checkpoint, core, state
 from .checkpoint import iter_metrics_steps, validate_completed_run
@@ -28,11 +28,10 @@ from .core import (
     CompletionEvidence,
     Manifest,
     PreparedSource,
-    Registry,
     Status,
     ValidationError,
 )
-from .state import atomic_write_json, deliver_attempt, start_heartbeat_worker, stop_heartbeat
+from .state import atomic_write_json, start_heartbeat_worker, stop_heartbeat
 
 
 @dataclass(frozen=True)
@@ -77,29 +76,11 @@ REASON_ERROR = "error"
 
 @dataclass(frozen=True)
 class TrainingAttemptResult:
-    """Winner-only outcome. Losers return REDELIVERED, not this type."""
+    """Outcome of an already-owned attempt; the remote entrypoint rejects losers."""
 
     status: Status
     reason: str | None = None
     exit_code: int | None = None
-
-
-class _UnusedArtifacts:
-    """deliver_attempt ignores artifacts on every path; refuse accidental writes."""
-
-    def exists(self, path: PurePosixPath) -> bool:
-        del path
-        return False
-
-    def put_file(self, path: PurePosixPath, data: bytes) -> None:
-        raise RuntimeError(f"losing delivery must not write {path}")
-
-    def commit(self) -> None:
-        raise RuntimeError("losing delivery must not commit")
-
-    def read_file(self, path: PurePosixPath) -> bytes | None:
-        del path
-        return None
 
 
 @dataclass(frozen=True)
@@ -192,25 +173,23 @@ def execute_training_attempt(
     *,
     attempt: AttemptContext,
     prepared: PreparedSource,
-    registry: Registry,
     manifest: Manifest | None = None,
     timeout: timedelta | None = None,
     process: ProcessControl | None = None,
     log_sink: object | None = None,
-    already_claimed: bool = False,
-) -> object:
-    """Claim this delivery, then run the training child at most once.
+) -> TrainingAttemptResult:
+    """Run the training child for an attempt the caller already owns.
 
-    A same-input loser returns `redelivered` without writing STATUS, committing,
-    or starting the child. The original delivery is the only canonical writer.
+    `train_remote` owns delivery claims and rejects losers before preparing
+    source or writing canonical state. Call this only for its winning attempt;
+    claiming here would be too late to protect preparation's writes.
     SIGINT, KeyboardInterrupt, and SIGTERM share one cleanup path.
-    already_claimed skips the inner put_if_absent when the caller already won.
 
     `attempt` is the delivery prepare ran under (the same lock, run_root, Volume
     and clock; gh#163 W5). `process` is the child's OS: spawn, the
     process-group signals, the handler install. Production passes none, and
     None resolves to `ProcessControl.system()`, the real functions, inside
-    `train()`: after the claim, at call time. Tests pass a control whose
+    this function: after the caller's claim, at call time. Tests pass a control whose
     `spawn`, `getpgid` and `killpg` are fakes (`_training_kwargs` in
     tests/modal/test_modal_training.py builds one); its `install_signal` may be the
     real `signal.signal`, which only installs this attempt's own handlers.
@@ -224,24 +203,14 @@ def execute_training_attempt(
     `test_process_control_tripwire_guards_the_resolution_path` drives the path.
     """
 
-    def train() -> object:
-        control = ProcessControl.system() if process is None else process
-        return _run_training_attempt(
-            attempt=attempt,
-            prepared=prepared,
-            process=control,
-            manifest=manifest,
-            timeout=timeout,
-            log_sink=log_sink,
-        )
-
-    if already_claimed:
-        return train()
-    return deliver_attempt(
-        registry,
-        _UnusedArtifacts(),
-        attempt_id=attempt.attempt_id,
-        train=train,
+    control = ProcessControl.system() if process is None else process
+    return _run_training_attempt(
+        attempt=attempt,
+        prepared=prepared,
+        process=control,
+        manifest=manifest,
+        timeout=timeout,
+        log_sink=log_sink,
     )
 
 
@@ -660,7 +629,7 @@ class _LiveAttempt:
       * Every clock read is `self.attempt.clock.<now|sleep>` and every commit
         `self.attempt.volume.commit`: in a test's fake-clock run a stray
         `_utc_now()` stamps the real time and a stray `time.sleep` really
-        sleeps. (`test_failed_cleanup_commit_does_not_let_redelivery_write` and
+        sleeps. (`test_failed_cleanup_commit_preserves_interrupted_result` and
         the timeout half of `test_dead_run_and_timeout_have_distinct_reasons`
         go red when these reads become `core._utc_now`.)
       * `threading` is read through this module at call time (`threading.Thread`
@@ -779,7 +748,7 @@ class _LiveAttempt:
         because it must not become a cross-container rewrite. Step 8 runs
         either way, OUTSIDE that `try`, so the attempt still returns the
         terminal status even when the Volume does not hold it
-        (`test_failed_cleanup_commit_does_not_let_redelivery_write`, mutant T21).
+        (`test_failed_cleanup_commit_preserves_interrupted_result`, mutant T21).
         """
         # The once-gate. NON-BLOCKING on purpose and never released; the
         # docstring says why a blocking acquire or a `with` deadlocks under a
@@ -975,7 +944,7 @@ def _run_training_attempt(
     manifest: Manifest | None,
     timeout: timedelta | None,
     log_sink: object | None,
-) -> object:
+) -> TrainingAttemptResult:
     """The attempt, in order: TRAINING, heartbeat, watcher, then the supervised child.
 
     gh#210. Enter TRAINING and commit; take the prepared heartbeat or start

@@ -524,3 +524,122 @@ def test_subprocess_resume_run_flat_map_without_pin_pitch_flag(tmp_path):
                        timeout=600)
     assert r.returncode != 0
     assert "config.json mismatch on non-allowlisted keys" in (r.stderr + r.stdout)
+
+
+@pytest.mark.training
+@pytest.mark.parametrize("failure", ["checkpoint-set", "restore", "metrics-bound", "setup"])
+def test_failed_resume_preserves_checkpoints_and_releases_workers(tmp_path, monkeypatch, failure):
+    """Rejected/partial resumes must release real resources without publishing state."""
+    from types import SimpleNamespace
+
+    from cs2rl.env.map import make_simple_map
+    from cs2rl.train import loop
+    from cs2rl.train.trainer import Cs2PuffeRL
+
+    args = SimpleNamespace(
+        device="cpu",
+        checkpoint_dir=str(tmp_path),
+        seed=3,
+        num_envs=16,
+        pin_pitch=None,
+        map="simple",
+        map_data=make_simple_map(),
+        vec_backend="multiprocessing",
+        vec_num_workers=2,
+        vec_overwork=False,
+        self_play=False,
+        timesteps=10240,
+        checkpoint_interval=1,
+        save_every_sec=float("inf"),
+        eval_interval=0,
+        wandb=False,
+        run_id="preserve-resume",
+    )
+    loop.train(args)
+    sidecar = tmp_path / args.run_id / "train_state.pt"
+    state = torch.load(sidecar, weights_only=False)
+    assert state["epoch"] == 1
+    assert state["global_step"] == 10240
+    if failure == "checkpoint-set":
+        state["epoch"] += 1
+        torch.save(state, sidecar)
+    elif failure == "restore":
+        # Restore copies these tensors AFTER optimizer/counters but BEFORE ret_var.
+        # A missing later field therefore exercises a genuinely partial restoration.
+        state["log_alpha"].fill_(-2.5)
+        state["ret_mean"].fill_(3.25)
+        del state["ret_var"]
+        torch.save(state, sidecar)
+    elif failure == "metrics-bound":
+        (tmp_path /
+         "metrics.jsonl").write_text(json.dumps({
+             "run_id": args.run_id,
+             "step": 1000000
+         }) + "\n")
+    setup_error = RuntimeError("setup agreement failed")
+    if failure == "setup":
+
+        def fail(*a):
+            raise setup_error
+
+        monkeypatch.setattr(loop, "assert_pin_pitch_agreement", fail)
+
+    # Snapshot the ENTIRE checkpoint namespace, including root aliases and every
+    # model/optimizer/sidecar byte, after the intentional input corruption.
+    before = {
+        p.relative_to(tmp_path): p.read_bytes()
+        for p in tmp_path.rglob("*")
+        if p.is_file() and p.name not in {"metrics.jsonl", "config.json"}
+    }
+    acquired = []
+    original_init = Cs2PuffeRL.__init__
+
+    def capture_init(self, *a, **kw):
+        """Observe real ownership without replacing construction or shutdown."""
+        original_init(self, *a, **kw)
+        acquired.append(self)
+        assert all(worker.is_alive() for worker in self.vecenv.processes)
+
+    monkeypatch.setattr(Cs2PuffeRL, "__init__", capture_init)
+    args.resume_run = str(tmp_path)
+    args.timesteps = 20480
+    expected = {
+        "checkpoint-set": (SystemExit, "inconsistent checkpoint set"),
+        "restore": (KeyError, "ret_var"),
+        "metrics-bound": (SystemExit, "outside"),
+        "setup": (RuntimeError, "setup agreement failed"),
+    }
+    error_type, message = expected[failure]
+    try:
+        with pytest.raises(error_type, match=message) as caught:
+            loop.train(args)
+        if failure == "setup":
+            assert caught.value is setup_error
+        assert len(acquired) == 1
+        trainer = acquired[0]
+        trainer.utilization.join(timeout=5)
+        assert trainer.utilization.stopped and not trainer.utilization.is_alive()
+        for worker in trainer.vecenv.processes:
+            worker.join(timeout=5)
+            assert not worker.is_alive(), "failed resume leaked a vector worker"
+        if failure == "restore":
+            assert (trainer.epoch, trainer.global_step) == (1, 10240)
+            assert torch.all(trainer._log_alpha_tensor == -2.5)
+            assert torch.all(trainer._ret_mean == 3.25)
+        after = {
+            p.relative_to(tmp_path): p.read_bytes()
+            for p in tmp_path.rglob("*")
+            if p.is_file() and p.name not in {"metrics.jsonl", "config.json"}
+        }
+        assert after.keys() == before.keys(), "failed resume changed checkpoint filenames"
+        changed = [name for name in before if before[name] != after[name]]
+        assert not changed, f"failed resume changed checkpoint bytes: {changed}"
+    finally:
+        # Regression cleanup cannot checkpoint the broken trainer. Keep failed
+        # controls from leaking workers or the non-daemon utilization thread.
+        for trainer in acquired:
+            trainer.vecenv.close()
+            trainer.utilization.stop()
+            trainer.utilization.join(timeout=5)
+            for worker in trainer.vecenv.processes:
+                worker.join(timeout=5)

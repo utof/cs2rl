@@ -324,8 +324,7 @@ def test_patch_binding_observation(site, tmp_path, monkeypatch, record_property)
 
         _install(monkeypatch, site, training._run_training_attempt, replacement)
         result = training.execute_training_attempt(**kwargs)
-        # The attempt is typed `object` (a losing delivery returns REDELIVERED);
-        # this row wins, so it must be the winner's result type.
+        # The executor receives an already-owned attempt and returns its outcome.
         assert isinstance(result, training.TrainingAttemptResult)
         assert result.status is core.Status.FAILED
         if site == "attempt-watcher":

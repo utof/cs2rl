@@ -50,7 +50,7 @@ import tempfile
 import types
 
 from cs2rl.env.config import EnvConfig
-from cs2rl.env.factory import build_env_for
+from cs2rl.env.factory import build_harness_env
 from cs2rl.train.selfplay import build_selfplay_manager
 
 # The harness's four env-knob defaults are the dataclass's, read once rather
@@ -195,7 +195,7 @@ def _harness_parts(
             # and the unconditional include_step_stats_in_info=True (uniform
             # attribute/info surface across selfplay and no-selfplay modes; one
             # pre-built singleton dict per env, no per-tick allocation) — now lives
-            # in env.factory._build_harness with the same reasoning attached.
+            # in env.factory.build_harness_env with the same reasoning attached.
             #
             # The harness is production-SHAPED on purpose, but it is not the `train`
             # role: it adds include_step_stats_in_info and takes its knobs as plain
@@ -225,12 +225,11 @@ def _harness_parts(
             #                 in tests/env/test_env_factory.py, which drives this closure
             #                 off-fixture with a non-default crouch. Delete that test
             #                 and this comment becomes false in the same edit.
-            env = build_env_for("harness",
-                                shared_ts=shared_ts,
-                                buf=buf,
-                                seed=seed,
-                                map_data=map_data,
-                                config=config)
+            env = build_harness_env(shared_ts=shared_ts,
+                                    buf=buf,
+                                    seed=seed,
+                                    map_data=map_data,
+                                    config=config)
             # STAYS AT THE CALL SITE, outside the factory: this needs the harness's
             # own shm handle and the per-env index pufferlib passes in, neither of
             # which is the factory's business.

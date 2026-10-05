@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from cs2rl.env.config import EnvConfig
-from cs2rl.env.factory import build_env_for
+from cs2rl.env.factory import build_external_env, build_smoke_env, build_train_env
 from cs2rl.spec.action import ACTION_HEAD_SIZES
 from cs2rl.spec.obs import OBS_DIM
 from cs2rl.train.config import env_config_from_args
@@ -75,7 +75,7 @@ def smoke_test():
     # reset() seed below is deliberately NOT routed through the factory — it is
     # this function's own episode seed, not part of the env's construction, and
     # the two happening to be 42 is a coincidence the factory must not encode.
-    env = build_env_for("smoke")
+    env = build_smoke_env()
     try:
         obs, _ = env.reset(seed=42)
 
@@ -121,10 +121,10 @@ def make_env(team_spirit=None, map_data=None):
     """Public env wrapper. W3 (#154): a thin delegate to the `external` role.
 
     The optional defaults stay HERE, on the published signature, rather than
-    moving into `_build_external` — that builder requires both arguments so a
+    moving into `build_external_env` — that builder requires both arguments so a
     caller that forgets to forward one gets a TypeError instead of a dust2 env.
     """
-    return build_env_for("external", team_spirit=team_spirit, map_data=map_data)
+    return build_external_env(team_spirit=team_spirit, map_data=map_data)
 
 
 def build_env_factory(*, shared_ts, map_data, config=None):
@@ -161,17 +161,17 @@ def build_env_factory(*, shared_ts, map_data, config=None):
 
     PITFALL (review finding 1): within a training run the run's config reaches
     TWO envs, not one — this factory's, and the fixed-baseline eval env behind
-    `--eval-interval`, which train() builds as `build_env_for("eval", ...,
+    `--eval-interval`, which train() builds as `build_eval_env(...,
     config=env_config_from_args(args))` from the same resolver
     `build_train_env_factory` reads here, with `assert_eval_env_agreement`
     cross-checking the two right after. What the run's config does NOT reach is
     the OTHER entry points: `--smoke` and `--eval` get `EnvConfig()` from their
-    role builders (`--eval` reaches `_build_eval_legacy`; there is no
+    role builders (`--eval` reaches `build_legacy_eval_env`; there is no
     --eval-legacy flag), and `--record` builds its env straight off the
     lower-layer `make_env` naming no config at all, which lands on the same
     thing. So `--smoke --reward-ct-survival 0.0` silently runs default weights.
     Symmetrization is the one field even the config-carrying eval env
-    deliberately diverges on — `_build_eval` forces it off so eval reports raw,
+    deliberately diverges on — `build_eval_env` forces it off so eval reports raw,
     cross-run-comparable rewards. Known limitation, #143's neighbourhood; do not
     fix in this branch.
     PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
@@ -205,7 +205,7 @@ def build_env_factory(*, shared_ts, map_data, config=None):
         # W3 (#154), retyped by #165 PR B2: construction — and ONLY
         # construction — routes through the role factory. The `_seed`/`seed`
         # precedence rule moved with it and now lives in
-        # env.factory._build_train; the three payload arguments this call used
+        # env.factory.build_train_env; the three payload arguments this call used
         # to pass are one EnvConfig, resolved above the closure so a forked
         # worker can never receive None.
         # tests/fixtures/env_config_pre_165b.json recorded this call before it
@@ -214,13 +214,12 @@ def build_env_factory(*, shared_ts, map_data, config=None):
         # (test_train_call_site_forwards_the_captured_kwargs) as well as
         # pinning its spelling against the recorded call source
         # (test_migrated_site_still_reads_what_the_old_site_read).
-        env = build_env_for("train",
-                            shared_ts=shared_ts,
-                            buf=buf,
-                            seed=seed,
-                            _seed=_seed,
-                            map_data=map_data,
-                            config=config)
+        env = build_train_env(shared_ts=shared_ts,
+                              buf=buf,
+                              seed=seed,
+                              _seed=_seed,
+                              map_data=map_data,
+                              config=config)
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and
@@ -437,7 +436,7 @@ def assert_eval_env_agreement(eval_env, driver_env):
           added, and do not write a number here you have not counted off
           dataclasses.fields.)
 
-    WHY reward_symmetrize is skipped and nothing else is: env.factory._build_eval
+    WHY reward_symmetrize is skipped and nothing else is: env.factory.build_eval_env
     FORCES it off — `config.replace(reward_symmetrize=False)` — so the eval env
     reports raw rewards while the training envs take the flag from args. Since
     #165 PR B2 that is an explicit rule at the builder rather than, as before, a
@@ -447,7 +446,7 @@ def assert_eval_env_agreement(eval_env, driver_env):
 
     DISCLOSURE — NEITHER CHECK CAN FIRE ON ANY INPUT REACHABLE TODAY, and since
     #165 PR B2 that is structural rather than measured. train()'s only call site
-    compares the env from build_env_for("eval", ..., config=env_config_from_args(
+    compares the env from build_eval_env(..., config=env_config_from_args(
     args)) against the driver env from build_train_env_factory(args, ...), which
     passes build_env_factory the config from that SAME resolver called on the
     same args. So the two sides are one config expression evaluated twice, and

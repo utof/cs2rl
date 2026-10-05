@@ -64,27 +64,13 @@ position (`attr`) rather than the value position is the whole mechanism — a
 naive value-position match flags those two sites, and the tempting fix is to
 loosen the matcher until the real coverage dies, with nothing to notice.
 
-WHY `src/cs2rl/env/factory.py` SHOWS ONE OF THE TWO BANNED CONSTRUCTIONS, AND WHY THE
-ABSENT ONE IS NOW PINNED TWICE OVER. Careful with the numbers here: the "two" in
-CONSTRUCTED and the "two" in "two pins" count different things. It builds the
-manager directly (`build_selfplay_manager`'s `return SelfPlayManager(...)`), so the
-scan finds that one, and it is the only call in the file to any of the four symbols
-CONSTRUCTED and LOWER_LAYER name. What is absent is a call node that NAMES an env
-constructor: `build_env_for` imports the constructor function-locally and passes it
-to the role builder as a VALUE (it ends `return builder(make_env, **kwargs)`; the
-six role builders receive it positional-only as `_make`,
-`def _build_train(_make, /, ...)`). The env IS constructed here — the builders call
-it as `_make(...)` — but no matcher keyed on a constructor's SPELLING can see that,
-which is the whole reason the absence has to be pinned rather than assumed.
-That absence carries TWO pins, because it is two different regressions in two
-different vocabularies: `make_puffer_env` from CONSTRUCTED, which the enforcement
-assertion at the bottom of this file excludes the factory from (`if p != FACTORY`),
-and `make_env`/`Cs2Env` from LOWER_LAYER, of which B2 made `build_env_for` import
-`make_env` only — `Cs2Env` is never imported here and is pinned beside it because
-a direct `Cs2Env(...)` is what would bypass `make_env`'s map loading. The missing
-`make_puffer_env(...)` call is also why guard 2 takes its `make_puffer_env`
-evidence from `tests/`, where ~40 direct constructions legitimately live, rather
-than from the factory.
+WHY THE FACTORY HAS NO NAMED CONSTRUCTOR CALL. The manager is constructed in
+`cs2rl.train.selfplay`. The env factory's `_env_constructor` imports and returns
+`env.c.cs2_env.make_env` as a value; each explicit role builder calls that value
+through a local `_make`. A spelling-based scan cannot see those calls. The two
+factory pins below therefore reject named `make_puffer_env` and lower-layer
+`make_env`/`Cs2Env` calls independently. Inlining the constructor name requires
+updating the disclosure census and these documented expectations.
 
 THE UNSCANNED LOWER LAYER — the honest limit of this file (final review I-1).
 `make_puffer_env` is a wrapper: it applies the reward-override validation and the
@@ -407,7 +393,7 @@ def test_the_factory_itself_is_where_the_construction_lives():
     _, found = scan([FACTORY])
     symbols = {symbol for _, symbol, _, _ in found}
     # And the documented asymmetry, pinned so the docstrings above stay true:
-    # build_env_for passes make_env as a VALUE, so no call node names make_puffer_env.
+    # _env_constructor returns make_env as a VALUE; builders call their local _make.
     assert "make_puffer_env" not in symbols, (
         "env/factory.py now contains a direct make_puffer_env(...) call. That is allowed by the "
         "exemption, but this file's module docstring and env_factory's both explain that it does "
@@ -415,46 +401,12 @@ def test_the_factory_itself_is_where_the_construction_lives():
 
 
 def test_the_factory_does_not_call_the_lower_layer_constructor_directly():
-    """The same documented asymmetry as the assertion above, pointed at the
-    symbol #165 PR B2 put at risk.
+    """Builders call the constructor value returned by `_env_constructor`.
 
-    `build_env_for` imports `env.c.cs2_env.make_env` function-locally and hands it
-    to the role builder as a VALUE (its own `from cs2rl.env.c.cs2_env import make_env`
-    and the `return builder(make_env, **kwargs)` it ends on; the six role builders
-    receive it positional-only as `_make`), so no CALL node in that file names it.
-    B2 is what made this the pin worth adding: it swapped the function-local
-    `from train import make_puffer_env` for `from c_env.cs2_env import make_env`,
-    so `make_env` is the only ENV constructor that file references in code at all.
-    Measured 2026-09-11 by AST, a CODE reference being an `Import`/`ImportFrom`
-    alias, an `ast.Name` or an `ast.Attribute(attr=...)` that names the symbol —
-    which is why docstring prose is invisible to it: of the three env
-    constructors, `make_puffer_env` and `Cs2Env` have ZERO code references there
-    and ten and four textual OCCURRENCES respectively (on nine and four distinct
-    lines — the units differ because `:117` mentions `make_puffer_env` twice),
-    every one of them on a docstring line and none in a comment, while `make_env`
-    has two code references, the import and the value pass.
-    (`SelfPlayManager` has exactly two as well, and the second one IS the call:
-    the `from cs2rl.train import SelfPlayManager` at `:410` and the `ast.Name` at
-    `:412` that is that `Call` node's own `func`. So there is no third reference
-    to add for the call — it is a manager rather than an env and belongs to the
-    assertion above.)
-    So the regression the assertion above guards needs someone to import a name
-    that file no longer mentions in code, while the regression this one guards
-    needs one line inlined into a builder.
-
-    This is an ADDITION, not a replacement. The `make_puffer_env` assertion above
-    is a live negative, not a vacuous one: plant a real `make_puffer_env(...)` call
-    into a copy of `src/cs2rl/env/factory.py` and the same scan reports
-    `{'SelfPlayManager', 'make_puffer_env'}`. And
-    `test_no_make_puffer_env_or_selfplaymanager_call_outside_the_factory` filters
-    the factory out of its own scan (`if p != FACTORY`), so deleting that assertion
-    would leave a direct `make_puffer_env(...)` call inside the factory forbidden
-    nowhere in the suite.
-
-    If a later branch inlines `_make` into the builders this goes red: update
-    `env.factory`'s docstring and `LOWER_LAYER_SITES` (which gains ONE entry,
-    `"src/cs2rl/env/factory.py"`, with a count — the dict is keyed by file, not by
-    builder), do not delete the assertion.
+    Keep both negative assertions: inlining `make_env` changes the disclosure
+    census, while calling `Cs2Env` directly also bypasses map loading. Each
+    spelling has a planted positive control below. If the constructor name is
+    inlined, update the census and prose rather than deleting these protections.
     """
     _, found = scan([FACTORY], symbols=LOWER_LAYER)
     symbols = {symbol for _, symbol, _, _ in found}
