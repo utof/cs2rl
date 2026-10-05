@@ -1,8 +1,5 @@
 """The trainer owns its utilization thread, including incomplete construction."""
-import threading
-
 import pytest
-from pufferlib.pufferl import Utilization
 
 from cs2rl.train.trainer import Cs2PuffeRL
 from tests._helpers.trainer_harness import _build_trainer_for_test
@@ -11,9 +8,12 @@ from tests._helpers.trainer_harness import _build_trainer_for_test
 def test_dashboard_failure_during_base_init_stops_thread(monkeypatch, tmp_path):
     """PuffeRL starts utilization before print_dashboard, which can raise on output."""
     error = BrokenPipeError("dashboard stream closed")
-    before = set(threading.enumerate())
+    utilization = None
 
-    def fail(*a, **kw):
+    def fail(self, *a, **kw):
+        nonlocal utilization
+        # Retain the thread even if constructor cleanup finishes it before we assert.
+        utilization = self.utilization
         raise error
 
     monkeypatch.setattr(Cs2PuffeRL, "print_dashboard", fail)
@@ -21,20 +21,15 @@ def test_dashboard_failure_during_base_init_stops_thread(monkeypatch, tmp_path):
         with pytest.raises(BrokenPipeError) as caught:
             _build_trainer_for_test(num_envs=16)
         assert caught.value is error
-        threads = [
-            t for t in threading.enumerate() if isinstance(t, Utilization) and t not in before
-        ]
-        assert threads, "failure must occur after utilization starts"
-        assert all(t.stopped for t in threads)
-        for thread in threads:
-            thread.join(timeout=5)
-            assert not thread.is_alive()
+        assert utilization is not None, "failure must occur after utilization starts"
+        assert utilization.stopped
+        utilization.join(timeout=5)
+        assert not utilization.is_alive()
     finally:
         # Keep the regression's original-red run from hanging the interpreter.
-        for thread in threading.enumerate():
-            if isinstance(thread, Utilization) and thread not in before:
-                thread.stop()
-                thread.join(timeout=5)
+        if utilization is not None:
+            utilization.stop()
+            utilization.join(timeout=5)
 
 
 def test_vector_close_failure_still_stops_thread(monkeypatch):
