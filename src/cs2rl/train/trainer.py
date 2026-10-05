@@ -1091,281 +1091,293 @@ class Cs2PuffeRL(PuffeRL):
             if _kl_stop and mb % _mbs_per_epoch == 0:
                 break                  # epoch boundary: honor the KL trip
             profile("train_misc", epoch, nest=True)
-            self.amp_context.__enter__()
 
-            shape = self.values.shape
-            advantages = torch.zeros(shape, device=device)
-            advantages = compute_puff_advantage(
-                self.values,
-                self.rewards,
-                self.terminals,
-                self.ratio,
-                advantages,
-                config["gamma"],
-                config["gae_lambda"],
-                config["vtrace_rho_clip"],
-                config["vtrace_c_clip"],
-            )
+            # Own the forward/loss scope lexically: skips and exceptions must
+            # restore the caller's autocast state before either backward pass.
+            with self.amp_context:
+                shape = self.values.shape
+                advantages = torch.zeros(shape, device=device)
+                advantages = compute_puff_advantage(
+                    self.values,
+                    self.rewards,
+                    self.terminals,
+                    self.ratio,
+                    advantages,
+                    config["gamma"],
+                    config["gae_lambda"],
+                    config["vtrace_rho_clip"],
+                    config["vtrace_c_clip"],
+                )
 
-            profile("train_copy", epoch)
-            adv = advantages.abs().sum(axis=1)
-            prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
-            prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
+                profile("train_copy", epoch)
+                adv = advantages.abs().sum(axis=1)
+                prio_weights = torch.nan_to_num(adv**a, 0, 0, 0)
+                prio_probs = (prio_weights + 1e-6) / (prio_weights.sum() + 1e-6)
 
-            # ── Batch 1 Task 8: event-biased prio_probs oversampling ──────
-            # WHAT: when the segment-level event mask is populated and at
-            #   least one segment contains a bomb-plant event, multiply the
-            #   prio_probs of those segments by OVERSAMPLE_FACTOR before
-            #   renormalising. The downstream torch.multinomial call then
-            #   draws biased samples without any further changes — and the
-            #   importance-sampling correction (mb_prio, consumed inside
-            #   _hybrid_ppo_loss) uses the BOOSTED prio_probs[idx], so the
-            #   gradient stays unbiased.
-            # WHY: bomb-plant events are sparse in early training (the exact
-            #   fraction is itself a Task 9 metric, reported via
-            #   _event_oversample_fraction). Uniform prio sampling
-            #   under-replays them; oversampling accelerates value-function
-            #   fit on the rare-but-decisive transitions. Plan §Task 8
-            #   target: event-mask hit-rate among sampled segments >= 25%.
-            # PITFALLS:
-            #   * mask absent / all-False → skip the boost so pre-Batch-1
-            #     training paths and the warm-up pass before any plant
-            #     happens still work (no division by zero, no NaN).
-            #   * Boost the prob, not the weight — boosting `prio_weights`
-            #     and re-running the (w+1e-6)/(sum+1e-6) renorm would alter
-            #     the abs-advantage prior shape; multiplying prio_probs and
-            #     dividing by sum keeps the prior intact on non-event rows.
-            #   * Cloning before the in-place mul protects callers that
-            #     might still hold a reference to the original prio_probs.
-            #   * The exposed metric is the RAW event fraction (mask mean),
-            #     NOT the post-boost sampled fraction. Written onto
-            #     losses["event_oversample_fraction"] after the divisor
-            #     loop — do not accumulate it inside this minibatch loop.
-            OVERSAMPLE_FACTOR = 4.0
-            if event_mask is not None and event_mask.any():
-                boosted = prio_probs.clone()
-                boosted[event_mask] *= OVERSAMPLE_FACTOR
-                prio_probs = boosted / boosted.sum()
-            # ──────────────────────────────────────────────────────────────
+                # ── Batch 1 Task 8: event-biased prio_probs oversampling ──────
+                # WHAT: when the segment-level event mask is populated and at
+                #   least one segment contains a bomb-plant event, multiply the
+                #   prio_probs of those segments by OVERSAMPLE_FACTOR before
+                #   renormalising. The downstream torch.multinomial call then
+                #   draws biased samples without any further changes — and the
+                #   importance-sampling correction (mb_prio, consumed inside
+                #   _hybrid_ppo_loss) uses the BOOSTED prio_probs[idx], so the
+                #   gradient stays unbiased.
+                # WHY: bomb-plant events are sparse in early training (the exact
+                #   fraction is itself a Task 9 metric, reported via
+                #   _event_oversample_fraction). Uniform prio sampling
+                #   under-replays them; oversampling accelerates value-function
+                #   fit on the rare-but-decisive transitions. Plan §Task 8
+                #   target: event-mask hit-rate among sampled segments >= 25%.
+                # PITFALLS:
+                #   * mask absent / all-False → skip the boost so pre-Batch-1
+                #     training paths and the warm-up pass before any plant
+                #     happens still work (no division by zero, no NaN).
+                #   * Boost the prob, not the weight — boosting `prio_weights`
+                #     and re-running the (w+1e-6)/(sum+1e-6) renorm would alter
+                #     the abs-advantage prior shape; multiplying prio_probs and
+                #     dividing by sum keeps the prior intact on non-event rows.
+                #   * Cloning before the in-place mul protects callers that
+                #     might still hold a reference to the original prio_probs.
+                #   * The exposed metric is the RAW event fraction (mask mean),
+                #     NOT the post-boost sampled fraction. Written onto
+                #     losses["event_oversample_fraction"] after the divisor
+                #     loop — do not accumulate it inside this minibatch loop.
+                OVERSAMPLE_FACTOR = 4.0
+                if event_mask is not None and event_mask.any():
+                    boosted = prio_probs.clone()
+                    boosted[event_mask] *= OVERSAMPLE_FACTOR
+                    prio_probs = boosted / boosted.sum()
+                # ──────────────────────────────────────────────────────────────
 
-            idx = torch.multinomial(prio_probs, self.minibatch_segments)
-            mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
-            mb_obs = self.observations[idx]
-            mb_actions = self.actions[idx]
-            mb_logprobs = self.logprobs[idx]
-            # (mb_rewards pull removed with the dead per-minibatch
-            # compute_puff_advantage recompute — see finding-1 note below)
-            mb_terminals = self.terminals[idx]
-            mb_values = self.values[idx]
-            mb_returns = advantages[idx] + mb_values
-            mb_advantages = advantages[idx]
-            # Batch 3 (T5): pull continuous actions + per-factor old logprobs
-            # from the parallel buffers allocated by _init_hybrid_aim.
-            # mb_logprobs (the SUM) stays the canonical "logp from rollout" for
-            # KL/clipfrac diagnostics below; the per-factor halves drive the
-            # per-factor PPO clip in _hybrid_ppo_loss.
-            mb_cont_actions = self.cont_actions[idx]
-            mb_old_logp_d = self.logprobs_d[idx]
-            mb_old_logp_c = self.logprobs_c[idx]
-            # F8: rollout-stored action masks (all-ones = unmasked fallback).
-            # getattr for trainers built before hybrid buffer setup
-            # ran (shouldn't happen in prod; keeps direct-call tests working).
-            _masks_buf = getattr(self, "action_masks", None)
-            mb_masks = _masks_buf[idx] if _masks_buf is not None else None
+                idx = torch.multinomial(prio_probs, self.minibatch_segments)
+                mb_prio = (self.segments * prio_probs[idx, None])**-anneal_beta
+                mb_obs = self.observations[idx]
+                mb_actions = self.actions[idx]
+                mb_logprobs = self.logprobs[idx]
+                # (mb_rewards pull removed with the dead per-minibatch
+                # compute_puff_advantage recompute — see finding-1 note below)
+                mb_terminals = self.terminals[idx]
+                mb_values = self.values[idx]
+                mb_returns = advantages[idx] + mb_values
+                mb_advantages = advantages[idx]
+                # Batch 3 (T5): pull continuous actions + per-factor old logprobs
+                # from the parallel buffers allocated by _init_hybrid_aim.
+                # mb_logprobs (the SUM) stays the canonical "logp from rollout" for
+                # KL/clipfrac diagnostics below; the per-factor halves drive the
+                # per-factor PPO clip in _hybrid_ppo_loss.
+                mb_cont_actions = self.cont_actions[idx]
+                mb_old_logp_d = self.logprobs_d[idx]
+                mb_old_logp_c = self.logprobs_c[idx]
+                # F8: rollout-stored action masks (all-ones = unmasked fallback).
+                # getattr for trainers built before hybrid buffer setup
+                # ran (shouldn't happen in prod; keeps direct-call tests working).
+                _masks_buf = getattr(self, "action_masks", None)
+                mb_masks = _masks_buf[idx] if _masks_buf is not None else None
 
-            # ── Rung 0 §2.2: participating mask for this minibatch ───────────
-            # Two dtypes on purpose (see the masked_* helpers' contract):
-            # mb_part is BOOL for indexing, mb_part_f/flat_part are the FLOAT
-            # weights the reductions take. flat_part is for the flat (S*T,)
-            # tensors (entropy, ratio_d/ratio_c, per-head entropies);
-            # mb_part_f for the [S, T]-shaped ones (v_loss, value writeback).
-            # Shapes: mb_part / mb_part_f are [S, T]; flat_part is (S*T,).
-            mb_part = self.participating[idx]
-            mb_part_f = mb_part.to(torch.float32)
-            n_part = mb_part_f.sum()
-            # Empty-minibatch tripwire: only reachable with non-uniform segment
-            # sampling (prio_alpha != 0 or a marked event segment) that happens
-            # to draw an all-parked minibatch — see spec §2.2. Skipping is the
-            # right call (every reduction below would be 0/0), but it must be
-            # VISIBLE, so it is counted into losses/empty_minibatches rather
-            # than silently swallowed. The `continue` sits before _mb_run += 1,
-            # so the gh#90 divisor keeps counting only executed minibatches.
-            if n_part.item() == 0:
-                _empty_mb += 1
-                # No zero_grad here: accumulate_minibatches is always 1 today,
-                # so no partial gradient can be pending. Revisit if that changes.
-                continue
-            flat_part = mb_part_f.reshape(-1)
+                # ── Rung 0 §2.2: participating mask for this minibatch ───────────
+                # Two dtypes on purpose (see the masked_* helpers' contract):
+                # mb_part is BOOL for indexing, mb_part_f/flat_part are the FLOAT
+                # weights the reductions take. flat_part is for the flat (S*T,)
+                # tensors (entropy, ratio_d/ratio_c, per-head entropies);
+                # mb_part_f for the [S, T]-shaped ones (v_loss, value writeback).
+                # Shapes: mb_part / mb_part_f are [S, T]; flat_part is (S*T,).
+                mb_part = self.participating[idx]
+                mb_part_f = mb_part.to(torch.float32)
+                n_part = mb_part_f.sum()
+                # Empty-minibatch tripwire: only reachable with non-uniform segment
+                # sampling (prio_alpha != 0 or a marked event segment) that happens
+                # to draw an all-parked minibatch — see spec §2.2. Skipping is the
+                # right call (every reduction below would be 0/0), but it must be
+                # VISIBLE, so it is counted into losses/empty_minibatches rather
+                # than silently swallowed. The `continue` sits before _mb_run += 1,
+                # so the gh#90 divisor keeps counting only executed minibatches.
+                if n_part.item() == 0:
+                    _empty_mb += 1
+                    # No zero_grad here: accumulate_minibatches is always 1 today,
+                    # so no partial gradient can be pending. Revisit if that changes.
+                    continue
+                flat_part = mb_part_f.reshape(-1)
 
-            # ── VALUE TARGET NORMALISATION ─────────────────────────────────
-            # Normalize returns before value regression.  The value head learns
-            # to predict normalized targets; advantages are unaffected.
-            mb_returns_norm = self._normalize_returns(mb_returns, mb_part)
-            # Also normalize the stored baseline values so clipping stays valid
-            mb_values_norm = (mb_values - self._ret_mean) / (self._ret_var + 1e-8).sqrt()
-            # ──────────────────────────────────────────────────────────────
+                # ── VALUE TARGET NORMALISATION ─────────────────────────────────
+                # Normalize returns before value regression.  The value head learns
+                # to predict normalized targets; advantages are unaffected.
+                mb_returns_norm = self._normalize_returns(mb_returns, mb_part)
+                # Also normalize the stored baseline values so clipping stays valid
+                mb_values_norm = (mb_values - self._ret_mean) / (self._ret_var + 1e-8).sqrt()
+                # ──────────────────────────────────────────────────────────────
 
-            profile("train_forward", epoch)
-            if not config["use_rnn"]:
-                mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
+                profile("train_forward", epoch)
+                if not config["use_rnn"]:
+                    mb_obs = mb_obs.reshape(-1, *self.vecenv.single_observation_space.shape)
 
-            # LSTM-BPTT fix: lstm_h/lstm_c None → zero initial state, which
-            # is exact (each stored segment began at evaluate()'s zeroed
-            # state — see Dust2Policy.forward doc). terminals drives the
-            # mid-segment done-reset inside _lstm_bptt so the training
-            # forward replicates the rollout's (1-done)*state masking.
-            state = dict(
-                action=mb_actions,
-                lstm_h=None,
-                lstm_c=None,
-                terminals=mb_terminals,
-            )
+                # LSTM-BPTT fix: lstm_h/lstm_c None → zero initial state, which
+                # is exact (each stored segment began at evaluate()'s zeroed
+                # state — see Dust2Policy.forward doc). terminals drives the
+                # mid-segment done-reset inside _lstm_bptt so the training
+                # forward replicates the rollout's (1-done)*state masking.
+                state = dict(
+                    action=mb_actions,
+                    lstm_h=None,
+                    lstm_c=None,
+                    terminals=mb_terminals,
+                )
 
-            # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
-            # (Fan et al. IJCAI 2019). The helper does the policy forward
-            # pass (returning mu_aim/log_std + value) and assembles the
-            # clipped policy loss with INDEPENDENT discrete and continuous
-            # ratios. F16 (2026-07-06 adversarial review): it now also
-            # returns the logits it computed, killing the redundant no-grad
-            # diagnostic forward that used to run here per minibatch
-            # (halves update-forward cost). Post-F8 the returned logits are
-            # MASKED, so the per-head entropy diagnostics below report the
-            # true sampled distribution.
-            (pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c, logits) = _hybrid_ppo_loss(
-                self.policy,
-                mb_obs,
-                mb_actions,
-                mb_cont_actions,
-                mb_old_logp_d,
-                mb_old_logp_c,
-                mb_advantages,
-                clip_coef,
-                state,
-                mb_prio=mb_prio,
-                mb_masks=mb_masks,
-                mb_part=mb_part_f,
-                aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
-                aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
-            )
-            # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
-            # was used by downstream diagnostics; T5 dropped that consumer
-            # (mb_actions is the canonical stored discrete action). No
-            # rebinding here — the variable is unused after this point.
-            # (F16: the former no-grad diagnostic re-forward that lived here
-            # is gone — `logits` now comes straight from _hybrid_ppo_loss.)
+                # Batch 3 (T5): hybrid PPO update — per-factor clipped loss
+                # (Fan et al. IJCAI 2019). The helper does the policy forward
+                # pass (returning mu_aim/log_std + value) and assembles the
+                # clipped policy loss with INDEPENDENT discrete and continuous
+                # ratios. F16 (2026-07-06 adversarial review): it now also
+                # returns the logits it computed, killing the redundant no-grad
+                # diagnostic forward that used to run here per minibatch
+                # (halves update-forward cost). Post-F8 the returned logits are
+                # MASKED, so the per-head entropy diagnostics below report the
+                # true sampled distribution.
+                # Preserve the source text used by the existing pyrefly baseline.
+                # yapf: disable
+                (pg_loss, entropy, newvalue, newlogprob, ratio_d, ratio_c, logits) = _hybrid_ppo_loss(
+                     self.policy,
+                     mb_obs,
+                     mb_actions,
+                     mb_cont_actions,
+                     mb_old_logp_d,
+                     mb_old_logp_c,
+                     mb_advantages,
+                     clip_coef,
+                     state,
+                     mb_prio=mb_prio,
+                     mb_masks=mb_masks,
+                     mb_part=mb_part_f,
+                     aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+                    aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
+                )
+                # yapf: enable
+                # NOTE: pre-Batch-3 the inline `actions = ...` from sample_logits
+                # was used by downstream diagnostics; T5 dropped that consumer
+                # (mb_actions is the canonical stored discrete action). No
+                # rebinding here — the variable is unused after this point.
+                # (F16: the former no-grad diagnostic re-forward that lived here
+                # is gone — `logits` now comes straight from _hybrid_ppo_loss.)
 
-            profile("train_misc", epoch)
-            newlogprob = newlogprob.reshape(mb_logprobs.shape)
-            logratio = newlogprob - mb_logprobs
-            # Batch 3: keep the joint ratio for KL/clipfrac diagnostics so the
-            # existing log surface (approx_kl, clipfrac, importance) is
-            # backwards-compatible. ratio_d is what gets stored in self.ratio
-            # because compute_puff_advantage was tuned for the discrete-head
-            # importance ratio in pre-Batch-3 runs; substituting ratio_d here
-            # preserves vtrace's behaviour.
-            ratio = logratio.exp()
-            # Batch 3 (T5): _hybrid_ppo_loss returns flat (B*T,) ratios.
-            # self.ratio is (segments, bptt_horizon); reshape ratio_d to
-            # match so the indexed-write writes the right shape. ratio
-            # (joint) is already reshaped by mb_logprobs.shape on the
-            # previous line.
-            self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
+                profile("train_misc", epoch)
+                newlogprob = newlogprob.reshape(mb_logprobs.shape)
+                logratio = newlogprob - mb_logprobs
+                # Batch 3: keep the joint ratio for KL/clipfrac diagnostics so the
+                # existing log surface (approx_kl, clipfrac, importance) is
+                # backwards-compatible. ratio_d is what gets stored in self.ratio
+                # because compute_puff_advantage was tuned for the discrete-head
+                # importance ratio in pre-Batch-3 runs; substituting ratio_d here
+                # preserves vtrace's behaviour.
+                ratio = logratio.exp()
+                # Batch 3 (T5): _hybrid_ppo_loss returns flat (B*T,) ratios.
+                # self.ratio is (segments, bptt_horizon); reshape ratio_d to
+                # match so the indexed-write writes the right shape. ratio
+                # (joint) is already reshaped by mb_logprobs.shape on the
+                # previous line.
+                self.ratio[idx] = ratio_d.detach().reshape(mb_logprobs.shape)
 
-            with torch.no_grad():
-                # Rung 0 §2.2: every diagnostic below is a mean over rows, so
-                # every one of them is masked. _pm is mb_part_f reshaped to the
-                # joint ratio's [S, T] layout; ratio_d/ratio_c are flat, hence
-                # flat_part. An unmasked KL here would be diluted 5× at
-                # n_active=1 and the target_kl early-stop would never fire.
-                _pm = mb_part_f.reshape(logratio.shape)
-                old_approx_kl = masked_mean(-logratio, _pm)
-                approx_kl = masked_mean((ratio - 1) - logratio, _pm)
-                clipfrac = masked_mean(((ratio - 1.0).abs() > config["clip_coef"]).float(), _pm)
-                # Observe-only (spec 2026-08-15 §3.4): same formula as the
-                # joint `clipfrac` above, split by the per-factor ratios
-                # `_hybrid_ppo_loss` already returns. `.item()` into the
-                # logging dict only — NEVER add these to the `loss` tensor
-                # (they are diagnostics, not a training signal). Last-
-                # minibatch-only is forbidden; they accumulate like
-                # `clipfrac` and ride the existing `_mb_run` divisor.
-                clipfrac_d = masked_mean(((ratio_d - 1.0).abs() > config["clip_coef"]).float(),
-                                         flat_part)
-                clipfrac_c = masked_mean(((ratio_c - 1.0).abs() > config["clip_coef"]).float(),
-                                         flat_part)
+                with torch.no_grad():
+                    # Rung 0 §2.2: every diagnostic below is a mean over rows, so
+                    # every one of them is masked. _pm is mb_part_f reshaped to the
+                    # joint ratio's [S, T] layout; ratio_d/ratio_c are flat, hence
+                    # flat_part. An unmasked KL here would be diluted 5× at
+                    # n_active=1 and the target_kl early-stop would never fire.
+                    _pm = mb_part_f.reshape(logratio.shape)
+                    old_approx_kl = masked_mean(-logratio, _pm)
+                    approx_kl = masked_mean((ratio - 1) - logratio, _pm)
+                    clipfrac = masked_mean(((ratio - 1.0).abs() > config["clip_coef"]).float(), _pm)
+                    # Observe-only (spec 2026-08-15 §3.4): same formula as the
+                    # joint `clipfrac` above, split by the per-factor ratios
+                    # `_hybrid_ppo_loss` already returns. `.item()` into the
+                    # logging dict only — NEVER add these to the `loss` tensor
+                    # (they are diagnostics, not a training signal). Last-
+                    # minibatch-only is forbidden; they accumulate like
+                    # `clipfrac` and ride the existing `_mb_run` divisor.
+                    clipfrac_d = masked_mean(((ratio_d - 1.0).abs() > config["clip_coef"]).float(),
+                                             flat_part)
+                    clipfrac_c = masked_mean(((ratio_c - 1.0).abs() > config["clip_coef"]).float(),
+                                             flat_part)
 
-            # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
-            # (this minibatch included — matches standard PPO's post-epoch
-            # check) and stops at the next epoch boundary via the loop-top
-            # gate, instead of the old immediate mid-pass break.
-            if target_kl is not None and approx_kl.item() > target_kl:
-                _kl_stop = True
+                # Early stopping (gh#90): a KL trip finishes the CURRENT epoch
+                # (this minibatch included — matches standard PPO's post-epoch
+                # check) and stops at the next epoch boundary via the loop-top
+                # gate, instead of the old immediate mid-pass break.
+                if target_kl is not None and approx_kl.item() > target_kl:
+                    _kl_stop = True
 
-            # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
-            # via per-factor clipping (the pre-Batch-3 single-ratio block
-            # would over-clip — spec L8 decision). Advantage normalization +
-            # the mb_prio importance weight now live INSIDE _hybrid_ppo_loss
-            # (finding 1, 2026-07-06 adversarial review); the orphaned
-            # normalization stub and the discarded per-minibatch
-            # compute_puff_advantage recompute that used to sit here were
-            # dead compute and have been removed.
+                # Batch 3 (T5): pg_loss already computed by _hybrid_ppo_loss above
+                # via per-factor clipping (the pre-Batch-3 single-ratio block
+                # would over-clip — spec L8 decision). Advantage normalization +
+                # the mb_prio importance weight now live INSIDE _hybrid_ppo_loss
+                # (finding 1, 2026-07-06 adversarial review); the orphaned
+                # normalization stub and the discarded per-minibatch
+                # compute_puff_advantage recompute that used to sit here were
+                # dead compute and have been removed.
 
-            newvalue = newvalue.view(mb_returns_norm.shape)
-            v_loss_unclipped = (newvalue - mb_returns_norm)**2
-            if vf_clip is not None:
-                v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
-                                                         vf_clip)
-                v_loss_clipped = (v_clipped - mb_returns_norm)**2
-                v_loss = 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped), mb_part_f)
-            else:
-                v_loss = 0.5 * masked_mean(v_loss_unclipped, mb_part_f)
+                newvalue = newvalue.view(mb_returns_norm.shape)
+                v_loss_unclipped = (newvalue - mb_returns_norm)**2
+                if vf_clip is not None:
+                    v_clipped = mb_values_norm + torch.clamp(newvalue - mb_values_norm, -vf_clip,
+                                                             vf_clip)
+                    v_loss_clipped = (v_clipped - mb_returns_norm)**2
+                    v_loss = 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped),
+                                               mb_part_f)
+                else:
+                    v_loss = 0.5 * masked_mean(v_loss_unclipped, mb_part_f)
 
-            # Rung 0 §2.2: the entropy the SAC-α dual loop and the collapse
-            # floor react to must be the participating rows' entropy. Parked
-            # rows are noop-masked (exactly one valid bin per head ⇒ discrete
-            # entropy 0), so an unmasked mean at n_active=1 reads ~1/5 of the
-            # truth and would peg alpha at the floor forever.
-            current_entropy = masked_mean(entropy, flat_part)
-            entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)
+                # Rung 0 §2.2: the entropy the SAC-α dual loop and the collapse
+                # floor react to must be the participating rows' entropy. Parked
+                # rows are noop-masked (exactly one valid bin per head ⇒ discrete
+                # entropy 0), so an unmasked mean at n_active=1 reads ~1/5 of the
+                # truth and would peg alpha at the floor forever.
+                current_entropy = masked_mean(entropy, flat_part)
+                # Preserve this source-keyed diagnostic line across indentation too.
+                # yapf: disable
+                entropy_unmasked = entropy.mean()          # diagnostic only (losses/entropy_unmasked)
+                # yapf: enable
 
-            # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
-            alpha = self._log_alpha_tensor.exp()
-            # Task 9A: use the scheduled target_entropy (recomputed at top of
-            # this train() call) instead of the static fallback. target_entropy
-            # is a Python float; .detach() on a tensor minus a float is fine —
-            # autograd treats the float as a constant.
-            # alpha_loss is computed UNCONDITIONALLY (the logging block below
-            # accumulates it every minibatch — spec finding 7); during the
-            # warm-start GRACE phase only the optimizer step is skipped, so
-            # log_alpha stays at its operating point (see phase-resolution
-            # comment above for why that matters).
-            alpha_loss = (self._log_alpha_tensor *
-                          (current_entropy - target_entropy).detach()).mean()
+                # ── ADAPTIVE ALPHA (SAC-style Lagrangian entropy tuning) ───────
+                alpha = self._log_alpha_tensor.exp()
+                # Task 9A: use the scheduled target_entropy (recomputed at top of
+                # this train() call) instead of the static fallback. target_entropy
+                # is a Python float; .detach() on a tensor minus a float is fine —
+                # autograd treats the float as a constant.
+                # alpha_loss is computed UNCONDITIONALLY (the logging block below
+                # accumulates it every minibatch — spec finding 7); during the
+                # warm-start GRACE phase only the optimizer step is skipped, so
+                # log_alpha stays at its operating point (see phase-resolution
+                # comment above for why that matters).
+                alpha_loss = (self._log_alpha_tensor *
+                              (current_entropy - target_entropy).detach()).mean()
+
+                effective_alpha = alpha.detach()
+                if self._warmstart_phase == WS_GRACE:
+                    # grace: entropy pressure ceilinged (default 0.0 — pure
+                    # PPO+reward; the knob exists for a nonzero-alpha rerun if
+                    # the collapse watch fires)
+                    effective_alpha = torch.clamp(effective_alpha,
+                                                  max=float(
+                                                      config.get("warmstart_alpha_ceiling", 0.0)))
+                # Entropy floor: prevent collapse. Gated off for the ENTIRE
+                # warm-start window (grace+ramp): the BC policy lives below the
+                # floor by design, and re-arming mid-ramp would jump effective
+                # alpha ~1e-3 -> 0.5 in one minibatch (spec finding 2). It re-arms
+                # at ramp_end — a plotted boundary.
+                if _ws_floor_active and current_entropy.item() < self._entropy_floor:
+                    effective_alpha = torch.clamp(effective_alpha, min=0.5)
+                    _floor_fires += 1
+
+                entropy_loss = -effective_alpha * current_entropy
+                # ──────────────────────────────────────────────────────────────
+
+                loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
+
+            # Both backward passes run after our autocast scope. Alpha is still
+            # stepped before policy backward, using the pre-step alpha in loss.
             if self._warmstart_phase != WS_GRACE:
                 self._alpha_optimizer.zero_grad()
                 alpha_loss.backward()
                 self._alpha_optimizer.step()
-
-            effective_alpha = alpha.detach()
-            if self._warmstart_phase == WS_GRACE:
-                # grace: entropy pressure ceilinged (default 0.0 — pure
-                # PPO+reward; the knob exists for a nonzero-alpha rerun if
-                # the collapse watch fires)
-                effective_alpha = torch.clamp(effective_alpha,
-                                              max=float(config.get("warmstart_alpha_ceiling", 0.0)))
-            # Entropy floor: prevent collapse. Gated off for the ENTIRE
-            # warm-start window (grace+ramp): the BC policy lives below the
-            # floor by design, and re-arming mid-ramp would jump effective
-            # alpha ~1e-3 -> 0.5 in one minibatch (spec finding 2). It re-arms
-            # at ramp_end — a plotted boundary.
-            if _ws_floor_active and current_entropy.item() < self._entropy_floor:
-                effective_alpha = torch.clamp(effective_alpha, min=0.5)
-                _floor_fires += 1
-
-            entropy_loss = -effective_alpha * current_entropy
-            # ──────────────────────────────────────────────────────────────
-
-            loss = pg_loss + config["vf_coef"] * v_loss + entropy_loss
-            self.amp_context.__enter__()
 
             # Denormalize before writing back so advantage computation stays in raw scale
             std = (self._ret_var + 1e-8).sqrt()
