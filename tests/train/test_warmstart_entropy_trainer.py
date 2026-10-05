@@ -249,3 +249,86 @@ def test_mode_off_is_unchanged_behavior():
             "with the mode off the alpha optimizer must actually step")
     finally:
         cleanup()
+
+
+@pytest.mark.training
+@pytest.mark.parametrize("previous_entropy", [None, float("nan"), float("inf"), -float("inf")])
+def test_anchor_waits_for_a_finite_completed_update(previous_entropy):
+    """Missing/nonfinite history must not poison the ramp; the next finite mean arms it."""
+    trainer, cleanup = _build_ws_trainer(warmstart_grace_steps=0, warmstart_ramp_steps=10**12)
+    try:
+        trainer.total_minibatches = 2
+        trainer._last_entropy_mean = previous_entropy
+        losses = _run_train_once(trainer)
+        assert "warmstart_phase" in losses
+        assert losses["warmstart_phase"] == 0
+        assert trainer._warmstart_h_anchor is None
+        completed_entropy = trainer._last_entropy_mean
+        assert math.isfinite(completed_entropy)
+        losses = _run_train_once(trainer)
+        assert losses["warmstart_phase"] == 1
+        assert trainer._warmstart_h_anchor == completed_entropy
+        assert math.isfinite(losses["alpha_loss"])
+    finally:
+        cleanup()
+
+
+@pytest.mark.training
+def test_disabling_warmstart_releases_alpha_without_repeating_reset():
+    """A stale GRACE freezes Adam; replacing/resetting its tensor loses continued state."""
+    import torch
+
+    trainer, cleanup = _build_ws_trainer(warmstart_grace_steps=10**12)
+    try:
+        trainer.total_minibatches = 2
+        alpha = trainer._log_alpha_tensor
+        losses = _run_train_once(trainer)
+        assert losses["warmstart_phase"] == 0
+        assert not trainer._alpha_optimizer.state
+        with torch.no_grad():
+            alpha.fill_(-1.37)
+        trainer.config["warmstart_entropy"] = False
+        _force_floor_above_entropy(trainer)
+        losses = _run_train_once(trainer)
+        assert "warmstart_phase" not in losses
+        assert trainer._warmstart_phase == 2
+        assert trainer._log_alpha_tensor is alpha
+        assert trainer._alpha_optimizer.param_groups[0]["params"][0] is alpha
+        assert trainer._alpha_optimizer.state[alpha]["step"].item() == 2
+        assert alpha.item() == pytest.approx(-1.37, abs=0.01)
+        assert losses["entropy_floor_fires"] == 2
+        assert losses["effective_alpha"] >= 0.5
+    finally:
+        cleanup()
+
+
+@pytest.mark.training
+def test_warmstart_off_hands_back_to_unfinished_normal_schedule():
+    """OFF must release both the consumed target and mirror, even before normal warmup ends."""
+    trainer, cleanup = _build_ws_trainer(warmstart_grace_steps=0,
+                                         warmstart_ramp_steps=1,
+                                         entropy_target_warmup_steps=100,
+                                         entropy_target_warmup_frac=0.75,
+                                         entropy_target_base_frac=0.25)
+    try:
+        trainer.evaluate()
+        trainer.total_minibatches = 2
+        trainer.global_step = 10
+        trainer._max_entropy = 8.0
+        trainer._warmstart_h_anchor = 6.0
+        # Hold log(alpha) fixed so the mean loss independently pins the target
+        # consumed in every minibatch, not just the reporting mirror.
+        trainer._alpha_optimizer.param_groups[0]["lr"] = 0.0
+        _force_floor_above_entropy(trainer)
+        trainer.last_log_time = 0.0
+        trainer.train()
+        losses = trainer.losses
+        assert "warmstart_phase" in losses
+        assert losses["warmstart_phase"] == 2
+        assert trainer._current_target_entropy == 5.6
+        assert losses["alpha_loss"] == pytest.approx(trainer._log_alpha_tensor.item() *
+                                                     (losses["entropy"] - 5.6),
+                                                     abs=1e-6)
+        assert losses["entropy_floor_fires"] == 2
+    finally:
+        cleanup()

@@ -924,9 +924,67 @@ class Cs2PuffeRL(PuffeRL):
         profile.end()
         return self.stats
 
+    def _prepare_entropy_update(self) -> tuple[float, bool]:
+        """Resolve this update's entropy target and whether its floor is active.
+
+        Called once before minibatches: global_step is constant during train().
+        Keep the checkpointed latches and optimizer tensor on the trainer; a
+        restored reset flag prevents repeating the initial in-place alpha reset.
+        Schedule math stays in the existing pure helpers. Minibatch alpha steps
+        and post-divisor entropy-history/metric writes belong to train().
+        """
+        config = self.config
+        # Read the live entropy bound (including this run's aim settings), then
+        # mirror the scheduled target even when GRACE consumes no alpha target.
+        target_entropy = _scheduled_target_entropy(config, self.global_step, self._max_entropy)
+        self._current_target_entropy = float(target_entropy)
+
+        # Reset before phase resolution, retaining Adam's original parameter.
+        # Warm-start continuity comes from target == anchor at release, not
+        # from parking log_alpha far below its operating point.
+        if not self._log_alpha_reset_done:
+            with torch.no_grad():
+                self._log_alpha_tensor.fill_(math.log(config["ent_coef"]))
+            self._log_alpha_reset_done = True
+
+        _ws_enabled = bool(config.get("warmstart_entropy", False))
+        _ws_floor_active = True
+        if _ws_enabled:
+            _ws_grace = int(config.get("warmstart_grace_steps", 5_000_000))
+            if (self._warmstart_h_anchor is None and self.global_step >= _ws_grace
+                    and self._last_entropy_mean is not None):
+                # Latch only a finite completed-update mean; retry next update
+                # rather than poison every target/alpha loss through the ramp.
+                if math.isfinite(self._last_entropy_mean):
+                    self._warmstart_h_anchor = float(self._last_entropy_mean)
+                else:
+                    print(f"[Train] WARN warm-start: non-finite entropy mean "
+                          f"{self._last_entropy_mean} at grace end — "
+                          f"anchor capture skipped, staying in GRACE.")
+            _ws = warmstart_entropy_state(
+                self.global_step,
+                grace_steps=_ws_grace,
+                ramp_steps=int(config.get("warmstart_ramp_steps", 10_000_000)),
+                h_anchor=self._warmstart_h_anchor,
+                base_target=(config.get("entropy_target_base_frac", 0.35) * self._max_entropy))
+            self._warmstart_phase = _ws.phase
+            _ws_floor_active = _ws.floor_active
+            if _ws.phase != WS_OFF and _ws.target is not None:
+                # Override the consumed target AND its logging mirror. OFF also
+                # returns a target, but must hand back to the normal schedule:
+                # when grace+ramp ends before normal warmup, that target can
+                # still be above base_target. Retaining that handoff is deliberate.
+                target_entropy = _ws.target
+                self._current_target_entropy = float(_ws.target)
+        else:
+            # Disabling the mode in-process must release a previously frozen
+            # alpha optimizer, even if the last update was still in GRACE.
+            self._warmstart_phase = WS_OFF
+        return target_entropy, _ws_floor_active
+
     def train(self):
         """One PPO update over the rollout buffer; the return-norm patcher's inner train()
-        replacement (in cs2rl.train.update) until gh#168 W2a, moved verbatim.
+        replacement (in cs2rl.train.update) until gh#168 W2a.
 
         WHAT: return-normalised value targets, the hybrid discrete+continuous PPO loss
         (``_hybrid_ppo_loss``), the SAC-style α dual loop, the warm-start entropy mode,
@@ -935,10 +993,9 @@ class Cs2PuffeRL(PuffeRL):
 
         WHY this replaces ``PuffeRL.train`` outright (it never calls ``super().train``):
         the stock loop cannot unpack the policy's 4-tuple output (see the F11 note in
-        cs2rl.train.loop.train). The AST oracle in
-        .superpowers/sdd/2026-09-24-168-trainer-subclass/ast_oracle.py pins this body
-        to the pre-move closure node for node (N1-N5); the byte gates pin the arms the
-        2-epoch run executes.
+        cs2rl.train.loop.train). The historical AST oracle in
+        .superpowers/sdd/2026-09-24-168-trainer-subclass/ast_oracle.py checked the
+        original move against the pre-move closure (N1-N5).
 
         PITFALLS: names that were closure variables are now attributes
         (``_ret_mean/_ret_var``, ``_log_alpha_tensor``, ``_alpha_optimizer``,
@@ -966,94 +1023,7 @@ class Cs2PuffeRL(PuffeRL):
         anneal_beta = b0 + (1 - b0) * a * self.epoch / self.total_epochs
         self.ratio[:] = 1
 
-        # Task 9A: recompute target_entropy from the linear ramp once per
-        # train() call. WHY here (not inside the minibatch loop): the schedule
-        # is keyed on global_step which is fixed for the duration of a single
-        # train() call, so recomputing per-minibatch would burn cycles for no
-        # signal. We mirror the value onto self._current_target_entropy
-        # so the wandb log layer can read it without touching this method.
-        # Fracs/warmup_steps come from config via _scheduled_target_entropy
-        # (finding 4 residual — previously hardcoded 0.7→0.5).
-        # PITFALL: read self._max_entropy, never a copy taken at
-        # construction: the value follows the run (σ cap, pinned pitch, bonus
-        # switch) and is computed from those settings when the trainer is built.
-        target_entropy = _scheduled_target_entropy(config, self.global_step, self._max_entropy)
-        self._current_target_entropy = float(target_entropy)
-
-        # Task 9B: one-shot log_alpha reset on the first train() call after
-        # construction. WHY: the entropy schedule + log_alpha are coupled — the
-        # outer training loop can leave log_alpha at a stale value from a
-        # previous run / re-init, and we need a deterministic starting point
-        # of log(ent_coef) so the SAC dual-gradient loop converges from a
-        # known floor. The flag is an instance attribute so a checkpoint-restored
-        # trainer still resets exactly once.
-        if not self._log_alpha_reset_done:
-            with torch.no_grad():
-                self._log_alpha_tensor.fill_(math.log(config["ent_coef"]))
-            self._log_alpha_reset_done = True
-
-        # ── Warm-start entropy mode: resolve phase once per train() call ───
-        # (global_step only advances in evaluate(), so it is constant here —
-        # same reasoning as the Task 9A recompute above; all transitions land
-        # on update boundaries.) Ordering vs Task 9B: 9B runs FIRST and sets
-        # log_alpha to log(ent_coef) — exactly the operating point warm-start
-        # wants (continuity comes from target==h_anchor at release, never
-        # from moving log_alpha: Adam(lr=1e-4) travels ~1e-4/minibatch, so a
-        # parked log_alpha is stranded — spec finding 1).
-        # PITFALL: keep grace+ramp >= entropy_target_warmup_steps. OFF falls
-        # through to the Task 9A schedule (see the override condition below),
-        # and 9A ramps DOWNWARD — warmup_high_frac*max (0.5) at step 0 to
-        # base_frac*max (0.35) at entropy_target_warmup_steps — so during
-        # warmup it reads strictly ABOVE the base_frac*max the warm-start ramp
-        # lands on. With defaults (grace 5M + ramp 10M = 15M >= 10M warmup) 9A
-        # has already flattened at base_frac*max and the handoff is exactly
-        # continuous. But e.g. grace=2M+ramp=3M puts ramp_end at 5M, where 9A
-        # still reads 0.425*max: the target jumps UPWARD 0.35*max -> 0.425*max,
-        # i.e. 2.87 -> 3.49 nats (+0.62, at max_entropy=8.21), at the exact
-        # boundary the spec promises is clean.
-        _ws_enabled = bool(config.get("warmstart_entropy", False))
-        _ws_floor_active = True
-        if _ws_enabled:
-            _ws_grace = int(config.get("warmstart_grace_steps", 5_000_000))
-            if (self._warmstart_h_anchor is None and self.global_step >= _ws_grace
-                    and self._last_entropy_mean is not None):
-                # one-shot anchor capture (idempotent: guarded on None).
-                # Finite-check (Task 1 review): a NaN/inf entropy mean latched
-                # here would poison target and alpha_loss for the whole ramp —
-                # skip the capture (stay GRACE) and shout instead.
-                if math.isfinite(self._last_entropy_mean):
-                    self._warmstart_h_anchor = float(self._last_entropy_mean)
-                else:
-                    print(f"[Train] WARN warm-start: non-finite entropy mean "
-                          f"{self._last_entropy_mean} at grace end — "
-                          f"anchor capture skipped, staying in GRACE.")
-            _ws = warmstart_entropy_state(
-                self.global_step,
-                grace_steps=_ws_grace,
-                ramp_steps=int(config.get("warmstart_ramp_steps", 10_000_000)),
-                h_anchor=self._warmstart_h_anchor,
-                base_target=(config.get("entropy_target_base_frac", 0.35) * self._max_entropy))
-            self._warmstart_phase = _ws.phase
-            _ws_floor_active = _ws.floor_active
-            if _ws.phase != WS_OFF and _ws.target is not None:
-                # Override the Task 9A schedule during the ramp AND mirror it,
-                # or the wandb target trace plots the unmodified base schedule
-                # (spec finding 9). Effectively RAMP-only: GRACE carries
-                # target=None (no target is consumed while alpha is ceilinged).
-                # PITFALL: the WS_OFF guard is load-bearing — the helper returns
-                # target=base_target (NOT None) once OFF, so testing target
-                # alone would pin the target at base_frac*max for the rest of
-                # the run and silently flatten the tail of the 9A warmup ramp
-                # whenever grace+ramp < entropy_target_warmup_steps. Falling
-                # through here is what makes OFF byte-for-byte pre-feature
-                # behavior at ANY config, which is what the spec promises.
-                target_entropy = _ws.target
-                self._current_target_entropy = float(_ws.target)
-        else:
-            # Config can be toggled off in-process (tests do this; production
-            # builds the config once). Re-seed the phase so a stale GRACE can
-            # never keep the alpha optimizer frozen after the mode is disabled.
-            self._warmstart_phase = WS_OFF
+        target_entropy, _ws_floor_active = self._prepare_entropy_update()
 
         # Task 8: raw event-segment fraction (mask mean) — computed once per
         # train() call because _event_mask doesn't change inside the
