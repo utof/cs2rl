@@ -28,6 +28,7 @@ from contextlib import ExitStack
 from dataclasses import dataclass
 from functools import partial
 from types import TracebackType
+from typing import Literal, get_args
 
 import numpy as np
 
@@ -49,7 +50,9 @@ from cs2rl.train.envs import (
 )
 from cs2rl.train.selfplay import SelfPlayManager, build_selfplay_manager
 
-ENV_ROLES = ("train", "harness")
+# pyrefly checks a literal role at each call site; build_trainer re-checks at runtime.
+EnvRole = Literal["train", "harness"]
+ENV_ROLES = get_args(EnvRole)
 
 
 @dataclass(frozen=True)
@@ -238,7 +241,7 @@ def build_trainer(args,
                   config: dict,
                   *,
                   shared_ts,
-                  env_role: str = "train",
+                  env_role: EnvRole = "train",
                   policy_init: PolicyInit | None = None,
                   self_play_mgr=None):
     """Build the vector env, the policy and the `Cs2PuffeRL` trainer for one run.
