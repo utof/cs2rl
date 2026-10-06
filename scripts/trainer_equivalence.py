@@ -545,6 +545,8 @@ class _CaseSpec:
     WHY a dataclass: its generated __init__ raises TypeError on a keyword it does not
     declare, so a misspelt key (``throtled=True``) fails the run instead of being
     ignored while the case still compares IDENTICAL. Every field is read by run_case.
+    KNOWN LIMIT: no test pins the field defaults; a changed default applies to every
+    CASES entry that omits that key.
     """
     build: dict[str, Any]
     epochs: int
