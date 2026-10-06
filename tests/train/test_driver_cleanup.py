@@ -380,8 +380,9 @@ def test_periodic_save_failure_closes_resources(run_driver):
 
 
 # ── What train() hands the trainer it builds ───────────────────────────────
-# Each test below replaces a source-text pin on train() from before #92 part 2, when
-# train() could not be driven without a real run.
+# Each test below up to test_collect_and_update_times_reach_the_row replaces a source-text
+# pin on train() from before #92 part 2, when train() could not be driven without a real
+# run. The last one checks an order that had no test of its own.
 
 
 def _rows(run):
@@ -580,3 +581,25 @@ def test_collect_and_update_times_reach_the_row(run_driver, monkeypatch):
     loop.train(run.args)
     (row, ) = _rows(run)
     assert (row["timing/collect_ms"], row["timing/update_ms"]) == (250.0, 500.0)
+
+
+def test_run_config_is_built_from_the_resolved_pin_pitch(monkeypatch):
+    """_prepare_run resolves pin_pitch (R0-E.2) before it builds the run's config.
+
+    The config feeds config.json, the --resume-run guard and every env. A flat map
+    resolves the CLI default None to 1; built first, the config would carry None.
+    The CLI resolves pin_pitch before train() too, so only a programmatic train(args)
+    reaches this order; the fixture above replaces resolve_pin_pitch, hence no run_driver.
+    """
+    from cs2rl.env.map import make_arena_duel_map
+
+    seen = []
+    monkeypatch.setattr(loop, "build_train_config",
+                        lambda args, **kw: seen.append(args.pin_pitch) or {})
+    args = SimpleNamespace(seed=0,
+                           num_envs=1,
+                           map_data=make_arena_duel_map(),
+                           pin_pitch=None,
+                           checkpoint_dir="unused")
+    loop._prepare_run(args)
+    assert seen == [1]
