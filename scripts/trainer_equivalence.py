@@ -62,6 +62,7 @@ import argparse
 import contextlib
 import dataclasses
 import hashlib
+import importlib
 import io
 import json
 import os
@@ -75,7 +76,9 @@ from typing import Any
 # the environment already sets them, as every CLI launch does. torch fixes its thread count
 # when it is imported, and a different count changes float reduction order, so two runs
 # under different counts never match. Each case records the count (`torch_threads`).
-import cs2rl.train                     # noqa: F401
+# import_module rather than a bare import: an unused-import noqa trailing comment is
+# realigned by yapf into a form ruff's import sorter (I001) rejects.
+importlib.import_module("cs2rl.train")
 
 # Attributes whose value is wall clock or a handle, or that are fingerprinted separately.
 EXCLUDED = {
