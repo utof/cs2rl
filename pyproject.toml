@@ -72,8 +72,9 @@ modal = [
 # requirements-mutation.txt belongs to a separate environment so the default
 # project's lock/runtime graph does not absorb mutmut's newer Click requirement.
 source_paths = ["tests/conftest.py"]
-# The entrypoint supplies a Git pointer for index reads instead of copying .git history.
-also_copy = ["src", "scripts"]
+# The entrypoint snapshots current tracked src/scripts and supplies a Git pointer.
+# Native recursive also_copy would include ignored multi-GB build outputs.
+also_copy = []
 pytest_add_cli_args_test_selection = [
     "tests/integration/test_namespace_guard.py::test_the_start_check_names_each_foreign_entry_and_name",
     "tests/integration/test_namespace_guard.py::test_the_start_check_is_silent_on_the_root_and_on_entries_holding_neither_name",

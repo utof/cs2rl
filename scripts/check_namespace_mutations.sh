@@ -12,7 +12,9 @@ From the checkout root, after installing the normal project/dev dependencies:
   bash scripts/check_namespace_mutations.sh show tests.conftest.x_namespace_entry_problems__mutmut_31
 
 The separate environment runs these stdlib/pytest-only guard consumers against
-copied source without syncing/rebuilding the editable project or its runtime.
+tracked src/scripts working files, without ignored build outputs or untracked
+files and without syncing/rebuilding the editable project or its runtime.
+Run refreshes those generated trees, so deleted files cannot remain stale.
 Linux/GNU timeout is required. Each command has a 600s deadline and 5s kill grace.
 Run selects 14 native mutations of entry naming, directory detection and help
 text, with one child. This is a fixed sample for mutmut 3.8.0/current guard;
@@ -46,6 +48,7 @@ export PYTHONPATH="$repo_root/src${PYTHONPATH:+:$PYTHONPATH}"
 case ${1:-run} in
     run)
         [[ $# -le 1 ]] || { echo "run takes no extra arguments" >&2; exit 2; }
+        run_started=$SECONDS
         # Copying a clone's .git directory can copy private/unbounded history.
         # A pointer supplies the same index for reads by the unchanged tracked-
         # package safety hook, in ordinary clones and linked worktrees alike.
@@ -61,6 +64,49 @@ case ${1:-run} in
         else
             printf '%s\n' "$git_pointer" > mutants/.git
         fi
+        # Native also_copy recursively includes ignored multi-GB build outputs.
+        # Git supplies membership; copy2 preserves current working bytes rather
+        # than hiding edits behind git archive's committed/indexed contents.
+        # Stage completely before replacing only the generated source trees.
+        timeout --kill-after=5s 600s "$interpreter" - <<'PY'
+import os
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+
+cache = Path("mutants")
+for name in ("src", "scripts"):
+    destination = cache / name
+    if destination.is_symlink() or (destination.exists() and not destination.is_dir()):
+        raise SystemExit(f"Refusing a non-directory or symlinked source cache: {destination}")
+tracked = subprocess.check_output(["git", "ls-files", "--cached", "--deduplicate", "-z", "--", "src", "scripts"])
+with tempfile.TemporaryDirectory(prefix=".source-", dir=cache) as temporary:
+    staging = Path(temporary)
+    count = size = 0
+    for raw in tracked.split(b"\0"):
+        if not raw:
+            continue
+        source = Path(os.fsdecode(raw))
+        if any(path.is_symlink() for path in (source, *source.parents)):
+            raise SystemExit(f"Refusing a symlinked tracked source path: {source}")
+        if not source.exists():
+            continue  # An unstaged deletion must not survive in the generated copy.
+        if not source.is_file():
+            raise SystemExit(f"Tracked source is not a regular file: {source}")
+        copied = staging / source
+        copied.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(source, copied)
+        count += 1
+        size += copied.stat().st_size
+    for name in ("src", "scripts"):
+        destination = cache / name
+        if destination.exists():
+            shutil.rmtree(destination)
+        (staging / name).mkdir(exist_ok=True)
+        (staging / name).replace(destination)
+print(f"Tracked source snapshot: {count} files, {size} bytes")
+PY
         # Use native CLI selection, not a custom generator/runner or no-mutate
         # annotations in safety hooks. Explicit names bound execution even if
         # later guard edits increase the generated population.
@@ -69,7 +115,9 @@ case ${1:-run} in
             selected+=("tests.conftest.x_namespace_entry_problems__mutmut_$suffix")
         done
         echo "Running ${#selected[@]} selected guard mutations, one child, 600s deadline"
-        timeout --kill-after=5s 600s "$tool" run --max-children 1 "${selected[@]}"
+        remaining=$((600 - SECONDS + run_started))
+        (( remaining > 0 )) || { echo "Source preparation exhausted the 600s deadline" >&2; exit 124; }
+        timeout --kill-after=5s "${remaining}s" "$tool" run --max-children 1 "${selected[@]}"
         ;;
     results)
         [[ $# -eq 1 ]] || { echo "results takes no extra arguments" >&2; exit 2; }
