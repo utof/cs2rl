@@ -14,6 +14,7 @@ and every test here only needs its observation space + static data.
 """
 
 import math
+import re
 
 import pytest
 import torch
@@ -96,6 +97,43 @@ def test_flag_off_builds_exactly_the_legacy_modules(env):
     assert not any(
         n.endswith(("_t", "_ct")) or "_t." in n or "_ct." in n for n, _ in p.named_parameters())
     assert not hasattr(p, "aim_log_std_t")
+
+
+def test_split_copies_draw_the_flag_off_rng_stream(env):
+    """Spec §3.7: at one seed, the split's T copies equal the flag-off modules.
+
+    WHAT: for each split architecture, every parameter that is not a CT copy (the T
+    copies and the shared value_head) is bitwise equal to its flag-off counterpart, and
+    construction leaves the global torch RNG where flag-off leaves it.
+
+    WHY: the CT copies are drawn under fork_rng so that the split is the only changed
+    variable at a given seed. Reordering two constructions in one branch, or dropping
+    a fork, shifts every later draw; no other test reads initial weights.
+
+    LIMIT: a reorder applied to every branch alike (inside `_make_trunk`, say) keeps
+    the parity and passes here. That changes every seeded run's initial weights; the
+    base-vs-head policy oracle of a refactor catches it, this test does not.
+    """
+
+    def build(**flags):
+        torch.manual_seed(0)
+        p = policy_mod.build_policy(env, device="cpu", **flags)
+        return p.state_dict(), torch.get_rng_state()
+
+    legacy, legacy_rng = build()
+    t_copy = re.compile(r"^(encoder|lstm|action_heads|aim_mu|aim_log_std)_t(?=\.|$)")
+    for flags in (dict(tct_split_heads=True), dict(tct_split_trunk=True),
+                  dict(tct_split_heads=True, tct_split_trunk=True)):
+        split, rng = build(**flags)
+        assert torch.equal(rng, legacy_rng), f"{flags}: construction moved the RNG stream"
+        compared = 0
+        for key, value in split.items():
+            if re.match(r"^(encoder|lstm|action_heads|aim_mu|aim_log_std)_ct(?=\.|$)", key):
+                continue
+            legacy_key = t_copy.sub(r"\1", key)
+            assert torch.equal(value, legacy[legacy_key]), f"{flags}: {key} != {legacy_key}"
+            compared += 1
+        assert compared == len(legacy), f"{flags}: compared {compared} of {len(legacy)}"
 
 
 def test_flag_off_forward_equals_direct_legacy_head_application(env):

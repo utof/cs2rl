@@ -137,7 +137,8 @@ class Dust2Policy(nn.Module):
         # heads and the T aim_mu. A per-team group helper would move
         # value_head's draw and change every later layer's init at the same
         # seed. Spelled out, the flag-on `_t` copies draw exactly the flag-off
-        # stream (spec §3.7).
+        # stream (spec §3.7), pinned by tests/test_tct_split.py::
+        # test_split_copies_draw_the_flag_off_rng_stream.
         if not self.tct_split_heads:
             self.action_heads = _make_action_heads(hidden_size)
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, 1), std=1.0)
