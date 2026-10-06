@@ -184,7 +184,8 @@ def test_environment_star_window_means_still_rest_on_an_append_shaped_collector(
     would notice — the values would still be numbers of a plausible size.
     """
     assert census.stats_collection_is_append_shaped(), (
-        "Cs2PuffeRL._collect_infos no longer appends/extends into self.stats — every "
+        "Cs2PuffeRL._collect_infos no longer appends scalars into self.stats, or it assigns "
+        "into self.stats — every "
         "environment/* `window-mean-pufferlib` declaration in eval/metrics_schema.py is now a "
         "claim about a pipeline that does not exist")
 
