@@ -374,9 +374,9 @@ class Dust2Policy(nn.Module):
           through-time gradients, and it recomputes logprobs/values under the
           same function as the rollout (forward_eval carries state tick to
           tick), so on the first minibatch every row the current policy
-          sampled has an importance ratio of 1 up to float rounding. On a
-          past-policy epoch the opponent rows hold the past policy's
-          logprobs, so their ratios are not 1.
+          sampled has an importance ratio of 1 up to float rounding. Rows
+          it did not sample store other logprobs (a past-policy opponent's,
+          or 0 for an `--opponent noop` statue), so their ratios need not be 1.
 
         WHY zero initial state is CORRECT here (not an approximation):
           evaluate() zeroes trainer.lstm_h/c at its start, and with
