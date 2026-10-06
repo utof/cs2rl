@@ -13,11 +13,15 @@ and BC can import this module without paying for torch until they build a policy
 
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
 from cs2rl.env.factory import build_legacy_eval_env
 from cs2rl.spec.action import ACTION_HEAD_SIZES
+
+if TYPE_CHECKING:                      # annotations only; never at runtime
+    import torch
 
 
 def state_dict_is_split(state_dict):
@@ -330,12 +334,14 @@ def build_policy(vecenv,
 # and `cs2rl.train.trainer.HybridAimVecEnv` carries the continuous aim to the envs.
 
 
-def _hybrid_sample_logits(policy_out,
-                          action=None,
-                          continuous_action=None,
-                          max_turn_speed=None,
-                          mask=None,
-                          aim_dim_mask=None):
+def _hybrid_sample_logits(
+    policy_out,
+    action=None,
+    continuous_action=None,
+    max_turn_speed=None,
+    mask=None,
+    aim_dim_mask=None
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]":
     """Hybrid sampler for the 4-tuple Dust2Policy output.
 
     Replaces the four in-tree usages of
@@ -427,11 +433,16 @@ def _hybrid_sample_logits(policy_out,
             [torch.multinomial(lp.exp(), 1).squeeze(-1) for lp in log_probs_per_head],
             dim=-1,
         )
-    log_prob_d = sum(
-        lp.gather(-1, action[..., i:i + 1]).squeeze(-1) for i, lp in enumerate(log_probs_per_head))
+    # builtin sum starts from int 0, so a type checker reads it as int | Tensor;
+    # summed over the 7 heads it is a Tensor. The casts keep that out of callers.
+    log_prob_d = cast(
+        torch.Tensor,
+        sum(
+            lp.gather(-1, action[..., i:i + 1]).squeeze(-1)
+            for i, lp in enumerate(log_probs_per_head)))
     # Entropy: H = -Σ p log p. log_softmax already gives log p; multiply by
     # exp(log_softmax) = p. Single pass per head, no extra softmax call.
-    entropy_d = sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head)
+    entropy_d = cast(torch.Tensor, sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head))
 
     # ── Continuous: 1D Gaussian aim head — hand-rolled (Fix #2) ──
     # σ comes pre-clamped from forward()/forward_eval() (LOG_STD_MIN/MAX), so

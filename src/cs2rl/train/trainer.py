@@ -729,8 +729,6 @@ class Cs2PuffeRL(PuffeRL):
             mask=action_mask,
             aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
         )
-        # A sum over the heads, so the stub types it int | Tensor; it is a Tensor.
-        logprob_d = cast(torch.Tensor, logprob_d)
         return _RolloutStep(state=state,
                             action=action,
                             cont_action=cont_action,
@@ -790,7 +788,6 @@ class Cs2PuffeRL(PuffeRL):
             mask=action_mask[opp_mask] if action_mask is not None else None,
             aim_dim_mask=getattr(past_policy, "aim_dim_mask", None),
         )
-        opp_logprob_d = cast(torch.Tensor, opp_logprob_d)              # as in _sample_actions
         opp_logprob = opp_logprob_d + opp_logprob_c
 
         past_h[opp_mask] = past_state["lstm_h"].to(past_h.dtype)
