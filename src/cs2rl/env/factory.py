@@ -38,7 +38,9 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                Its own role rather than a reuse of `train`, since it adds
                `include_step_stats_in_info=True` and takes pufferlib's seed
                rather than the train role's per-env `_seed`.
-  external     the public `make_env(team_spirit, map_data)` wrapper.
+  external     `tests._helpers.envs.make_env(team_spirit, map_data)`, a default-knob
+               env for env-level tests (moved out of `cs2rl.train.envs` by #321:
+               nothing in src/ or scripts/ called it).
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
 reuses one of the roles above — it does not. `cs2rl.train.record.record_episode` builds its
@@ -332,14 +334,13 @@ def build_harness_env(*, shared_ts, buf, seed: int | None, map_data, config: Env
 
 
 def build_external_env(*, team_spirit, map_data):
-    """The public `make_env(team_spirit, map_data)` wrapper's env.
+    """`tests._helpers.envs.make_env(team_spirit, map_data)`'s env.
 
-    Both parameters are REQUIRED even though the PUBLIC WRAPPER `cs2rl.train.envs.make_env`
-    declares its own two as optional. (Qualified deliberately: since #165 PR B2
-    this module names two different `make_env`s — the wrapper, and the lower-layer
-    `env.c.cs2_env.make_env` that `_env_constructor` imports — and both default
-    those parameters, so an unqualified sentence would say nothing.) The
-    defaulting belongs to the wrapper, because that is its published signature,
+    Both parameters are REQUIRED even though the wrapper `tests._helpers.envs.make_env`
+    declares its own two as optional. (Qualified deliberately: this module names two
+    different `make_env`s — the wrapper, and the lower-layer `env.c.cs2_env.make_env`
+    that `_env_constructor` imports — and both default those parameters, so an
+    unqualified sentence would say nothing.) The defaulting belongs to the wrapper,
     and repeating it here would mean a caller that forgot to forward `map_data`
     got a dust2 env instead of a TypeError, which is the silent-default failure
     every other builder in this module is spelled to avoid.

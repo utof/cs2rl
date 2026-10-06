@@ -14,7 +14,7 @@ from cs2rl import policy as policy_mod
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.spec import action as spec_action
 from cs2rl.spec import obs as spec_obs
-from cs2rl.train import envs as train_envs
+from tests._helpers import envs as helper_envs
 
 
 def test_make_env_reset_returns_expected_batch():
@@ -29,7 +29,7 @@ def test_make_env_reset_returns_expected_batch():
 
 
 def test_make_env_alias_steps_without_nan():
-    env = train_envs.make_env()
+    env = helper_envs.make_env()
     try:
         obs, _ = env.reset(seed=7)
         actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)

@@ -944,27 +944,27 @@ def test_smoke_test_call_site_asks_for_the_smoke_role(monkeypatch):
 
 
 def test_make_env_delegates_to_the_external_role(monkeypatch):
-    """The public wrapper forwards both of its parameters, unswapped.
+    """The test-helper wrapper forwards both of its parameters, unswapped.
 
     Distinct sentinels: `make_env(team_spirit, map_data)` takes two positional
     parameters of the same shape, so crossing them is a one-character edit that
     every value-based comparison in this file would accept.
     """
     from cs2rl.env.c import cs2_env
-    from cs2rl.train import envs as train_envs
+    from tests._helpers import envs as helper_envs
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
-    assert train_envs.make_env("<team_spirit>", "<map_data>") == "<env>"
+    assert helper_envs.make_env("<team_spirit>", "<map_data>") == "<env>"
     assert rec.calls == [{
         "config": EnvConfig(),
         "team_spirit": "<team_spirit>",
         "map_data": "<map_data>"
     }]
 
-    # Published optional defaults still belong to the public wrapper.
+    # The optional defaults belong to the wrapper.
     rec.calls.clear()
-    assert train_envs.make_env() == "<env>"
+    assert helper_envs.make_env() == "<env>"
     assert rec.calls == [{"config": EnvConfig(), "team_spirit": None, "map_data": None}]
 
 
@@ -979,7 +979,7 @@ def test_external_role_returns_under_a_stub(monkeypatch):
     `env.c.cs2_env.make_env`, the lower-layer constructor, and this test is the
     behavioural statement of that: with the stub installed the call RETURNS.
 
-    A pure-AST guard (test_env_factory_never_names_train_make_env below) states
+    A pure-AST guard (test_env_factory_never_names_the_make_env_wrapper below) states
     the same thing statically; this one would still fail if a future indirection
     reintroduced the cycle by some spelling the AST check does not enumerate.
     """
@@ -1263,12 +1263,12 @@ INLINED_ALIASES = {
 }
 
 # (fixture site path, top-level function) -> the file it lives in now (#205 part 3,
-# #92 part 2).
+# #92 part 2, and #321, which moved the `make_env` wrapper into tests/_helpers/).
 MOVED_SITE_FILE = {
     ("src/train.py", "_build_eval_hook"): "src/cs2rl/train/loop.py",
     ("src/train.py", "evaluate_checkpoint"): "src/cs2rl/train/evaluate.py",
     ("src/train.py", "load_policy_from_checkpoint"): "src/cs2rl/policy.py",
-    ("src/train.py", "make_env"): "src/cs2rl/train/envs.py",
+    ("src/train.py", "make_env"): "tests/_helpers/envs.py",
     ("src/train.py", "smoke_test"): "src/cs2rl/train/envs.py",
     ("src/train.py", "build_env_factory"): "src/cs2rl/train/envs.py",
     ("src/train_test_harness.py", "build_env_factory"): "src/cs2rl/train/envs.py",
@@ -1478,43 +1478,52 @@ def test_mask_view_attach_stays_out_of_the_factory():
                           "caller's job; see this test's docstring")
 
 
-def test_env_factory_never_names_train_make_env():
-    """`env.factory` must not reach `cs2rl.train.envs.make_env` — statically, by any spelling.
+def test_env_factory_never_names_the_make_env_wrapper():
+    """`env.factory` must not reach the `make_env` wrapper — statically, by any spelling.
 
     Since PR B2 `build_env_for` imports the LOWER-layer `env.c.cs2_env.make_env`.
-    Re-pointing that at the train package's public wrapper (`cs2rl.train.envs.make_env`)
-    would make the `external` role call itself forever, and would put the whole training
-    stack back on `--dump-config`'s import path. Three shapes are refused:
-    a `make_env` imported from `cs2rl.train` or any `cs2rl.train.*` module, at ANY scope
-    (`from cs2rl.train.envs import make_env`); a `make_env` attribute of the wrapper's
-    module (`envs.make_env`, `train.make_env`, `train.envs.make_env`,
-    `cs2rl.train.envs.make_env`); and any module-LEVEL import of `cs2rl.train` or of a
-    `cs2rl.train.*` module at all, in every spelling (`import cs2rl.train.envs`,
-    `from cs2rl.train import ...`, `from cs2rl import train`). Names are compared in FULL:
-    every first-party module is top-level `cs2rl`, so a first-component check could no
-    longer tell `train` from `env.config`. An import spelled `as` some other local name,
-    then read as an attribute, is beyond the attribute shape: `lint-imports` rejects every
-    `cs2rl.train` import from `env` at any scope (`cs2rl layers`).
+    Re-pointing that at the wrapper the `external` role serves
+    (`tests._helpers.envs.make_env`; `cs2rl.train.envs.make_env` until #321 moved it)
+    would make the role call itself forever, and an import of the train package would
+    put the whole training stack back on `--dump-config`'s import path. Four shapes are
+    refused: a `make_env` imported from `cs2rl.train`, any `cs2rl.train.*` module or the
+    helper module, at ANY scope (`from tests._helpers.envs import make_env`); a
+    `make_env` attribute of a module that held the wrapper (`envs.make_env`,
+    `train.make_env`, `train.envs.make_env`, `cs2rl.train.envs.make_env`,
+    `_helpers.envs.make_env`, `tests._helpers.envs.make_env`); any import of `tests` or a
+    `tests.*` module, at ANY scope (src/ never imports test code); and any module-LEVEL
+    import of `cs2rl.train` or of a `cs2rl.train.*` module at all, in every spelling
+    (`import cs2rl.train.envs`, `from cs2rl.train import ...`, `from cs2rl import
+    train`). Names are compared in FULL: every first-party module is top-level `cs2rl`,
+    so a first-component check could no longer tell `train` from `env.config`. An import
+    spelled `as` some other local name, then read as an attribute, is beyond the
+    attribute shape: `lint-imports` rejects every `cs2rl.train` import from `env` at any
+    scope (`cs2rl layers`).
 
     Scoped to module-level imports plus the name `make_env`, deliberately: this module
     no longer has a function-local `cs2rl.train` import to leave alone (#205 part 3 moved
     `build_selfplay_manager`, which carried the last one, to `cs2rl.train.selfplay`), and
     `lint-imports` rejects an upward import at ANY scope now that `cs2rl layers` has no
     `ignore_imports` entry, so function bodies need no scan for it here. Only the name
-    `make_env` is searched everywhere in the file.
+    `make_env` and imports of test code are searched everywhere in the file.
     """
     from cs2rl.env import factory as env_factory
 
     def is_train_module(name: str) -> bool:
         return name == "cs2rl.train" or name.startswith("cs2rl.train.")
 
-    # The ways a `make_env` attribute can name the wrapper's module: its local names and
-    # its dotted spellings.
-    wrapper_modules = {"train", "envs", "train.envs", "cs2rl.train.envs"}
+    def is_test_module(name: str) -> bool:
+        return name == "tests" or name.startswith("tests.")
+
+    # The ways a `make_env` attribute can name a module that held the wrapper: its local
+    # names and its dotted spellings.
+    wrapper_modules = {
+        "train", "envs", "train.envs", "cs2rl.train.envs", "_helpers.envs", "tests._helpers.envs"
+    }
 
     tree = ast.parse(Path(env_factory.__file__).read_text())
     offenders = []
-    for node in tree.body:                                                                   # module level ONLY
+    for node in tree.body:                                                                           # module level ONLY
         if isinstance(node, ast.Import):
             offenders += [
                 f"line {node.lineno}: import {a.name}" for a in node.names
@@ -1525,15 +1534,21 @@ def test_env_factory_never_names_train_make_env():
             if (is_train_module(module)
                     or (module == "cs2rl" and any(a.name == "train" for a in node.names))):
                 offenders.append(f"line {node.lineno}: from {module} import ...")
-    for node in ast.walk(tree):                                                              # every scope
+    for node in ast.walk(tree):                                                                      # every scope
         if (isinstance(node, ast.ImportFrom) and is_train_module(node.module or "")
                 and any(a.name == "make_env" for a in node.names)):
             offenders.append(f"line {node.lineno}: from {node.module} import make_env")
+        if isinstance(node, ast.ImportFrom) and is_test_module(node.module or ""):
+            offenders.append(f"line {node.lineno}: from {node.module} import ...")
+        if isinstance(node, ast.Import):
+            offenders += [
+                f"line {node.lineno}: import {a.name}" for a in node.names if is_test_module(a.name)
+            ]
         if (isinstance(node, ast.Attribute) and node.attr == "make_env"
                 and ast.unparse(node.value) in wrapper_modules):
             offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
-    assert not offenders, ("env_factory reaches the train package's env wrapper or imports "
-                           f"cs2rl.train at module scope: {offenders}")
+    assert not offenders, ("env_factory reaches the make_env wrapper, imports test code or "
+                           f"imports cs2rl.train at module scope: {offenders}")
 
 
 # ── reward wiring, relocated from tests/test_reward_weight_wiring.py ────────

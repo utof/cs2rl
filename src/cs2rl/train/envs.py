@@ -8,12 +8,7 @@ import time
 import numpy as np
 
 from cs2rl.env.config import EnvConfig
-from cs2rl.env.factory import (
-    build_external_env,
-    build_harness_env,
-    build_smoke_env,
-    build_train_env,
-)
+from cs2rl.env.factory import build_harness_env, build_smoke_env, build_train_env
 from cs2rl.spec.action import ACTION_HEAD_SIZES
 from cs2rl.spec.obs import OBS_DIM
 from cs2rl.train.config import env_config_from_args
@@ -120,16 +115,6 @@ def smoke_test():
 # (dead TRAINING_CONFIG dict removed here — zero readers repo-wide, referenced
 # a nonexistent sim.py, and its gamma=0.99 contradicted build_train_config;
 # finding 21f of docs/2026-07-06-adversarial-review-verification.md)
-
-
-def make_env(team_spirit=None, map_data=None):
-    """Public env wrapper. W3 (#154): a thin delegate to the `external` role.
-
-    The optional defaults stay HERE, on the published signature, rather than
-    moving into `build_external_env` — that builder requires both arguments so a
-    caller that forgets to forward one gets a TypeError instead of a dust2 env.
-    """
-    return build_external_env(team_spirit=team_spirit, map_data=map_data)
 
 
 def build_env_factory(*, shared_ts, map_data, config=None, role="train"):
