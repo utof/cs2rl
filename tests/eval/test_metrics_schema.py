@@ -112,9 +112,15 @@ def test_declared_aggregation_matches_the_emission_shape():
     This is the T1/I1 bug class: a comment says a key is a per-epoch absolute
     while the write goes into the gh#90 minibatch sums and is silently scaled by
     1/minibatches. Structure decides, not prose.
+
+    Every emission is checked, not one per key: a key written at two sites (summed
+    into the gh#90 minibatch sums in one method AND written after the division in
+    another) must agree at both. EMITTED_BY_KEY keeps only the last site's record,
+    which hid exactly that case (gh#92 knock-out K1a).
     """
     bad = []
-    for key, ek in sorted(EMITTED_BY_KEY.items()):
+    for ek in sorted(EMITTED, key=lambda e: (e.key, e.site)):
+        key = ek.key
         s = ms.REGISTRY.get(key)
         if s is None:
             continue                                                                        # completeness test reports this
@@ -130,10 +136,12 @@ def test_declared_aggregation_matches_the_emission_shape_for_families():
 
     Members matter separately: a closed family's members carry their own entries
     (so a reader can be attached to `environment/action_move_0`), and nothing
-    else would notice a member declared differently from its template.
+    else would notice a member declared differently from its template. Every
+    site's family is checked, for the reason the key test gives.
     """
     bad = []
-    for template, fam in sorted(FAMILY_BY_TEMPLATE.items()):
+    for fam in sorted(FAMILIES, key=lambda f: (f.template, f.site)):
+        template = fam.template
         expected = census.SHAPES[fam.shape]
         s = ms.REGISTRY.get(template)
         if s is not None and s.aggregation != expected:
