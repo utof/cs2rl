@@ -1,4 +1,7 @@
-"""scripts/trainer_equivalence.py's case hooks set only knobs the trainer has.
+"""scripts/trainer_equivalence.py's cases name only knobs that exist.
+
+The case entries hold only keys run_case reads, and the case hooks set only knobs the
+trainer has.
 
 WHY: a hook that sets a config key or trainer attribute the trainer no longer has (a
 renamed knob, a typo) is a silent no-op. The case stops reaching the branch it exists
@@ -17,6 +20,8 @@ same masking is why the control must not share a trainer with the cases.
 """
 import importlib
 import json
+
+import pytest
 
 
 def _added_names(trainer, hook):
@@ -58,3 +63,35 @@ def test_every_case_hook_sets_only_existing_config_keys_and_attributes():
                 added[name] = new
     assert added == {}, ("these cases set (config keys, attributes) the trainer does not "
                          f"have, so they no longer reach their branch: {added}")
+
+
+def test_run_case_rejects_a_key_it_does_not_read(monkeypatch):
+    """A misspelt case key fails run_case before any trainer is built.
+
+    WHY: a key run_case does not read is a silent no-op otherwise. `throtled=True` would
+    run the case unthrottled, and it would still compare IDENTICAL on both sides of a
+    refactor. run_case reads each entry through `_CaseSpec`, whose dataclass __init__
+    raises TypeError on an undeclared keyword. This drives run_case itself, so a
+    run_case that went back to reading the dict directly fails here too.
+    """
+    teq = importlib.import_module("scripts.trainer_equivalence")
+    monkeypatch.setitem(teq.CASES, "misspelt", dict(build={}, epochs=0, throtled=True))
+    with pytest.raises(TypeError, match="throtled"):
+        teq.run_case("misspelt")
+
+
+def test_every_case_entry_holds_only_keys_run_case_reads():
+    """Each CASES entry builds a `_CaseSpec`: no entry carries a key run_case ignores.
+
+    Checked here, in the default tier and without building a trainer, rather than only
+    when the oracle next runs that case.
+    """
+    teq = importlib.import_module("scripts.trainer_equivalence")
+    assert teq.CASES, "no cases: the check below would pass on nothing"
+    rejected = {}
+    for name, case in teq.CASES.items():
+        try:
+            teq._CaseSpec(**case)
+        except TypeError as e:
+            rejected[name] = str(e)
+    assert rejected == {}, f"these case entries hold keys run_case does not read: {rejected}"

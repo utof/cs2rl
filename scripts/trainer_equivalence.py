@@ -394,7 +394,8 @@ def _collapse_watch(t, epoch):
 
 _WS_GRACE = dict(warmstart_entropy=True, warmstart_alpha_ceiling=0.0, warmstart_grace_steps=10**12)
 _TAG = dict(tag_diagnostic=True, tag_every=1, target_kl=None)
-# name -> build kwargs, epoch count and optional hook/flags; read by run_case.
+# name -> build kwargs, epoch count and optional hook/flags; run_case reads each entry
+# through _CaseSpec, so a key it does not read is a TypeError, not a no-op.
 CASES: dict[str, dict[str, Any]] = {
     "default":
     dict(build={}, epochs=2),
@@ -534,26 +535,42 @@ def _warnings(text):
     return [ln for ln in text.splitlines() if ln.startswith(("[Train]", "[hybrid_aim"))]
 
 
+@dataclasses.dataclass(frozen=True)
+class _CaseSpec:
+    """One CASES entry, as run_case reads it.
+
+    WHY a dataclass: its generated __init__ raises TypeError on a keyword it does not
+    declare, so a misspelt key (``throtled=True``) fails the run instead of being
+    ignored while the case still compares IDENTICAL. Every field is read by run_case.
+    """
+    build: dict[str, Any]
+    epochs: int
+    hook: Any = None
+    loss_patch: str | None = None
+    seed_pool: bool = False
+    throttled: bool = False
+
+
 def run_case(name, seed=0):
     """Build, run the case's epochs; returns {"construction": ..., "epochs": [...]}."""
-    spec = CASES[name]
-    restore = _patch_loss(spec["loss_patch"]) if spec.get("loss_patch") else None
+    spec = _CaseSpec(**CASES[name])
+    restore = _patch_loss(spec.loss_patch) if spec.loss_patch else None
     try:
-        trainer, cleanup = build(seed, **spec["build"])
+        trainer, cleanup = build(seed, **spec.build)
         try:
             built = construction(trainer)
-            hook = spec.get("hook") or (lambda t, e, p: None)
+            hook = spec.hook or (lambda t, e, p: None)
             hook(trainer, -1, "built")
-            if spec.get("seed_pool"):
+            if spec.seed_pool:
                 _seed_pool(trainer)
             epochs = []
-            for epoch in range(spec["epochs"]):
+            for epoch in range(spec.epochs):
                 buf = io.StringIO()
                 with contextlib.redirect_stdout(buf):
                     stats = trainer.evaluate()
                     stats_copy = {k: list(v) for k, v in stats.items()}
                     hook(trainer, epoch, "after_eval")
-                    trainer.last_log_time = 1e18 if spec.get("throttled") else 0.0
+                    trainer.last_log_time = 1e18 if spec.throttled else 0.0
                     logs = trainer.train()
                 comp = snapshot(trainer, stats_copy)
                 comp["train_return"] = digest(_filter_logs(logs))
