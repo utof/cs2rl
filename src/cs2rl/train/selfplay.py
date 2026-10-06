@@ -31,13 +31,14 @@ def self_play_used_past_metric(trainer) -> float:
     WHY: the persist filter on the outer logs dict drops non-floats, so a
       bool never reaches metrics.jsonl. Callers write the returned float
       onto the outer dict next to self_play/pool_size — never under
-      losses/. Missing attr (no-selfplay / unpatched path) is 0.0, not
-      an error.
+      losses/. The trainer declares the flag False at construction
+      (`_init_selfplay`), so it is always there; no getattr default, which
+      would turn a renamed attribute into a silent 0.0.
     PITFALL: do not log self_play/opponent_id. `load_past_policy` keeps
       the chosen path as a local; a string would also be dropped by the
       persist filter, and inventing a pool schema is out of scope.
     """
-    return float(getattr(trainer, "_selfplay_used_past", False))
+    return float(trainer._selfplay_used_past)
 
 
 class SelfPlayManager:

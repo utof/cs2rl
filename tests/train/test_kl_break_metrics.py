@@ -126,7 +126,9 @@ def test_self_play_used_past_metric():
     # Persist filter drops non-floats; a raw bool would still pass `== 1.0`.
     used = self_play_used_past_metric(_T())
     unused = self_play_used_past_metric(_F())
-    missing = self_play_used_past_metric(_U())
     assert isinstance(used, float) and used == 1.0
     assert isinstance(unused, float) and unused == 0.0
-    assert isinstance(missing, float) and missing == 0.0
+    # The trainer declares the flag at construction, so a missing one is a rename or a
+    # stub, never "no self-play": it raises rather than reading as a silent 0.0.
+    with pytest.raises(AttributeError, match="_selfplay_used_past"):
+        self_play_used_past_metric(_U())

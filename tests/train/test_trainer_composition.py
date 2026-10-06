@@ -7,7 +7,9 @@ scanning includes inactive branches, so an undeclared runtime attribute or
 an unexecuted declaration turns the test red.
 
 The independent anchor reads every post-construction Cs2PuffeRL method and the
-checkpoint helpers to check that required attributes exist. Method identity tests
+checkpoint helpers to check that required attributes exist. It cannot require a name
+those bodies also overwrite, so the three such names the constructor declares are
+pinned by name (DECLARED_AND_OVERWRITTEN). Method identity tests
 pin train, evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings,
 and one real rollout checks that evaluate() still feeds every info to the collector.
 """
@@ -35,6 +37,10 @@ CHECKPOINT_HELPERS = (
 # -_warmstart_phase (now also stored by an anchored method, _prepare_entropy_update;
 # the _WARMSTART_ATTRS check below still requires it on the instance).
 EXPECTED_ANCHOR_COUNT = 24
+# Read AND overwritten by anchored bodies, so derive_anchor() (reads minus stores) never
+# requires them. They were created late and read through getattr defaults until gh#92
+# part 3 declared them in the constructor; this list pins those declarations.
+DECLARED_AND_OVERWRITTEN = ("_last_nan_warn_t", "_selfplay_used_past", "_tag_metrics")
 
 
 def _bindings_in_scope(scope, name):
@@ -157,14 +163,20 @@ def anchor_functions():
     return methods + CHECKPOINT_HELPERS
 
 
-def derive_anchor():
-    """Names read and never assigned across anchor_functions() (class attrs filtered later)."""
+def _anchor_reads_and_stores():
+    """({read}, {stored}) trainer attribute names across anchor_functions()."""
     reads, stores = set(), set()
     for rel, qualname in anchor_functions():
         fn = find_def(ast.parse((PACKAGE / rel).read_text()), qualname)
         r, s = _attribute_reads_and_stores(fn)
         reads |= r
         stores |= s
+    return reads, stores
+
+
+def derive_anchor():
+    """Names read and never assigned across anchor_functions() (class attrs filtered later)."""
+    reads, stores = _anchor_reads_and_stores()
     return reads - stores
 
 
@@ -437,6 +449,27 @@ def test_every_attribute_the_bodies_read_is_declared(composed):
     assert not absent, f"read by a moved body but never set by __init__: {sorted(absent)}"
     warm_absent = set(_WARMSTART_ATTRS) - set(vars(trainer))
     assert not warm_absent, f"_WARMSTART_ATTRS not on the instance: {sorted(warm_absent)}"
+
+
+def test_state_the_bodies_read_and_overwrite_is_declared():
+    """Every DECLARED_AND_OVERWRITTEN name is constructor state, and is still read and
+    overwritten by an anchored body.
+
+    The anchor subtracts every name an anchored body stores, so deleting one of these
+    declarations would leave the anchor test green while the body's read raises at run
+    time. The first check keeps the list itself honest: a name no anchored body both
+    reads and stores any more is stale. Static, so the default tier runs it;
+    test_constructed_surface_equals_declared_constructor_surface ties the declared
+    surface to the instance.
+    """
+    names = set(DECLARED_AND_OVERWRITTEN)
+    reads, stores = _anchor_reads_and_stores()
+    stale = names - (reads & stores)
+    assert not stale, f"no anchored body reads and stores {sorted(stale)}; drop them here"
+    undeclared = names - derive_constructor_surface()
+    assert not undeclared, (
+        f"{sorted(undeclared)} are read by a post-construction body but no longer declared "
+        "by the constructor")
 
 
 def test_save_checkpoint_is_the_class_method(composed):

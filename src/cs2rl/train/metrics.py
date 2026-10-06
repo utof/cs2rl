@@ -477,6 +477,6 @@ def _inject_tag_metrics(trainer, logs):
     DROPS the measurement — injecting it next epoch would mislabel its
     step/epoch (spec §4.2 drop semantics).
     """
-    pending = getattr(trainer, "_tag_metrics", None)
+    pending = trainer._tag_metrics
     if pending and isinstance(logs, dict):
         logs.update(pending)

@@ -40,7 +40,7 @@ def _run_once(trainer):
 
 @pytest.mark.training
 def test_flag_off_is_inert(monkeypatch):
-    """Spec §5 test 1: flag off ⇒ helper never called, no _tag_metrics."""
+    """Spec §5 test 1: flag off ⇒ helper never called, nothing pending in _tag_metrics."""
     # PATCH THE MODULE THE CALL SITE RESOLVES THROUGH, NOT the one that defines
     # the function: tag_grad_cossim is DEFINED in cs2rl.train.update (formerly
     # train_update.py), but its call site is Cs2PuffeRL._record_tag in
@@ -58,7 +58,7 @@ def test_flag_off_is_inert(monkeypatch):
     try:
         _run_once(trainer)
         assert calls == [], "tag_grad_cossim ran with the flag off"
-        assert getattr(trainer, "_tag_metrics", None) in (None, {})
+        assert trainer._tag_metrics is None
     finally:
         cleanup()
 
@@ -123,7 +123,9 @@ def test_inject_tag_metrics_lifecycle():
     assert logs["tag/cossim_cross/trunk/mb0"] == 0.4
     assert math.isnan(logs["tag/cossim_within_ct/trunk/mb0"])
 
-    _inject_tag_metrics(SimpleNamespace(), {})         # no stash: no-op
+    # The trainer declares _tag_metrics at construction: no getattr default to hide a rename.
+    with pytest.raises(AttributeError, match="_tag_metrics"):
+        _inject_tag_metrics(SimpleNamespace(), {})
     _inject_tag_metrics(SimpleNamespace(_tag_metrics=None), {})
     _inject_tag_metrics(trainer, None)                 # throttled epoch: no crash
 

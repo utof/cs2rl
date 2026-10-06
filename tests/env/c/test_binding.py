@@ -290,8 +290,9 @@ def test_continuous_aim_nan_guard():
         value.sum().backward(retain_graph=True)
         assert any(p.grad is not None for p in policy.parameters())
 
-        # Any: a stub stands in for the Cs2PuffeRL `self` the method reads.
-        trainer: Any = SimpleNamespace(optimizer=optimizer)
+        # Any: a stub stands in for the Cs2PuffeRL `self` the method reads; 0.0 is the
+        # warning time Cs2PuffeRL's constructor declares.
+        trainer: Any = SimpleNamespace(optimizer=optimizer, _last_nan_warn_t=0.0)
         captured = io.StringIO()
         with contextlib.redirect_stdout(captured):
             Cs2PuffeRL._skip_nonfinite_step(trainer, loss)

@@ -185,7 +185,10 @@ def snapshot(trainer, stats_after_eval) -> dict:
         if name not in EXCLUDED:
             comp[f"attr:{name}"] = digest(val)
     comp["attr_names"] = digest(sorted(vars(trainer)))
-    comp["has_last_nan_warn_t"] = repr("_last_nan_warn_t" in vars(trainer))
+    # Whether the NaN guard has warned (the time itself is wall clock, so EXCLUDED). The
+    # constructor declares 0.0; before gh#92 part 3 the attribute appeared at the first
+    # warning, so this value equals that era's `in vars(trainer)` and old runs compare.
+    comp["has_last_nan_warn_t"] = repr(trainer._last_nan_warn_t > 0.0)
     comp["policy"] = digest(dict(trainer.uncompiled_policy.state_dict()))
     comp["optimizer"] = digest(_optim_canon(trainer.optimizer))
     comp["alpha_optimizer"] = digest(_optim_canon(trainer._alpha_optimizer))

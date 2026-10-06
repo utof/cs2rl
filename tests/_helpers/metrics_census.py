@@ -217,7 +217,7 @@ ISLAND_MERGE_SOURCES = (
         "`eval_output_keys()` and pinned by "
         "test_eval_keys_match_the_evaluate_output_contract."),
     IslandMerge(
-        "_inject_tag_metrics", "getattr(trainer, '_tag_metrics', None)",
+        "_inject_tag_metrics", "trainer._tag_metrics",
         "A re-read of the island's OWN `trainer._tag_metrics` container: every key in it "
         "was written under Cs2PuffeRL._record_tag / tag_grad_cossim, both of which are "
         "EMITTER_SITES entries, so the merge adds no key the census has not already seen."),

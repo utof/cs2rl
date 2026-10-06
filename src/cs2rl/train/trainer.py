@@ -237,10 +237,12 @@ class Cs2PuffeRL(PuffeRL):
 
     PITFALLS
     - State a phase method reads is created here, before the first
-      evaluate()/train()/save_checkpoint() call. Three attributes are the exception:
-      created later and read through getattr fallbacks, ``_selfplay_used_past`` (set by
-      evaluate), ``_tag_metrics`` (reset by the epoch loop, filled by TAG minibatches)
-      and ``_last_nan_warn_t`` (set by the first NaN warning).
+      evaluate()/train()/save_checkpoint() call, and read without a getattr default.
+      That includes the three a phase method also overwrites: ``_selfplay_used_past``
+      (False here, set by every evaluate), ``_tag_metrics`` (None here, reset by the
+      epoch loop, filled by TAG minibatches) and ``_last_nan_warn_t`` (0.0 here, set by
+      each NaN warning). The body-read anchor in tests/train/test_trainer_composition.py
+      cannot see a name a body also stores, so those three are pinned there by name.
     - ``_timing`` is created here because the epoch loop (cs2rl.train.loop._run_epochs)
       assigns INTO it and the [Timing] print reads it.
     - After this constructor returns, build_trainer pins the shared-memory owners
@@ -300,6 +302,11 @@ class Cs2PuffeRL(PuffeRL):
             # assigns INTO it and the [Timing] print reads it, so it has to exist
             # before the first epoch.
             self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
+            # TAG results pending injection into the epoch's row: _record_tag fills it,
+            # the epoch loop resets it, _inject_tag_metrics reads it. None: nothing pending.
+            self._tag_metrics = None
+            # time.time() of the last NaN-guard warning; 0.0 lets the first one print.
+            self._last_nan_warn_t = 0.0
         except BaseException:
             # Early base-constructor failures may precede thread creation.
             utilization = getattr(self, "utilization", None)
@@ -544,7 +551,8 @@ class Cs2PuffeRL(PuffeRL):
         """Self-play state for evaluate(). Called from __init__ after ``_init_hybrid_aim``
         and before ``_timing``.
 
-        Stores the manager, the past policy's own LSTM state (the same dict structure as
+        Stores the manager, the ``_selfplay_used_past`` flag (False until the first
+        evaluate), the past policy's own LSTM state (the same dict structure as
         ``self.lstm_h``: keyed by agent-batch start ``i*n``, one ``(agents_per_batch,
         hidden_size)`` tensor per chunk, so ``evaluate`` can index it by ``env_id.start``),
         and the reward-channel statistics, event flags and scratch buffer.
@@ -563,6 +571,8 @@ class Cs2PuffeRL(PuffeRL):
         ``save_checkpoint`` reads the stored manager when writing the sidecar.
         """
         self._self_play_mgr = self_play_mgr
+        # Whether this epoch's rollout drew a past policy; every evaluate() overwrites it.
+        self._selfplay_used_past = False
         self._past_lstm_h = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
         self._past_lstm_c = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
         # Batch 1 reward processing state (per-channel Welford, per-segment event
@@ -1341,7 +1351,7 @@ class Cs2PuffeRL(PuffeRL):
         the sums (it ran; it only does not step the policy).
         """
         now = time.time()
-        if now - getattr(self, "_last_nan_warn_t", 0.0) > 60.0:
+        if now - self._last_nan_warn_t > 60.0:
             print(f"[hybrid_aim NaN guard] non-finite loss "
                   f"({float(loss.detach())}); skipping optimizer step")
             self._last_nan_warn_t = now
@@ -1386,15 +1396,14 @@ class Cs2PuffeRL(PuffeRL):
             aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
             aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
         )
-        tag_metrics = getattr(self, "_tag_metrics", None)
+        tag_metrics = self._tag_metrics
         if tag_metrics is None:
             tag_metrics = {}
         self._tag_metrics = tag_metrics
         self._tag_metrics.update(tag)
         if not is_mb0:
             self._tag_metrics["tag/mbL_index"] = float(mb)
-        self._tag_metrics["tag/selfplay_active"] = float(getattr(self, "_selfplay_used_past",
-                                                                 False))
+        self._tag_metrics["tag/selfplay_active"] = float(self._selfplay_used_past)
 
     def _step_policy(self, mb: int, loss):
         """Backward the policy loss; clip and step every ``accumulate_minibatches``.
