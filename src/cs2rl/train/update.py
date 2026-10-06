@@ -26,7 +26,12 @@ load-bearing). Every torch, pufferlib and cs2rl.train.entropy import below is
 function-local ON PURPOSE.
 """
 
+from typing import TYPE_CHECKING, Literal, overload
+
 from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
+
+if TYPE_CHECKING:                      # annotations only; never at runtime
+    import torch
 
 # ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
 # WHY these are free functions and not methods on the trainer: a unit test can
@@ -138,6 +143,53 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
         warmup_high_frac=config.get("entropy_target_warmup_frac", 0.5),
         base_frac=config.get("entropy_target_base_frac", 0.35),
     )
+
+
+# The return length follows return_pg_rows, so a type checker needs one overload per
+# value to check the callers' 7- and 8-name unpacks. return_pg_rows is keyword-only
+# in the True overload (a non-default parameter cannot follow defaulted ones); no
+# caller passes it positionally. Typing only: the def below is the one that runs.
+@overload
+def _hybrid_ppo_loss(
+    policy,
+    mb_obs,
+    mb_actions,
+    mb_cont_actions,
+    mb_old_logp_d,
+    mb_old_logp_c,
+    mb_advantages,
+    clip_coef,
+    state,
+    mb_prio=...,
+    mb_masks=...,
+    return_pg_rows: Literal[False] = ...,
+    mb_part=...,
+    aim_dim_mask=...,
+    aim_entropy_bonus=...
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]":
+    ...
+
+
+@overload
+def _hybrid_ppo_loss(
+    policy,
+    mb_obs,
+    mb_actions,
+    mb_cont_actions,
+    mb_old_logp_d,
+    mb_old_logp_c,
+    mb_advantages,
+    clip_coef,
+    state,
+    mb_prio=...,
+    mb_masks=...,
+    *,
+    return_pg_rows: Literal[True],
+    mb_part=...,
+    aim_dim_mask=...,
+    aim_entropy_bonus=...
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor], torch.Tensor]":
+    ...
 
 
 def _hybrid_ppo_loss(policy,
