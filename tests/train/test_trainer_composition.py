@@ -140,17 +140,20 @@ def _attribute_reads_and_stores(fn):
 def anchor_functions():
     """(file, qualname) of every body whose self/trainer reads need constructor state.
 
-    Every def in the Cs2PuffeRL class body except ``__init__`` and the ``_init_*``
-    methods it calls (those DECLARE the state; see derive_constructor_surface), plus
-    CHECKPOINT_HELPERS. Derived from the class body, so a new method is anchored when
-    it is added: the fixed list this replaced named train/evaluate/save_checkpoint and
-    never read ``_prepare_entropy_update`` (gh#92).
+    Every def in the Cs2PuffeRL class body except constructor_methods() (``__init__``
+    and the ``_init_*`` methods it calls: they DECLARE the state), plus
+    CHECKPOINT_HELPERS. The exclusion is by role, not by name prefix: an ``_init_*``
+    method ``__init__`` does not call is anchored, and
+    test_constructor_methods_run_only_during_construction fails if anything calls an
+    excluded method after construction. Derived from the class body, so a new method
+    is anchored when it is added.
     """
     tree = ast.parse((PACKAGE / "train" / "trainer.py").read_text())
     cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
-    methods = tuple(("train/trainer.py", f"Cs2PuffeRL.{n.name}") for n in cls.body
-                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and n.name != "__init__" and not n.name.startswith("_init_"))
+    skip = constructor_methods()
+    methods = tuple(
+        ("train/trainer.py", f"Cs2PuffeRL.{n.name}") for n in cls.body
+        if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef)) and n.name not in skip)
     return methods + CHECKPOINT_HELPERS
 
 
@@ -296,11 +299,9 @@ def _constructor_scope(fn, receiver):
     return stores, init_calls
 
 
-def derive_constructor_surface():
-    """All names the subclass declares during construction, including inactive branches.
-
-    The constructor and called initializers own every added runtime field.
-    """
+def _constructor_walk():
+    """(declared names, constructor methods): ``__init__`` and the ``_init_*`` calls in
+    each scanned method's own scope, followed transitively (see _constructor_scope)."""
     trainer_tree = ast.parse((PACKAGE / "train" / "trainer.py").read_text())
     cls = next(n for n in trainer_tree.body
                if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
@@ -316,7 +317,96 @@ def derive_constructor_surface():
         stores, init_calls = _constructor_scope(methods[method_name], "self")
         names |= stores
         pending.extend(init_calls - scanned)
-    return names
+    return names, scanned
+
+
+def derive_constructor_surface():
+    """All names the subclass declares during construction, including inactive branches.
+
+    The constructor and called initializers own every added runtime field.
+    """
+    return _constructor_walk()[0]
+
+
+def constructor_methods():
+    """Names of the Cs2PuffeRL methods that run during construction (anchor_functions()
+    skips them): ``__init__`` and the ``_init_*`` methods it calls, transitively."""
+    return _constructor_walk()[1]
+
+
+def _late_constructor_method_references():
+    """(file, line, name) of each reference to a constructor method that is not a
+    ``self.<name>(...)`` call in the own scope of a constructor method.
+
+    Scans every ``*.py`` under src/cs2rl and scripts/. A call inside a nested def,
+    lambda or class runs later, so it counts; so does a bare reference such as
+    ``callback = self._init_x``, since the bound method can be called at any time.
+    ``__init__`` itself is left out: every class has one.
+    """
+    ctor = constructor_methods()
+    names = ctor - {"__init__"}
+    paths = sorted(PACKAGE.rglob("*.py")) + sorted((REPO_ROOT / "scripts").rglob("*.py"))
+    late = []
+    for path in paths:
+        tree = ast.parse(path.read_text())
+        allowed = set()
+        if path == PACKAGE / "train" / "trainer.py":
+            cls = next(n for n in tree.body
+                       if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
+            for fn in cls.body:
+                if isinstance(fn, ast.FunctionDef) and fn.name in ctor:
+                    allowed |= _own_scope_self_call_ids(fn, names)
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Attribute) and node.attr in names and id(node) not in allowed:
+                late.append((path.relative_to(REPO_ROOT).as_posix(), node.lineno, node.attr))
+    return late
+
+
+def _own_scope_self_call_ids(fn, names):
+    """ids of the ``self.<name>`` callee nodes of calls in ``fn``'s own scope."""
+    ids = set()
+
+    class Scan(ast.NodeVisitor):
+
+        def visit_FunctionDef(self, node):
+            return
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+        visit_ClassDef = visit_FunctionDef
+        visit_Lambda = visit_FunctionDef
+
+        def visit_Call(self, node):
+            func = node.func
+            if (isinstance(func, ast.Attribute) and func.attr in names
+                    and isinstance(func.value, ast.Name) and func.value.id == "self"):
+                ids.add(id(func))
+            self.generic_visit(node)
+
+    scan = Scan()
+    for statement in fn.body:
+        scan.visit(statement)
+    return ids
+
+
+def test_constructor_methods_run_only_during_construction():
+    """anchor_functions() skips the constructor methods because their stores DECLARE the
+    state; their reads are not checked. That is sound only while they run during
+    construction alone, i.e. while their only callers are own-scope calls from other
+    constructor methods. A later call (from train(), a deferred callback, or another
+    module) would run their reads against a constructed trainer unanchored.
+    """
+    ctor = constructor_methods()
+    # Known count: __init__ calls _init_return_norm, _init_hybrid_aim and _init_selfplay.
+    # A walk that found nothing would make the scan below vacuously green.
+    expected = {"__init__", "_init_return_norm", "_init_hybrid_aim", "_init_selfplay"}
+    assert ctor == expected, (
+        f"constructor methods are now {sorted(ctor)}; check the walk still finds the "
+        "initializers, then update this set with the change that moved them")
+    late = _late_constructor_method_references()
+    assert not late, (
+        f"constructor methods referenced outside construction: {late}. anchor_functions() "
+        "skips them, so their reads would go unchecked; do the later work in a method "
+        "__init__ does not call")
 
 
 def test_constructed_surface_equals_declared_constructor_surface(composed):
