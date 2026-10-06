@@ -316,9 +316,9 @@ def test_event_mask_detects_injected_bomb_planted():
 
 
 # ── Task 8: prio_probs event-biased oversampling ───────────────────────────
-# These tests cover the prio_probs boosting added to the replacement train()
-# body (Cs2PuffeRL.train in src/cs2rl/train/trainer.py since gh#168 W2a — the harness
-# trainer is a Cs2PuffeRL since gh#168 W1.5).
+# These tests cover the event boost of the replay probabilities in
+# Cs2PuffeRL._segment_probs (src/cs2rl/train/trainer.py), which train() reaches
+# once per minibatch (the harness trainer is a Cs2PuffeRL since gh#168 W1.5).
 # The plan target: segments
 # whose _event_mask is True get sampled at least 25% of the time when
 # at least one event segment exists.
@@ -360,7 +360,7 @@ def _capture_multinomial_calls():
 
 @pytest.mark.training
 def test_prio_probs_event_oversample():
-    """Task 8: with ~50% of segments marked as events and OVERSAMPLE_FACTOR=4
+    """Task 8: with ~50% of segments marked as events and EVENT_OVERSAMPLE_FACTOR=4
     applied to prio_probs, the sampled minibatch must hit event segments well
     above the raw event-segment fraction.
 
@@ -379,8 +379,8 @@ def test_prio_probs_event_oversample():
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        # The prio_probs boost lives in the return-norm train() body, which
-        # the harness trainer carries by construction (gh#168 W1.5).
+        # The boost lives in Cs2PuffeRL._segment_probs, which train() calls
+        # once per minibatch.
         trainer.evaluate()             # populate the rollout buffer
 
         # Force half of segments to be "event" segments. Segment count
@@ -409,7 +409,7 @@ def test_prio_probs_event_oversample():
         # which fails immediately if the boost is missing (sampled would
         # then track the raw rate ~0.5 instead of ~0.8).
         assert hits >= 0.25, (f"Task 8: event-segment sampling fraction = {hits:.3f}, "
-                              f"expected >= 0.25 with OVERSAMPLE_FACTOR=4 and 50% event mask")
+                              f"expected >= 0.25 with EVENT_OVERSAMPLE_FACTOR=4 and 50% event mask")
         assert hits >= raw_event_fraction + 0.2, (
             f"Task 8: sampled rate {hits:.3f} did not exceed raw event "
             f"fraction {raw_event_fraction:.3f} by 20pp — boost branch likely "
@@ -477,7 +477,8 @@ def test_event_oversample_fraction_exposed():
 
 # ── Task 9: target_entropy schedule + log_alpha reset + Batch 1 metrics ────
 # These tests cover three sub-features of the return-norm machinery
-# (Cs2PuffeRL._init_return_norm + Cs2PuffeRL.train, src/cs2rl/train/trainer.py, gh#168 W2a):
+# (Cs2PuffeRL._init_return_norm, _prepare_entropy_update and _finish_update in
+# src/cs2rl/train/trainer.py):
 #   (A) target_entropy schedule — config-driven linear ramp (defaults
 #       0.5→0.35 * max_entropy) over entropy_target_warmup_steps; constant after.
 #   (B) log_alpha reset — first train() after construction sets log_alpha to

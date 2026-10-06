@@ -19,7 +19,7 @@ lines and their order are pinned by tests/train/test_kl_break_metrics.py inside
 ``inspect.getsource(cs2rl.train.loop)``, and they guard the key cs2rl/experiment/gate.py
 reads; keeping the call sites beside the pool bookkeeping is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
-single call site lives inside ``cs2rl.train.trainer.Cs2PuffeRL.train`` (gh#168 W2a).
+single call site is ``cs2rl.train.trainer.Cs2PuffeRL._log_and_checkpoint``.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
@@ -469,8 +469,9 @@ def _inject_tag_metrics(trainer, logs):
     documented in tag_grad_cossim) and check() raises RuntimeError on any
     NaN in the metrics dict; injecting earlier aborts the run with exit
     code 3 on the first degenerate subset. Also never route these through
-    the `losses` dict: its keys are divided by _mb_run (gh#90), prefixed
-    losses/, and lag environment/* by one epoch.
+    the `losses` dict: its minibatch sums are divided by the executed-minibatch
+    count (gh#90), its keys are prefixed losses/, and they lag environment/*
+    by one epoch.
 
     logs=None (throttled epoch) is a no-op: the top-of-loop reset then
     DROPS the measurement — injecting it next epoch would mislabel its

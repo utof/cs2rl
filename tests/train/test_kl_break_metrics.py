@@ -9,7 +9,8 @@ Additionally the flattened minibatch loop (all update_epochs collapsed into
 one ``range``) aborted passes over data never visited — harsher than standard
 PPO, which finishes the current epoch before stopping.
 
-Contract pinned here (implemented in Cs2PuffeRL.train, src/cs2rl/trainer.py):
+Contract pinned here (implemented by Cs2PuffeRL.train and its phase methods,
+src/cs2rl/train/trainer.py):
   1. losses/* are normalized by the EXECUTED minibatch count, not the planned
      total — so a truncated update reports true per-minibatch means.
   2. ``losses["minibatches_run"]`` reports the executed count.
@@ -17,7 +18,7 @@ Contract pinned here (implemented in Cs2PuffeRL.train, src/cs2rl/trainer.py):
      finishes the current pass (total_minibatches // update_epochs minibatches)
      before stopping, and can never truncate epoch 0 mid-pass.
 
-Uses the minimal harness (src/cs2rl/train_test_harness.py), whose trainer is
+Uses the minimal harness (tests/_helpers/trainer_harness.py), whose trainer is
 Cs2PuffeRL (gh#168 W1.5) whose train() is the return-norm body (a method since
 gh#168 W2a), same pattern as tests/train/test_train_env.py. One harness build serves all scenarios
 (builds cost ~5s each on the VM).
@@ -99,8 +100,8 @@ def test_clipfrac_halves_and_event_fraction_are_logged():
         assert 0.0 <= losses["event_oversample_fraction"] <= 1.0
         # This harness sets include_step_stats_in_info=True, so the fraction
         # is NOT the production #100-closed zero. Do not assert == 0.0 here.
-        # Exact equality pins the persist AFTER the `_mb_run` divisor: a
-        # pre-divisor write would be divided by executed minibatches and
+        # Exact equality pins the write AFTER the gh#90 division: a write into
+        # the minibatch sums would be divided by executed minibatches and
         # no longer match the per-call Task 8 scalar.
         assert isinstance(losses["event_oversample_fraction"], float)
         assert isinstance(trainer._event_oversample_fraction, float)

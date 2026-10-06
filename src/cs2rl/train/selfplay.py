@@ -27,7 +27,7 @@ def self_play_used_past_metric(trainer) -> float:
 
     WHAT: expose whether this epoch's evaluate() rollout used a past-policy
       opponent (`trainer._selfplay_used_past`, set in
-      `cs2rl.train.trainer.Cs2PuffeRL.evaluate`).
+      `cs2rl.train.trainer.Cs2PuffeRL._draw_past_policy`).
     WHY: the persist filter on the outer logs dict drops non-floats, so a
       bool never reaches metrics.jsonl. Callers write the returned float
       onto the outer dict next to self_play/pool_size — never under

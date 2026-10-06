@@ -41,13 +41,12 @@ def _run_once(trainer):
 @pytest.mark.training
 def test_flag_off_is_inert(monkeypatch):
     """Spec §5 test 1: flag off ⇒ helper never called, no _tag_metrics."""
-    # PATCH THE MODULE THE CALL SITE RESOLVES THROUGH, NOT `train` or
-    # `train_update`: tag_grad_cossim is DEFINED in train_update.py (post-rung1a
-    # refactor, 2026-08-31), but since gh#168 W2a its call site is inside
-    # Cs2PuffeRL.train in src/cs2rl/trainer.py, which imports the name at module level
-    # and resolves it through trainer.py's globals. `train` and `train_update`
-    # both still hold the real function, so a patch on either is unreachable and
-    # this test would pass while asserting nothing — the positive control below
+    # PATCH THE MODULE THE CALL SITE RESOLVES THROUGH, NOT the one that defines
+    # the function: tag_grad_cossim is DEFINED in cs2rl.train.update (formerly
+    # train_update.py), but its call site is Cs2PuffeRL._record_tag in
+    # src/cs2rl/train/trainer.py, which imports the name at module level and
+    # resolves it through trainer.py's globals. A patch on the defining module is
+    # unreachable and this test would pass while asserting nothing — the positive control below
     # (test_monkeypatch_target_actually_reaches_the_hook) goes red if the patch
     # point drifts again.
     from cs2rl.train import trainer as tag_mod
@@ -75,8 +74,8 @@ def test_monkeypatch_target_actually_reaches_the_hook(monkeypatch):
     which is green whether or not the patch can reach the call site at all. A
     patch aimed at the wrong module is therefore indistinguishable from a
     correctly-inert hook, and the test silently stops testing anything. That
-    is not hypothetical: the call site inside `Cs2PuffeRL.train` (src/cs2rl/trainer.py,
-    gh#168 W2a) resolves `tag_grad_cossim` through `trainer`'s globals, so
+    is not hypothetical: the call site in `Cs2PuffeRL._record_tag`
+    (src/cs2rl/train/trainer.py) resolves `tag_grad_cossim` through `trainer`'s globals, so
     patching `train` (its pre-2026-08-31 home, a re-exporting shim) or
     `train_update` (where it is defined, and where the call site lived until
     W2a) is unreachable — measured, both directions, at each move. This test

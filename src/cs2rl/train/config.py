@@ -288,7 +288,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
     # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
     # handed to it is scaled by (rows per env) / (participating rows per env).
-    # Both numbers are recorded: done_training in Cs2PuffeRL.train
+    # Both numbers are recorded: done_training in Cs2PuffeRL._log_and_checkpoint
     # compares global_step (participating units) against
     # participating_timesteps, and the epoch clause catches the floor-division
     # slack.
@@ -419,7 +419,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
                                                                        # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
                                                                        # ≈ 2.87 nats still allows broad exploration but permits commitment.
                                                                        # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                                       # Cs2PuffeRL.train (self._entropy_floor) clamps α ≥ 0.5 when H < 0.3·max;
+                                                                       # Cs2PuffeRL._entropy_terms (self._entropy_floor) clamps α ≥ 0.5 when H < 0.3·max;
                                                                        # a base target below the floor would make the two mechanisms fight.
         "entropy_target_warmup_frac": 0.5,
         "entropy_target_base_frac": 0.35,
