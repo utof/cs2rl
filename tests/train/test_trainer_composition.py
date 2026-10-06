@@ -8,10 +8,13 @@ an unexecuted declaration turns the test red.
 
 The independent anchor reads every post-construction Cs2PuffeRL method and the
 checkpoint helpers to check that required attributes exist. It cannot require a name
-those bodies also overwrite, so the three such names the constructor declares are
-pinned by name (DECLARED_AND_OVERWRITTEN). Method identity tests
-pin train, evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings,
-and one real rollout checks that evaluate() still feeds every info to the collector.
+those bodies also overwrite. Of the declared names that are, DECLARED_AND_OVERWRITTEN
+pins three by name, those in _WARMSTART_ATTRS are required on the instance, and the
+rest are left to behaviour tests. Those bodies may not read trainer state through a
+getattr default or hasattr, which would hide a late attribute from the anchor. Method
+identity tests pin train, evaluate and save_checkpoint to Cs2PuffeRL, with no instance
+bindings, and one real rollout checks that evaluate() still feeds every info to the
+collector.
 """
 from __future__ import annotations
 
@@ -38,8 +41,7 @@ CHECKPOINT_HELPERS = (
 # the _WARMSTART_ATTRS check below still requires it on the instance).
 EXPECTED_ANCHOR_COUNT = 24
 # Read AND overwritten by anchored bodies, so derive_anchor() (reads minus stores) never
-# requires them. They were created late and read through getattr defaults until gh#92
-# part 3 declared them in the constructor; this list pins those declarations.
+# requires them; this list pins their constructor declarations by name.
 DECLARED_AND_OVERWRITTEN = ("_last_nan_warn_t", "_selfplay_used_past", "_tag_metrics")
 
 
@@ -120,27 +122,34 @@ def find_def(module, qualname):
 
 
 def _attribute_reads_and_stores(fn):
-    """({read}, {stored}) attribute names accessed on the trainer instance.
+    """({read}, {stored}, {fallback}) attribute names accessed on the trainer instance.
 
     The receiver is ``self`` in trainer methods or ``trainer`` in checkpoint
     helpers; both names refer to the trainer instance.
     Reads: ``recv.<name>`` in Load context, and ``getattr(recv, "<name>")`` with exactly two
-    arguments (a 3-argument getattr has a default and so does not require the attribute).
-    Stores: ``recv.<name>`` in Store/Del context. Reads inside nested defs count too: a
-    nested helper moves with its body.
+    arguments. Fallbacks: ``getattr(recv, <key>, default)`` and ``hasattr(recv, <key>)``; they
+    tolerate a missing attribute, so they are not reads (a non-literal key is kept as its
+    source text). Stores: ``recv.<name>`` in Store/Del context. Accesses inside nested defs
+    count too: a nested helper moves with its body.
     """
     recv = {"self", "trainer"}
-    reads, stores = set(), set()
+    reads, stores, fallbacks = set(), set(), set()
     for node in ast.walk(fn):
         if (isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name)
                 and node.value.id in recv):
             (reads if isinstance(node.ctx, ast.Load) else stores).add(node.attr)
         elif (isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
-              and node.func.id == "getattr" and len(node.args) == 2
-              and isinstance(node.args[0], ast.Name) and node.args[0].id in recv
-              and isinstance(node.args[1], ast.Constant) and isinstance(node.args[1].value, str)):
-            reads.add(node.args[1].value)
-    return reads, stores
+              and node.func.id in ("getattr", "hasattr") and len(node.args) >= 2
+              and isinstance(node.args[0], ast.Name) and node.args[0].id in recv):
+            key = node.args[1]
+            name = (key.value
+                    if isinstance(key, ast.Constant) and isinstance(key.value, str) else None)
+            if node.func.id == "getattr" and len(node.args) == 2:
+                if name is not None:
+                    reads.add(name)
+            else:
+                fallbacks.add(name if name is not None else ast.unparse(key))
+    return reads, stores, fallbacks
 
 
 def anchor_functions():
@@ -163,12 +172,17 @@ def anchor_functions():
     return methods + CHECKPOINT_HELPERS
 
 
+def _anchor_bodies():
+    """(qualname, def) of every anchor_functions() body."""
+    for rel, qualname in anchor_functions():
+        yield qualname, find_def(ast.parse((PACKAGE / rel).read_text()), qualname)
+
+
 def _anchor_reads_and_stores():
     """({read}, {stored}) trainer attribute names across anchor_functions()."""
     reads, stores = set(), set()
-    for rel, qualname in anchor_functions():
-        fn = find_def(ast.parse((PACKAGE / rel).read_text()), qualname)
-        r, s = _attribute_reads_and_stores(fn)
+    for _qualname, fn in _anchor_bodies():
+        r, s, _fallbacks = _attribute_reads_and_stores(fn)
         reads |= r
         stores |= s
     return reads, stores
@@ -470,6 +484,27 @@ def test_state_the_bodies_read_and_overwrite_is_declared():
     assert not undeclared, (
         f"{sorted(undeclared)} are read by a post-construction body but no longer declared "
         "by the constructor")
+
+
+def test_no_anchored_body_reads_trainer_state_through_a_fallback():
+    """No anchored body reads trainer state through ``getattr(recv, name, default)`` or
+    ``hasattr(recv, name)``.
+
+    Such a read tolerates a missing attribute, so the anchor does not require it, and an
+    attribute first created by a phase method and read that way passes every other test
+    here. Behaviour cannot show it either: until the first store the fallback stands in
+    for a declaration, so a run behaves as if the attribute had been declared. Only
+    the source shows it, and the scan also sees branches the default test trainer does not
+    take (the NaN guard, the TAG diagnostic, past-policy self-play). Fix a failure by
+    declaring the attribute in the constructor and reading it directly.
+    """
+    hits = [
+        f"{qualname}: {name}" for qualname, fn in _anchor_bodies()
+        for name in sorted(_attribute_reads_and_stores(fn)[2])
+    ]
+    assert not hits, (
+        f"anchored bodies read trainer state through a getattr default or hasattr: {hits}; "
+        "declare it in the constructor and read it directly")
 
 
 def test_save_checkpoint_is_the_class_method(composed):
