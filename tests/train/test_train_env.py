@@ -323,7 +323,7 @@ def test_event_mask_detects_injected_bomb_planted():
 # whose _event_mask is True get sampled at least 25% of the time when
 # at least one event segment exists.
 #
-# Why these three tests:
+# Why these four tests:
 #   (1) test_prio_probs_event_oversample — proves the boost actually shifts
 #       the multinomial distribution toward event segments. Captures the
 #       sampled idx tensor by wrapping torch.multinomial; over multiple
@@ -334,8 +334,12 @@ def test_event_mask_detects_injected_bomb_planted():
 #       fraction metric must read 0.0.
 #   (3) test_event_oversample_fraction_exposed — pins the metric semantics:
 #       _event_oversample_fraction reports the RAW fraction of event
-#       segments among the participating ones, NOT the sampled fraction. This is the
-#       reportable wandb metric.
+#       segments, NOT the sampled fraction. It is logged as
+#       losses/event_oversample_fraction. Every agent participates here.
+#   (4) test_event_oversample_fraction_counts_participating_segments_only — the
+#       fraction is taken among the participating segments: at
+#       n_active_per_team=1, marking half of them reads 0.5, where a mean over
+#       every segment would read 0.1.
 
 
 def _capture_multinomial_calls():
@@ -471,6 +475,37 @@ def test_event_oversample_fraction_exposed():
         assert 0.4 <= frac <= 0.6, (
             f"Task 8: expected raw event fraction in [0.4, 0.6], got {frac:.3f} "
             f"(seg_count={seg_count}, expected_raw={expected_raw:.3f})")
+    finally:
+        cleanup()
+
+
+@pytest.mark.training
+def test_event_oversample_fraction_counts_participating_segments_only():
+    """At n_active_per_team=1 four of every five segments are parked. Half of the
+    participating segments and no parked one are marked as events, so the fraction
+    over participating segments is 0.5 and the mean over every segment is 0.1; the
+    metric must read the first, or parked rows dilute it."""
+    import torch
+
+    from tests._helpers.trainer_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=8, n_active_per_team=1)
+    try:
+        trainer.evaluate()
+
+        part_segs = torch.where(trainer.participating[:, 0])[0]
+        assert 5 * len(part_segs) == trainer.segments, (
+            "n_active_per_team=1 no longer parks four of every five segments; the "
+            "0.5 / 0.1 split below assumes it")
+        trainer._event_mask.zero_()
+        trainer._event_mask[part_segs[:len(part_segs) // 2]] = True
+
+        trainer.train()
+
+        frac = trainer._event_oversample_fraction
+        assert frac == pytest.approx(0.5), (
+            f"event fraction {frac:.3f}: expected 0.5 over the participating segments "
+            "(0.1 means the mean ran over every segment, parked ones included)")
     finally:
         cleanup()
 
