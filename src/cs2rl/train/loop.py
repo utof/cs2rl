@@ -771,10 +771,12 @@ def train(args):
             print("[Train] WARN: --warmstart-entropy without --resume — the grace window "
                   "will suppress entropy pressure on a from-scratch policy (legal, but "
                   "probably not what you want).")
-        _write_config_json(args, plan.config)
         with ExitStack() as eval_cleanup, ExitStack() as train_cleanup:
             trainer = build_trainer(args, plan.config, shared_ts=shared_ts, policy_init=policy_init)
             train_cleanup.push(partial(_close_on_exit, trainer.close_resources))
+            # After the build, so a run whose envs, policy or trainer fail to build never
+            # writes config.json. --resume-run's guard read the old one in _prepare_run.
+            _write_config_json(args, plan.config)
             self_play_enabled = bool(getattr(args, "self_play", True))
             if self_play_enabled and policy_init.source is not None and not full_state:
                 _preseed_selfplay_pool(args, trainer, Path(policy_init.source))

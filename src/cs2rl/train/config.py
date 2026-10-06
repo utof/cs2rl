@@ -225,10 +225,11 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (target re-anchored at measured H, rising to base_frac*max; floor still
     # off, re-arms at ramp end). At the default ceiling of 0.0 the GRACE window
     # turns the entropy bonus fully OFF — pure PPO on reward, not merely a small
-    # bonus. Explicit flag, NO auto-detection: config.json is dumped BEFORE the
-    # resume block loads the checkpoint, so an auto-set flag would be recorded
-    # False — provenance poison (spec finding 3). The getattr defaults keep
-    # harness/dump-config args objects (which may predate these flags) working.
+    # bonus. Explicit flag, NO auto-detection: this dict is built before the resume
+    # weights are read (cs2rl.train.loop._prepare_run; --dump-config reads none), so
+    # a flag set from the checkpoint would be recorded False — provenance poison
+    # (spec finding 3). The getattr defaults keep harness/dump-config args objects
+    # (which may predate these flags) working.
     # Read out here rather than inline in the dict below: yapf snaps that dict's
     # comment column past the longest line in the block, so long inline
     # getattr() calls would re-indent every comment in it.

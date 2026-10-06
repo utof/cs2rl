@@ -638,3 +638,27 @@ def test_spawn_check_gets_the_backend_and_the_run_map(run_driver):
     run.args.map = "arena-duel"
     loop.train(run.args)
     assert run.captured["spawn.check"] == (run.captured["vec"], "arena-duel")
+
+
+@pytest.mark.parametrize(("stage", "written"), [
+    ("vec.make", False),
+    ("pin.check", False),
+    ("eval.make", True),
+])
+def test_config_json_is_written_once_the_trainer_is_built(run_driver, stage, written):
+    """config.json is written after build_trainer returns, so a failed build writes none.
+
+    vec.make fails at build_trainer's first acquisition and pin.check inside it after the
+    trainer exists; eval.make fails later in train()'s setup, where the run's config must
+    already be on disk.
+    """
+    import json
+
+    run = run_driver
+    run.failures[stage] = RuntimeError(stage)
+    with pytest.raises(RuntimeError):
+        loop.train(run.args)
+    path = run.directory / "config.json"
+    assert path.exists() == written
+    if written:
+        assert json.loads(path.read_text())["total_timesteps"] == 20
