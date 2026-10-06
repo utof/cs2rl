@@ -46,8 +46,13 @@ positive control: same case without autocast, its digest must differ).
 PITFALLS:
   - CPU only. Run with ``CUDA_VISIBLE_DEVICES=`` (empty): CUDA runs are seeded but not
     bit-exact, and the trainer captures CUDA RNG state whenever CUDA is visible (#307).
-  - Both runs need the same torch thread count: ``cs2rl.train`` is imported before torch
-    so its thread defaults apply, and each case records the count (``torch_threads``).
+  - Both runs need the same torch thread count, so compare runs made on one machine with
+    one thread environment. A different count changes float reduction order and so the
+    digests, starting with the policy's initial weights. torch fixes the count at import
+    from OMP_NUM_THREADS and MKL_NUM_THREADS; ``cs2rl.train`` is imported first, so each
+    is 1 unless the environment sets it. Each case records the count, so a mismatch is
+    an explained DIFFERENT (``construction:torch_threads`` among the components), never a
+    false IDENTICAL, and ``compare`` prints a WARN line for it.
   - It only sees what its cases reach. The ``use_rnn=False`` reshape, the warm-start
     non-finite-entropy print and ndarray/list info values are not reached.
   - It builds what ``tests._helpers.trainer_harness._build_trainer_for_test`` builds
@@ -73,9 +78,9 @@ from pathlib import Path
 from typing import Any
 
 # Before torch loads: cs2rl.train's __init__ sets the BLAS/OpenMP thread counts to 1 unless
-# the environment already sets them, as every CLI launch does. torch fixes its thread count
-# when it is imported, and a different count changes float reduction order, so two runs
-# under different counts never match. Each case records the count (`torch_threads`).
+# the environment already sets them, as it does for `python -m cs2rl.train`. torch fixes its
+# thread count when it is imported, and a different count changes float reduction order, so
+# two runs under different counts never match. Each case records the count (`torch_threads`).
 # import_module rather than a bare import: an unused-import noqa trailing comment is
 # realigned by yapf into a form ruff's import sorter (I001) rejects.
 importlib.import_module("cs2rl.train")
@@ -603,6 +608,13 @@ def main_compare(a_path, b_path):
     a = json.loads(Path(a_path).read_text())
     b = json.loads(Path(b_path).read_text())
     print(f"INPUT cases_a={len(a)} cases_b={len(b)}")
+    threads = [
+        sorted({str(r["construction"].get("torch_threads"))
+                for r in d.values()}) for d in (a, b)
+    ]
+    if threads[0] != threads[1]:
+        print(f"WARN torch_threads a={threads[0]} b={threads[1]}: the digests are expected to "
+              "differ; rerun both sides with one thread environment")
     bad = 0
     for name in sorted(set(a) | set(b)):
         if name not in a or name not in b:
