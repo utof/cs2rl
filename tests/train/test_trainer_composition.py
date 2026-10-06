@@ -549,6 +549,28 @@ def test_evaluate_collects_every_info_into_stats():
         cleanup()
 
 
+def test_collect_infos_extends_lists_appends_scalars_and_drops_arrays():
+    """``_collect_infos`` on its own: the default-tier half of the rollout test above.
+
+    PufferLib 3.0's rule, which every ``environment/*`` window mean rests on: a nested
+    dict flattens to ``outer/inner`` keys, a list or tuple extends, an ndarray is
+    dropped, and any other value appends one entry.
+    """
+    import collections
+
+    import numpy as np
+
+    from cs2rl.train.trainer import Cs2PuffeRL
+
+    # An instance without __init__: the method reads only `stats`.
+    trainer = Cs2PuffeRL.__new__(Cs2PuffeRL)
+    trainer.stats = collections.defaultdict(list)
+    first = {"kills": 1.0, "hits": [2, 3], "grid": np.zeros(2), "team": {"t": 4}}
+    second = {"kills": 5.0, "hits": (6, )}
+    trainer._collect_infos([first, second])
+    assert dict(trainer.stats) == {"kills": [1.0, 5.0], "hits": [2, 3, 6], "team/t": [4]}
+
+
 def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path):
     """A setup failure inside ``Cs2PuffeRL.__init__`` must not hang the interpreter.
 
