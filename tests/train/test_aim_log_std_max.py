@@ -340,6 +340,32 @@ def test_raw_key_reports_a_sigma_pushed_past_the_cap():
     assert float(pol.aim_log_std.grad.abs().max()) == 0.0
 
 
+@pytest.mark.parametrize("split", [False, True], ids=["legacy", "split"])
+def test_logged_sigma_clamps_to_the_policy_floor(split):
+    """The σ log clamps to the policy's own floor, as forward() does.
+
+    build_policy always passes LOG_STD_MIN as aim_log_std_min, so the test sets another
+    floor on the built policy and parks every σ parameter below it: forward's log_std
+    and every clamped σ key (per team on a split policy) must read that floor.
+    """
+    from cs2rl.train.metrics import log_aim_log_std
+    pol = _policy_with_cap(None, tct_split_heads=split)
+    floor = math.log(0.02)
+    pol.aim_log_std_min = floor
+    params = [pol.aim_log_std_t, pol.aim_log_std_ct] if split else [pol.aim_log_std]
+    with torch.no_grad():
+        for p in params:
+            p.fill_(floor - 1.0)
+        _, _, log_std, _ = pol(torch.zeros(4, pol.obs_dim), {})
+    assert torch.allclose(log_std, torch.full_like(log_std, floor))
+    logs = {}
+    log_aim_log_std(pol, logs)
+    clamped = [k for k in logs if not k.endswith("_raw")]
+    assert len(clamped) == (6 if split else 2), sorted(logs)
+    for key in clamped:
+        assert logs[key] == pytest.approx(floor), key
+
+
 def test_cap_too_close_to_the_sigma_floor_is_refused():
     """T1(d): a cap within AIM_LOG_STD_CAP_MIN_HEADROOM of LOG_STD_MIN would
     put the init at/below the FLOOR — dead at the lower clamp instead of the

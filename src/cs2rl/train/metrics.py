@@ -176,8 +176,9 @@ def log_aim_log_std(policy, logs):
     # for the CLI/help paths) — keep that convention here.
     import torch
 
-    # R0-E.3: clamp to the RUN's cap (policy.aim_log_std_max), not the module
-    # constant — otherwise the log would report a σ the forward never used.
+    # R0-E.3: clamp to the RUN's bounds (policy.aim_log_std_min/max), not the module
+    # constants — otherwise the log would report a σ the forward never used.
+    floor = float(getattr(policy, "aim_log_std_min", LOG_STD_MIN))
     cap = float(getattr(policy, "aim_log_std_max", LOG_STD_MAX))
     # R0-E.2 (#131): when pitch is pinned (aim_dim_mask[1] == 0) the pitch σ
     # is a dead parameter — never sampled, never in log_prob_c, never
@@ -191,8 +192,8 @@ def log_aim_log_std(policy, logs):
         if hasattr(policy, "aim_log_std_t"):
             raw_t = policy.aim_log_std_t.detach().cpu().numpy()
             raw_ct = policy.aim_log_std_ct.detach().cpu().numpy()
-            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
-            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
+            ls_t = torch.clamp(policy.aim_log_std_t, floor, cap).cpu().numpy()
+            ls_ct = torch.clamp(policy.aim_log_std_ct, floor, cap).cpu().numpy()
             logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
             logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
             logs["policy/aim_log_std_yaw_t_raw"] = float(raw_t[0])
@@ -211,7 +212,7 @@ def log_aim_log_std(policy, logs):
             raw = np.maximum(raw_t, raw_ct)
         else:
             raw = policy.aim_log_std.detach().cpu().numpy()
-            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
+            clamped = torch.clamp(policy.aim_log_std, floor, cap).cpu().numpy()
     logs["policy/aim_log_std_yaw"] = float(clamped[0])
     logs["policy/aim_log_std_yaw_raw"] = float(raw[0])
     if pitch_live:
