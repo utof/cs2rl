@@ -204,7 +204,12 @@ def run_driver(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "open", open_metrics)
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=wandb_init))
     monkeypatch.setattr(pufferlib.vector, "make", make_vec)
-    monkeypatch.setattr(compose, "check_spawn_counts", lambda *a: hit("spawn.check"))
+
+    def check_spawns(*a):
+        captured["spawn.check"] = a
+        hit("spawn.check")
+
+    monkeypatch.setattr(compose, "check_spawn_counts", check_spawns)
     monkeypatch.setattr(compose, "build_policy", make_policy)
     monkeypatch.setattr(
         loop, "build_train_config", lambda *a, **kw: {
@@ -382,7 +387,7 @@ def test_periodic_save_failure_closes_resources(run_driver):
 # ── What train() hands the trainer it builds ───────────────────────────────
 # Each test below up to test_collect_and_update_times_reach_the_row replaces a source-text
 # pin on train() from before #92 part 2, when train() could not be driven without a real
-# run. The last two check orders that had no test of their own.
+# run. The tests after it check orders and arguments that had no test of their own.
 
 
 def _rows(run):
@@ -620,3 +625,16 @@ def test_checkpoint_weights_load_before_the_agreement_checks(run_driver, monkeyp
                         lambda args, full_state: compose.PolicyInit(state_dict={}, source="c.pt"))
     loop.train(run_driver.args)
     assert order == [("load", "c.pt"), "pin", "turn"]
+
+
+def test_spawn_check_gets_the_backend_and_the_run_map(run_driver):
+    """The R0-H spawn check gets the backend vecenv and --map's name.
+
+    The name decides whether the arena's exact 4 + 4 spawn rule runs
+    (cs2rl.train.envs.check_spawn_counts): a dropped or defaulted name skips it, and
+    nothing fails.
+    """
+    run = run_driver
+    run.args.map = "arena-duel"
+    loop.train(run.args)
+    assert run.captured["spawn.check"] == (run.captured["vec"], "arena-duel")
