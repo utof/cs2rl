@@ -1206,8 +1206,12 @@ class Cs2PuffeRL(PuffeRL):
 
         ``self.ratio`` gets the DISCRETE ratio, the one V-trace in
         ``compute_puff_advantage`` was tuned on. The joint ratio feeds the diagnostics
-        only. Every diagnostic is a mean over participating rows: an unmasked KL is
-        diluted by the parked fraction, and target_kl would never fire at n_active=1.
+        only. Every diagnostic is a mean over participating rows. A parked row's discrete
+        ratio is exactly 1 (one valid bin per head), but its aim log-density moves as the
+        shared weights train, so an unmasked mean mixes in rows that do not train: at
+        n_active=1 (one row in five trains; 4 envs, seed 0) the unmasked KL measured
+        0.53-0.59 of the masked one, so the KL stop would wait until the learners' KL
+        reached about 1.7-1.9x target_kl.
         The clip fractions per factor are observe-only. A KL trip sets ``kl_stop``;
         ``train()`` stops at the next epoch boundary.
         """
