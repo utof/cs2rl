@@ -39,8 +39,8 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                `include_step_stats_in_info=True` and takes pufferlib's seed
                rather than the train role's per-env `_seed`.
   external     `tests._helpers.envs.make_env(team_spirit, map_data)`, a default-knob
-               env for env-level tests (moved out of `cs2rl.train.envs` by #321:
-               nothing in src/ or scripts/ called it).
+               env for env-level tests. It lives in tests/ because nothing in src/
+               or scripts/ calls it (#321).
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
 reuses one of the roles above — it does not. `cs2rl.train.record.record_episode` builds its

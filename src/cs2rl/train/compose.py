@@ -251,9 +251,9 @@ def build_trainer(args,
     team-spirit Value every env reads. ``self_play_mgr`` replaces the built manager
     (tests that need a pre-seeded pool or p_past=1).
 
-    WHY one function: the trainer used to be assembled twice, in train() and in the
-    test harness, and the two copies drifted (participation rows, the self-play
-    manager, the shm views). Now the harness passes test inputs to this function.
+    WHY one function: a test trainer is then the CLI's assembly given test inputs,
+    differing only as the module docstring lists. A second copy of the assembly would
+    drift from this one unnoticed: its tests would pass while the CLI changed (#92).
 
     ORDER: the shared arrays exist before the vecenv (workers fork inside
     vector.make); the policy is built from the driver env and loaded before the
@@ -301,8 +301,13 @@ def build_trainer(args,
                              self_play_mgr=self_play_mgr)
         owned.pop_all()
         owned.push(partial(_close_on_exit, trainer.close_resources))
-        # GC anchors: the numpy views do not keep a RawArray alive, and the env side
-        # (a worker, or a Serial env) maps the same memory without Python knowing.
+        # Owners of the shared arrays for the trainer's lifetime: an unreferenced
+        # RawArray's block goes back to multiprocessing's heap, and a later RawArray can
+        # be given memory that Multiprocessing workers still use. The pin is a second
+        # owner: the trainer holds a numpy view of each array (the wrapper too, of the
+        # continuous one), whose base chain ends at the RawArray, and a Serial env keeps
+        # its own reference. It still holds if a view is dropped (the equivalence tool's
+        # no_mask_view case drops one).
         if shm.cont_shm is not None:
             trainer._cont_action_shm = shm.cont_shm
         trainer._action_mask_shm = shm.mask_shm
