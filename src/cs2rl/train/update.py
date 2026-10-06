@@ -8,8 +8,9 @@ refactor; the flat ``train.py`` re-exported every name below (see its ``__all__`
 until #205 part 3 removed the re-exports: ``cs2rl.train`` exports nothing now, so
 import from this module.
 
-The update itself is ``cs2rl.train.trainer.Cs2PuffeRL.train``, which imports the
-helpers below at module scope. Nothing here touches a trainer instance.
+The update itself is ``Cs2PuffeRL.train`` in ``cs2rl.train.trainer``, whose module
+imports the helpers below at module scope; its phase methods call them. Nothing here
+touches a trainer instance.
 
 PITFALL (runtime rebinding): a test that wants to intercept ``tag_grad_cossim``
 or ``_hybrid_ppo_loss`` at its call site must patch it on ``cs2rl.train.trainer``,
@@ -44,9 +45,11 @@ from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
 def masked_mean(x, w):
     """Mean of x over rows where w == 1. w broadcasts to x; w.sum() == 0 ⇒ 0.
 
-    Rung 0 §2.2: parked agent rows (noop-masked, entropy exactly 0, zero
-    reward) must not enter any trainer statistic, or every all-row mean at
-    n_active=1 is diluted 5×. Masked mean = (x·w).sum() / max(w.sum(), 1).
+    Rung 0 §2.2: non-participating rows (parked agents, and the statue team
+    under ``--opponent noop``) must not enter any trainer statistic. At
+    n_active=1 they are four of every five rows (nine of ten under noop), and
+    their entropy and reward are not 0 in general. Masked mean =
+    (x·w).sum() / max(w.sum(), 1).
     """
     w = w.to(x.dtype)
     return (x * w).sum() / w.sum().clamp(min=1.0)
@@ -122,12 +125,10 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
     """Config-driven entropy target for the SAC-style α controller.
 
     Single source for both the construction-time seed (Cs2PuffeRL._init_return_norm)
-    and the per-update recompute (Cs2PuffeRL._prepare_entropy_update) — keeping them identical
-    means a checkpoint-resumed trainer seeds at its true scheduled value
-    instead of a hardcoded warmup constant. `config` is anything with
-    .get() (PuffeRL config or a plain dict); missing keys fall back to the
-    build_train_config defaults so harness/older-checkpoint configs keep
-    working.
+    and the per-update recompute (Cs2PuffeRL._prepare_entropy_update).
+    `config` is anything with .get() (PuffeRL config or a plain dict); missing
+    keys fall back to the build_train_config defaults so harness/older-checkpoint
+    configs keep working.
     """
     from cs2rl.train.entropy import target_entropy_schedule
     return target_entropy_schedule(

@@ -416,7 +416,10 @@ class Cs2PuffeRL(PuffeRL):
             "BPTT zero-init exactness broken — revisit batch_size/bptt_horizon "
             "(compute_batch_dims) or the _lstm_bptt initial-state design. See gh #85.")
 
-        # Running stats of the (symlog-space) returns the value head regresses.
+        # Running stats of the returns the value head regresses. Those returns are
+        # built from normalised, symlog'd rewards when the infos carry step_stats
+        # (the test harness) and from raw rewards otherwise (production until #100;
+        # see _process_rewards).
         # `_update_return_stats` builds its batch-count tensor on `_ret_device`.
         # PITFALL: these three tensors are updated IN PLACE (.copy_()), as
         # restore_train_state restores them, so a reference taken to one stays live.
@@ -455,11 +458,12 @@ class Cs2PuffeRL(PuffeRL):
         self._alpha_optimizer = alpha_optimizer
 
         # The entropy target follows target_entropy_schedule and is recomputed at the
-        # start of every update (_prepare_entropy_update). Seeding it from the
-        # schedule at the CURRENT global_step keeps a checkpoint-resumed trainer
-        # consistent before its first update. _log_alpha_reset_done makes the
-        # one-time reset of log_alpha to log(ent_coef) (first update after
-        # construction) idempotent; later updates leave log_alpha to the SAC dual loop.
+        # start of every update (_prepare_entropy_update). This seed runs at
+        # construction, where global_step is still 0; a resumed trainer then takes
+        # the saved value from the train_state.pt sidecar (resume._WARMSTART_ATTRS).
+        # _log_alpha_reset_done makes the one-time reset of log_alpha to
+        # log(ent_coef) (first update after construction) idempotent; later updates
+        # leave log_alpha to the SAC dual loop.
         self._max_entropy = float(max_entropy)
         self._log_alpha_reset_done = False
         self._current_target_entropy = _scheduled_target_entropy(self.config, self.global_step,
@@ -1073,6 +1077,12 @@ class Cs2PuffeRL(PuffeRL):
         multiplies the smoothed probabilities, 1e-6 floor included, then renormalises,
         so the non-event segments keep their relative probabilities. No segment is
         marked in production while include_step_stats_in_info is off.
+
+        KNOWN LIMIT: ``adv`` also sums non-participating segments, whose advantages are
+        non-zero when the infos carry step_stats or, under ``--opponent noop``, on the
+        statue rows. At the ``prio_alpha`` default 0.0 every segment weighs the same;
+        mask them out of ``adv`` before prioritised replay (``prio_alpha > 0``) is ever
+        enabled.
         """
         adv = advantages.abs().sum(axis=1)
         prio_weights = torch.nan_to_num(adv**self.config["prio_alpha"], 0, 0, 0)
@@ -1227,9 +1237,12 @@ class Cs2PuffeRL(PuffeRL):
 
         Returns ``(entropy, entropy_unmasked, alpha, alpha_loss, entropy_loss)``.
 
-        The controller reacts to the participating rows' entropy: parked rows have one
-        valid bin per head (entropy 0), so an unmasked mean understates it at
-        n_active=1 and would peg alpha at the floor. ``alpha_loss`` is built every
+        The controller and the collapse floor read the participating rows' entropy.
+        The other rows would misstate it. An n_active-parked row has one valid bin per
+        discrete head (discrete entropy 0), but with aim_entropy_bonus on (the
+        default) its entropy also includes the aim Gaussian's, which is negative for
+        σ below 1/sqrt(2πe) ≈ 0.24. A statue row under ``--opponent noop`` is a
+        spawned agent with the env's ordinary masks. ``alpha_loss`` is built every
         minibatch because it is logged; ``_step_alpha`` skips only the step in GRACE.
         Effective alpha: raw alpha, ceilinged during warm-start GRACE, then clamped up
         to 0.5 when entropy is below the collapse floor, unless the warm-start window
@@ -1299,9 +1312,11 @@ class Cs2PuffeRL(PuffeRL):
         sums["policy_loss"] += step.pg_loss.item()
         sums["value_loss"] += step.v_loss.item()
         sums["entropy"] += step.entropy.item()
-        # The same mean without the mask. Its ratio to losses/entropy is the
-        # participating row fraction: about n_active/TEAM_SIZE under --opponent self,
-        # about n_active/(2*TEAM_SIZE) under noop, where only the hero team trains.
+        # The same mean without the mask, a diagnostic. Its ratio to losses/entropy is
+        # about the participating row fraction only when the other rows' entropy is 0
+        # and segments are drawn uniformly: --opponent self, aim_entropy_bonus off,
+        # prio_alpha 0, no event segment (test_parked_rows_masked's twenty-update
+        # test pins that case).
         sums["entropy_unmasked"] += step.entropy_unmasked.item()
         sums["alpha"] += step.alpha.detach().item()
         sums["alpha_loss"] += step.alpha_loss.item()
