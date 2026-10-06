@@ -382,7 +382,7 @@ def test_periodic_save_failure_closes_resources(run_driver):
 # ── What train() hands the trainer it builds ───────────────────────────────
 # Each test below up to test_collect_and_update_times_reach_the_row replaces a source-text
 # pin on train() from before #92 part 2, when train() could not be driven without a real
-# run. The last one checks an order that had no test of its own.
+# run. The last two check orders that had no test of their own.
 
 
 def _rows(run):
@@ -603,3 +603,20 @@ def test_run_config_is_built_from_the_resolved_pin_pitch(monkeypatch):
                            checkpoint_dir="unused")
     loop._prepare_run(args)
     assert seen == [1]
+
+
+def test_checkpoint_weights_load_before_the_agreement_checks(run_driver, monkeypatch):
+    """build_trainer loads --resume weights before the pin-pitch and max-turn-speed checks.
+
+    A checkpoint carries its own max_turn_speed buffer, so checks that ran before the
+    load would pass on the fresh policy and miss a checkpoint the env disagrees with.
+    """
+    order: list = []
+    monkeypatch.setattr(compose, "load_state_dict_arch_checked",
+                        lambda policy, state_dict, source: order.append(("load", source)))
+    monkeypatch.setattr(compose, "assert_pin_pitch_agreement", lambda *a: order.append("pin"))
+    monkeypatch.setattr(compose, "assert_max_turn_speed_agreement", lambda *a: order.append("turn"))
+    monkeypatch.setattr(loop, "_resume_policy_init",
+                        lambda args, full_state: compose.PolicyInit(state_dict={}, source="c.pt"))
+    loop.train(run_driver.args)
+    assert order == [("load", "c.pt"), "pin", "turn"]
