@@ -348,9 +348,10 @@ def _prepare_run(args) -> _RunPlan:
         args.checkpoint_dir = str(CHECKPOINTS_DIR / resolved_name)
         print(f"[Train] Run name resolved to: {resolved_name}")
     resolve_pin_pitch(args, verbose=False)
-    env_seed_base(args.seed)           # R0-D: refuses an out-of-range --seed
-                                       # Rung 1a T3: the CLI refused this above --dump-config; repeated so a programmatic
-                                       # train(args) cannot start a run whose statue team self-play would swap out.
+    # R0-D: refuses an out-of-range --seed.
+    env_seed_base(args.seed)
+    # Rung 1a T3: the CLI refused this above --dump-config; repeated so a programmatic
+    # train(args) cannot start a run whose statue team self-play would swap out.
     opponent_mode = resolve_opponent_mode(args)
     assert_opponent_self_play_compatible(opponent_mode, bool(getattr(args, "self_play", True)))
     resume_paths = _resolve_resume_run(args)
@@ -668,18 +669,19 @@ def _log_epoch(run: _EpochLoop, logs: dict, ts_val: float):
     if (run.dead_run_detector.check(trainer.global_step, logs)
             and getattr(run.args, "dead_run_abort", True)):
         _abort_dead_run(run)
-    if trainer.epoch % 5 == 0:         # too expensive every epoch
+    # Network health is too expensive for every epoch.
+    if trainer.epoch % 5 == 0:
         logs.update(compute_network_health(policy, run.args.device))
     if run.self_play_enabled:
         _log_selfplay(run, logs)
-                                       # Batch 3.5 (#24): per-axis aim log_std, the CLAMPED values the policy used (T7
-                                       # gate 2 reads aim_log_std_pitch; format_train_status keeps it greppable). The
-                                       # helper branches on architecture: a split policy has no `aim_log_std`.
+    # Batch 3.5 (#24): per-axis aim log_std, the CLAMPED values the policy used (T7
+    # gate 2 reads aim_log_std_pitch; format_train_status keeps it greppable). The
+    # helper branches on architecture: a split policy has no `aim_log_std`.
     log_aim_log_std(policy, logs)
-                                       # Batch 7 (spec §3.4) and its trunk twin (spec 2026-08-15 §3.4): the analyzer's
-                                       # split labels, derived from the POLICY OBJECT, never from config.json (which a
-                                       # flag-less crash-resume of a split run rewrites as false). Written on EVERY row,
-                                       # not behind --tag-diagnostic / --tag-every: an unlabeled row reads as a legacy run.
+    # Batch 7 (spec §3.4) and its trunk twin (spec 2026-08-15 §3.4): the analyzer's
+    # split labels, derived from the POLICY OBJECT, never from config.json (which a
+    # flag-less crash-resume of a split run rewrites as false). Written on EVERY row,
+    # not behind --tag-diagnostic / --tag-every: an unlabeled row reads as a legacy run.
     logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
     logs["split/trunk_active"] = float(hasattr(policy, "encoder_t"))
     logs.update(compute_head_divergence(policy))
@@ -692,26 +694,27 @@ def _run_epochs(run: _EpochLoop):
     """evaluate() and train() until the epoch budget is spent; log, evaluate and save."""
     trainer = run.trainer
     while trainer.epoch < trainer.total_epochs:
-        trainer._tag_metrics = None                                           # TAG: drop any un-injected measurement
+        # TAG: drop any un-injected measurement.
+        trainer._tag_metrics = None
         t0 = time.perf_counter()
         trainer.evaluate()
         trainer._timing["collect_ms"] = (time.perf_counter() - t0) * 1000.0
-                                                                              # Rung 0 §2.2: the participating buffer is zero-initialised, so all-False means
-                                                                              # evaluate() never ran its scatter and every masked reduction would divide by
-                                                                              # the clamp floor and train on nothing.
+        # Rung 0 §2.2: the participating buffer is zero-initialised, so all-False means
+        # evaluate() never ran its scatter and every masked reduction would divide by
+        # the clamp floor and train on nothing.
         assert trainer.participating.any(), "participating buffer never written this epoch"
         t0 = time.perf_counter()
         logs = trainer.train()
         trainer._timing["update_ms"] = (time.perf_counter() - t0) * 1000.0
-                                                                              # Before the eval hook, which is handed this dict with the timing keys in it.
+        # Before the eval hook, which is handed this dict with the timing keys in it.
         if isinstance(logs, dict):
             logs["timing/collect_ms"] = trainer._timing["collect_ms"]
             logs["timing/update_ms"] = trainer._timing["update_ms"]
-                                                                              # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps
+        # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps.
         ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
         run.shared_ts.value = ts_val
-                                                                              # R0-I: OUTSIDE the isinstance(logs, dict) guard on purpose — see ScheduledEval
-                                                                              # (the 0.25 s log throttle must not skip an eval epoch).
+        # R0-I: OUTSIDE the isinstance(logs, dict) guard on purpose — see ScheduledEval
+        # (the 0.25 s log throttle must not skip an eval epoch).
         if run.eval_hook is not None:
             run.eval_hook.after_train(trainer, logs)
         if isinstance(logs, dict):
@@ -753,13 +756,14 @@ def train(args):
     full_state = plan.resume_paths is not None
     with ExitStack() as run_cleanup:
         outputs = _open_run_outputs(args, run_cleanup)
-        shared_ts = mp.Value("f", 0.3)                                                     # team spirit; every env reads it at episode start
-                                                                                           # R0-D (#135): pufferl.py has its seeding commented out. Seed before the policy
-                                                                                           # and the vecenv are built (weight init; env seeds come from env_seed_base) and
-                                                                                           # before any random.* consumer. On --resume-run, load_full_resume then restores
-                                                                                           # the saved python/numpy/torch states over this seed; the env xorshift32 state
-                                                                                           # is not restored (see its WARN). CPU runs are bit-exact; CUDA runs are seeded
-                                                                                           # but not bit-exact (no deterministic-algorithm flags are set).
+        # Team spirit; every env reads it at episode start.
+        shared_ts = mp.Value("f", 0.3)
+        # R0-D (#135): pufferl.py has its seeding commented out. Seed before the policy
+        # and the vecenv are built (weight init; env seeds come from env_seed_base) and
+        # before any random.* consumer. On --resume-run, load_full_resume then restores
+        # the saved python/numpy/torch states over this seed; the env xorshift32 state
+        # is not restored (see its WARN). CPU runs are bit-exact; CUDA runs are seeded
+        # but not bit-exact (no deterministic-algorithm flags are set).
         seed_everything(args.seed)
         policy_init = _resume_policy_init(args, full_state=full_state)
         if plan.config.get("warmstart_entropy") and policy_init.state_dict is None:
