@@ -6,9 +6,9 @@ its called _init_* methods, including hybrid-aim state. Source
 scanning includes inactive branches, so an undeclared runtime attribute or
 an unexecuted declaration turns the test red.
 
-The independent anchor reads moved method bodies and checkpoint helpers to
-check that required attributes exist. Method identity tests pin train,
-evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings.
+The independent anchor reads every post-construction Cs2PuffeRL method and the
+checkpoint helpers to check that required attributes exist. Method identity tests
+pin train, evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings.
 """
 from __future__ import annotations
 
@@ -20,19 +20,20 @@ from tests.conftest import REPO_ROOT
 
 PACKAGE = REPO_ROOT / "src" / "cs2rl"
 
-# (file, qualname) of each moved body and checkpoint helper whose self/trainer
-# reads must be backed by constructor state. The save body moved to the class
-# in W2c; all three public bodies now resolve from trainer.py.
-ANCHOR_FUNCTIONS = (
-    ("train/trainer.py", "Cs2PuffeRL.train"),
-    ("train/trainer.py", "Cs2PuffeRL.evaluate"),
-    ("train/trainer.py", "Cs2PuffeRL.save_checkpoint"),
+# (file, qualname) of the checkpoint helpers whose `trainer.` reads must be backed by
+# constructor state; anchor_functions() adds every Cs2PuffeRL method that runs after
+# construction.
+CHECKPOINT_HELPERS = (
     ("train/resume.py", "collect_train_state"),
     ("train/resume.py", "restore_train_state"),
 )
-# 22 required data names: 19 after W2a plus three self-play fields after W2b.
-# W2c uses the already-anchored `_self_play_mgr`, so this count stays 22.
-EXPECTED_ANCHOR_COUNT = 22
+# Required data names over anchor_functions(). gh#92 widened the anchor from five named
+# bodies (22 names; the split train/evaluate alone would have left 8) to every
+# post-construction method: +_max_entropy and +_ret_device (methods the fixed list
+# never read), +_action_mask_view_main (a 3-argument getattr became a direct read),
+# -_warmstart_phase (now also stored by an anchored method, _prepare_entropy_update;
+# the _WARMSTART_ATTRS check below still requires it on the instance).
+EXPECTED_ANCHOR_COUNT = 24
 
 
 def _bindings_in_scope(scope, name):
@@ -135,10 +136,27 @@ def _attribute_reads_and_stores(fn):
     return reads, stores
 
 
+def anchor_functions():
+    """(file, qualname) of every body whose self/trainer reads need constructor state.
+
+    Every def in the Cs2PuffeRL class body except ``__init__`` and the ``_init_*``
+    methods it calls (those DECLARE the state; see derive_constructor_surface), plus
+    CHECKPOINT_HELPERS. Derived from the class body, so a new method is anchored when
+    it is added: the fixed list this replaced named train/evaluate/save_checkpoint and
+    never read ``_prepare_entropy_update`` (gh#92).
+    """
+    tree = ast.parse((PACKAGE / "train" / "trainer.py").read_text())
+    cls = next(n for n in tree.body if isinstance(n, ast.ClassDef) and n.name == "Cs2PuffeRL")
+    methods = tuple(("train/trainer.py", f"Cs2PuffeRL.{n.name}") for n in cls.body
+                    if isinstance(n, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and n.name != "__init__" and not n.name.startswith("_init_"))
+    return methods + CHECKPOINT_HELPERS
+
+
 def derive_anchor():
-    """Names read and never assigned across ANCHOR_FUNCTIONS (class attrs filtered later)."""
+    """Names read and never assigned across anchor_functions() (class attrs filtered later)."""
     reads, stores = set(), set()
-    for rel, qualname in ANCHOR_FUNCTIONS:
+    for rel, qualname in anchor_functions():
         fn = find_def(ast.parse((PACKAGE / rel).read_text()), qualname)
         r, s = _attribute_reads_and_stores(fn)
         reads |= r
@@ -322,8 +340,8 @@ def test_every_attribute_the_bodies_read_is_declared(composed):
     anchor = {n for n in derive_anchor() if n not in stock and not hasattr(cls, n)}
     assert len(anchor) == EXPECTED_ANCHOR_COUNT, (
         f"derived anchor is {sorted(anchor)} ({len(anchor)} names); the derivation changed "
-        f"or a body gained/lost a read. Update EXPECTED_ANCHOR_COUNT only with the W that "
-        "moved the body.")
+        f"or a body gained/lost a read. Update EXPECTED_ANCHOR_COUNT only with the change "
+        "that moved the body.")
     absent = anchor - set(vars(trainer))
     assert not absent, f"read by a moved body but never set by __init__: {sorted(absent)}"
     warm_absent = set(_WARMSTART_ATTRS) - set(vars(trainer))
@@ -339,7 +357,7 @@ def test_save_checkpoint_is_the_class_method(composed):
     cls = type(trainer)
     assert cls.save_checkpoint is Cs2PuffeRL.save_checkpoint
     assert cls.save_checkpoint is not PuffeRL.save_checkpoint
-    assert Cs2PuffeRL.save_checkpoint.__qualname__ == ANCHOR_FUNCTIONS[2][1]
+    assert ("train/trainer.py", Cs2PuffeRL.save_checkpoint.__qualname__) in anchor_functions()
     assert "save_checkpoint" not in vars(trainer)
     assert trainer.save_checkpoint.__func__ is Cs2PuffeRL.save_checkpoint
 
@@ -347,7 +365,7 @@ def test_save_checkpoint_is_the_class_method(composed):
 def test_train_is_the_class_method(composed):
     """(4) for `train` after gh#168 W2a: the class defines it, and nothing re-binds it.
 
-    Two halves, both needed. (a) `Cs2PuffeRL.train` is the def ANCHOR_FUNCTIONS[0] names
+    Two halves, both needed. (a) `Cs2PuffeRL.train` is a def anchor_functions() reads
     and is NOT `PuffeRL.train`: a `def train` deleted from the class would fall through
     to the stock body, which knows nothing of return normalisation, and every harness
     test would run it. (b) `train` is not in `vars(trainer)`: a leftover MethodType
@@ -362,9 +380,9 @@ def test_train_is_the_class_method(composed):
     cls = type(trainer)
     assert cls.train is Cs2PuffeRL.train and cls.train is not PuffeRL.train, (
         "Cs2PuffeRL no longer defines train(); the stock PuffeRL body would run")
-    assert Cs2PuffeRL.train.__qualname__ == ANCHOR_FUNCTIONS[0][1], (
-        f"Cs2PuffeRL.train is {Cs2PuffeRL.train.__qualname__!r}; ANCHOR_FUNCTIONS[0] names "
-        f"{ANCHOR_FUNCTIONS[0][1]!r}")
+    assert ("train/trainer.py", Cs2PuffeRL.train.__qualname__) in anchor_functions(), (
+        f"Cs2PuffeRL.train is {Cs2PuffeRL.train.__qualname__!r}, a def anchor_functions() "
+        "does not read")
     assert "train" not in vars(trainer), (
         "train is an INSTANCE attribute again: something re-bound it after construction "
         "and shadows Cs2PuffeRL.train")
@@ -374,8 +392,8 @@ def test_train_is_the_class_method(composed):
 def test_evaluate_is_the_class_method(composed):
     """(4) for `evaluate` after gh#168 W2b: the class defines it, and nothing re-binds it.
 
-    Mirrors test_train_is_the_class_method. (a) `Cs2PuffeRL.evaluate` is the def
-    ANCHOR_FUNCTIONS[1] names and is NOT `PuffeRL.evaluate`: a `def evaluate` deleted
+    Mirrors test_train_is_the_class_method. (a) `Cs2PuffeRL.evaluate` is a def
+    anchor_functions() reads and is NOT `PuffeRL.evaluate`: a `def evaluate` deleted
     from the class would fall through to the stock rollout, which knows nothing of the
     self-play opponent override, the hybrid aim head or the batch-1 reward processing.
     (b) `evaluate` is not in `vars(trainer)`: a leftover MethodType binding (a
@@ -389,9 +407,9 @@ def test_evaluate_is_the_class_method(composed):
     cls = type(trainer)
     assert cls.evaluate is Cs2PuffeRL.evaluate and cls.evaluate is not PuffeRL.evaluate, (
         "Cs2PuffeRL no longer defines evaluate(); the stock PuffeRL rollout would run")
-    assert Cs2PuffeRL.evaluate.__qualname__ == ANCHOR_FUNCTIONS[1][1], (
-        f"Cs2PuffeRL.evaluate is {Cs2PuffeRL.evaluate.__qualname__!r}; ANCHOR_FUNCTIONS[1] "
-        f"names {ANCHOR_FUNCTIONS[1][1]!r}")
+    assert ("train/trainer.py", Cs2PuffeRL.evaluate.__qualname__) in anchor_functions(), (
+        f"Cs2PuffeRL.evaluate is {Cs2PuffeRL.evaluate.__qualname__!r}, a def "
+        "anchor_functions() does not read")
     assert "evaluate" not in vars(trainer), (
         "evaluate is an INSTANCE attribute again: something re-bound it after construction "
         "and shadows Cs2PuffeRL.evaluate")

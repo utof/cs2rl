@@ -8,19 +8,16 @@ refactor; the flat ``train.py`` re-exported every name below (see its ``__all__`
 until #205 part 3 removed the re-exports: ``cs2rl.train`` exports nothing now, so
 import from this module.
 
-HISTORY (gh#168 W2a, 2026-09-25): this module also held the 911-line
-return-norm patcher whose inner 713-line ``train()`` replacement closed over 15
-freevars. That body is now ``cs2rl.train.trainer.Cs2PuffeRL.train`` (its
-construction-time state is ``Cs2PuffeRL._init_return_norm``, the closure
-locals are ``self._*`` attributes), and cs2rl.train.trainer imports the helpers below
-at module scope. Nothing here touches a trainer instance any more.
+The update itself is ``cs2rl.train.trainer.Cs2PuffeRL.train``, which imports the
+helpers below at module scope. Nothing here touches a trainer instance.
 
 PITFALL (runtime rebinding): a test that wants to intercept ``tag_grad_cossim``
-at its call site must patch it on ``cs2rl.train.trainer``, NOT on this module —
-the call site inside ``Cs2PuffeRL.train`` resolves the name through
-cs2rl.train.trainer's globals, so a patch here is silently unreachable
-and the assertion becomes vacuous. See tests/train/test_tag_trainer.py, whose
-positive control pins the reachable module.
+or ``_hybrid_ppo_loss`` at its call site must patch it on ``cs2rl.train.trainer``,
+NOT on this module — the call sites (``Cs2PuffeRL._record_tag``,
+``Cs2PuffeRL._loss_terms``) resolve the names through cs2rl.train.trainer's
+globals, so a patch here is silently unreachable and the assertion becomes
+vacuous. See tests/train/test_tag_trainer.py, whose positive control pins the
+reachable module.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
@@ -31,10 +28,8 @@ function-local ON PURPOSE.
 from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
 
 # ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
-# WHY these are free functions and not methods on the trainer: the trainer is a
-# monkey-patched PuffeRL instance (pufferl.py is a site-package and is never
-# edited), so every reduction the update path needs has to live here where a
-# unit test can call it without building a trainer.
+# WHY these are free functions and not methods on the trainer: a unit test can
+# call them without building a trainer (a PuffeRL subclass that needs envs).
 # DTYPE CONTRACT used by every caller below: the *bool* [S,T] mask is for
 # INDEXING (`sel[mb_part]`); the *float* copy (`mb_part.to(torch.float32)`) is
 # the weight `w` these helpers take. `sel[mb_part_f]` is an IndexError and
@@ -84,6 +79,24 @@ def masked_normalize_adv(flat_adv, w):
     return (flat_adv - m) / (s + 1e-8) * w
 
 
+def masked_value_loss(newvalue, returns, old_values, vf_clip, part):
+    """0.5 * masked mean of the squared value error, PPO-clipped when ``vf_clip`` is set.
+
+    ``returns`` and ``old_values`` are in the value head's (normalised) scale. With
+    ``vf_clip`` the prediction may move at most ``vf_clip`` from ``old_values`` and the
+    larger of the clipped and unclipped errors counts; None disables clipping.
+    ``part`` is the FLOAT [S, T] participation weight.
+    """
+    import torch
+
+    v_loss_unclipped = (newvalue - returns)**2
+    if vf_clip is None:
+        return 0.5 * masked_mean(v_loss_unclipped, part)
+    v_clipped = old_values + torch.clamp(newvalue - old_values, -vf_clip, vf_clip)
+    v_loss_clipped = (v_clipped - returns)**2
+    return 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped), part)
+
+
 def masked_explained_variance(y_pred, y_true, part):
     """explained_variance over part == True rows (whole-buffer, Rung 0 §2.2).
 
@@ -109,7 +122,7 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
     """Config-driven entropy target for the SAC-style α controller.
 
     Single source for both the construction-time seed (Cs2PuffeRL._init_return_norm)
-    and the per-call recompute in cs2rl.train.trainer.Cs2PuffeRL.train — keeping them identical
+    and the per-update recompute (Cs2PuffeRL._prepare_entropy_update) — keeping them identical
     means a checkpoint-resumed trainer seeds at its true scheduled value
     instead of a hardcoded warmup constant. `config` is anything with
     .get() (PuffeRL config or a plain dict); missing keys fall back to the
