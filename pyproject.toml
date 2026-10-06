@@ -189,6 +189,8 @@ ignore = ["E501"]
 # (a sys.path insert of tests/) and the old dotted one are both banned.
 "metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
 "tests.metrics_census".msg = "import `tests._helpers.metrics_census` (#207 moved it)"
+# #321 moved the `make_env` wrapper, which only tests called, out of cs2rl.train.envs.
+"cs2rl.train.envs.make_env".msg = "import it from `tests._helpers.envs` (#321 moved it)"
 # #205 part 2a moved nine flat modules into the layer packages spec/, env/ and eval/.
 # Each old dotted name, in any spelling (`from cs2rl import nav` included), names its new
 # home. Needed because nothing else catches a leftover in a worktree before it runs: the
