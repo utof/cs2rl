@@ -86,7 +86,8 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
         silently never anneals. Handled here; ``restore_train_state`` zips the
         same two lists with strict=True, so a mismatch would also fail loudly
         on resume.
-      * Call AFTER the weight_decay=1e-4 line and BEFORE load_full_resume.
+      * Call BEFORE load_full_resume. (Its order against the weight_decay=1e-4
+        line does not matter: the new group's decay is set explicitly.)
         Resuming a PRE-branch checkpoint (whose optimizer state has one group)
         into the two-group optimizer raises in torch's own load_state_dict —
         loud, and accepted: every pre-branch run is complete (spec §2 T3).
@@ -479,8 +480,8 @@ def _preseed_selfplay_pool(args, trainer, resume_path: Path):
 def _configure_run_trainer(trainer, run_id: str, config: dict):
     """What a CLI run sets on the built trainer: the run id, weight decay, the σ group.
 
-    ORDER: before load_full_resume, whose optimizer state has the σ group; the σ group
-    clones group 0's hyper-parameters, so it is split off after the decay is set.
+    ORDER: before load_full_resume, whose optimizer state has the σ group. The decay
+    line and the split commute: the σ group's weight_decay is set to 0 explicitly.
     """
     # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
     # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
