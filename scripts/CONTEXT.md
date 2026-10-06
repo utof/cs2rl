@@ -18,6 +18,7 @@ image and shipped inside the source archive the container extracts. It has its o
 | `sync_action_spec.py` | regenerates `src/cs2rl/spec/action.py` and `src/cs2rl/spec/obs.py` from `cs2_types.h` |
 | `bake_nav.py` | writes `nav_data.h` for the raylib demo, from `make_simple_map()` |
 | `sim_fingerprint.py` | hashes a seeded rollout, to prove a sim refactor bit-identical to its parent commit |
+| `trainer_equivalence.py` | fingerprints seeded CPU trainer epochs (`run`/`compare`/`seedctl`), to prove a trainer refactor bit-identical to its base |
 | `pyrefly_gate.py` | the type gate the pre-commit hook runs; `--update` refreshes `pyrefly-snapshot.json` |
 | `run_rung1.sh` | the Rung 1 sweep: seeds, retries with `--resume-run`, the files `cs2rl.experiment.gate` reads |
 | `launch_server.sh` | starts a local CS2 server with 2 RL bots per side (`deploy/serversetup.md`) |

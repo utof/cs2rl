@@ -11,27 +11,28 @@ every flag.
 | layer | modules | owns |
 |-------|---------|------|
 | CLI | `__main__` | the argparse block, torch-free validation, the mode dispatch |
-| driver | `loop` | `train(args)`: vec env, policy, trainer, the epoch loop, checkpoints, dead-run detection |
+| driver | `loop` | `train(args)`: the run (W&B, metrics.jsonl, seeding, resume, eval hook), the epoch loop, checkpoints, dead-run detection |
+| builder | `compose` | `build_trainer`: shared memory, vec env, policy, participation rows, self-play manager and `Cs2PuffeRL`, for `train()` and the test harness |
 | modes | `record`, `evaluate`, `trainer` | `--record`, `--eval`, and `Cs2PuffeRL` |
 | parts | `selfplay`, `envs`, `update`, `rewards`, `entropy`, `resume`, `metrics` | the self-play pool, env wiring and `--smoke`, the PPO loss, reward normalisation, the entropy schedule, full-state resume, metric rows |
 | base | `config` | `build_train_config` (the run's `config.json`), `env_config_from_args` |
 
-The policy network is `cs2rl.policy`, two layers below, under eval, viz and BC; the env is
-`cs2rl.env`.
+The policy network is `cs2rl.policy_net.Dust2Policy`, built by `cs2rl.policy.build_policy`;
+both sit below eval, viz and BC. The env is `cs2rl.env`.
 
 ## The trainer
 
 `Cs2PuffeRL` (`trainer.py`) subclasses pufferlib's `PuffeRL`. Its `__init__` calls
 `_init_return_norm`, `_init_hybrid_aim` and `_init_selfplay`, in that order, then creates
 `_timing`. It overrides `train` (the return-normalised PPO update), `evaluate` (the self-play
-rollout) and `save_checkpoint` (full-state checkpoints). `loop.train` wraps the vec env in
+rollout) and `save_checkpoint` (full-state checkpoints). `compose.build_trainer` wraps the vec env in
 `HybridAimVecEnv`, which carries the continuous aim beside the discrete actions, before it
 constructs the trainer.
 
 Nothing patches a trainer instance any more: #168 (W1 to W3) moved the four monkeypatches
 into the class. The test harness, `tests/_helpers/trainer_harness.py`'s
-`_build_trainer_for_test`, constructs the same `Cs2PuffeRL`, so a harness trainer has every
-behaviour on.
+`_build_trainer_for_test`, builds through `compose.build_trainer` with `env_role="harness"`,
+so a harness trainer is built by the same code as a CLI run's and has every behaviour on.
 
 ## Where new code goes
 
@@ -48,9 +49,9 @@ behaviour on.
 
 ## Traps
 
-- `trainer.py` imports torch and pufferlib at module scope. `loop` imports it inside
-  `train()`, so that `--dump-config` stays light; `test_cli_module_scope_stays_light`
-  (`tests/train/test_w1_modules.py`) fails on a module-level import.
+- `trainer.py` imports torch and pufferlib at module scope. `compose` imports it inside
+  `build_trainer`, so that `--dump-config` stays light; `test_cli_module_scope_stays_light`
+  (`tests/train/test_w1_modules.py`) fails on a module-level import in `compose` or `loop`.
 - The package exports nothing: import a name from the module that owns it. `pyproject.toml`'s
   banned-api table bans, by name, every name the old flat train module bound except its
   standard-library and numpy imports and `__all__`; it does not say where each went.
