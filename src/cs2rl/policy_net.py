@@ -2,9 +2,15 @@
 
 Owns the module: its parameters and buffers, the order they are constructed in, and
 its forward paths (`forward_eval` for the rollout, `forward` for the BPTT update,
-`get_action_and_value`). `cs2rl.policy.build_policy` is its factory: it reads the observation size and max_turn_speed from the env, validates the
-run's σ cap and resolves the σ init, builds this module and moves it to the device.
-The constructor takes those resolved values as they are and checks none of them.
+`get_action_and_value`). `cs2rl.policy.build_policy` is its factory: it reads the
+observation size and max_turn_speed from the env, validates the run's σ cap and
+resolves the σ init, builds this module and moves it to the device. The constructor
+takes those resolved values as they are and checks none of them.
+
+PITFALL: construction ORDER is the global torch RNG stream, and the parameter and
+buffer names are the checkpoint format (`cs2rl.policy.state_dict_is_split` and
+`state_dict_is_trunk_split` read them). Reordering or renaming a module changes every
+seeded run's initial weights or orphans every saved checkpoint.
 
 WHY a module of its own: an `nn.Module` subclass needs torch at module scope, and
 `cs2rl.policy`'s module scope stays torch-free (tests/train/test_w1_modules.py), so
@@ -87,10 +93,9 @@ class Dust2Policy(nn.Module):
         self.hidden_size = hidden_size                 # required by PufferLib LSTM logic
         self.obs_dim = obs_dim
 
-        # Trunk-off keeps today's encoder/lstm construction verbatim so
-        # the flag-off RNG stream (and LEGACY_PARAM_NAMES) stay pinned.
-        # Trunk-on REPLACES those modules — do not keep a shared encoder
-        # or lstm beside the copies.
+        # Trunk-off builds the shared encoder/lstm (their names are
+        # tests/test_tct_split.py's LEGACY_PARAM_NAMES). Trunk-on REPLACES
+        # those modules — do not keep a shared encoder or lstm beside the copies.
         if not tct_split_trunk:
             self.encoder, self.lstm = _make_trunk(obs_dim, hidden_size)
         else:
@@ -101,16 +106,15 @@ class Dust2Policy(nn.Module):
             with torch.random.fork_rng(devices=[]):
                 self.encoder_ct, self.lstm_ct = _make_trunk(obs_dim, hidden_size)
 
-        # Batch 7 (spec 2026-08-13 §3.1): plain bool, NOT a buffer — it
-        # must never enter state_dict() or every existing checkpoint would
-        # gain a key. Loaders read it to detect a policy/checkpoint
-        # architecture mismatch (load_state_dict_arch_checked).
+        # Plain bools, NOT buffers (spec 2026-08-13 §3.1): they must never
+        # enter state_dict() or every existing checkpoint would gain a key.
+        # Loaders read them to detect a policy/checkpoint architecture
+        # mismatch (load_state_dict_arch_checked).
         self.tct_split_heads = bool(tct_split_heads)
         self.tct_split_trunk = bool(tct_split_trunk)
 
-        # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
-        #
-        # Batch 3: continuous Gaussian aim head.
+        # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES), and a
+        # continuous Gaussian aim head:
         # mu_aim → (B, AIM_DIM); tanh-squashed and scaled by max_turn_speed
         #   in forward(). State-DEPENDENT (per-step linear projection) so
         #   the policy can react to the current obs (visible enemies, yaw
@@ -119,22 +123,21 @@ class Dust2Policy(nn.Module):
         #   per Fan et al. IJCAI 2019 H-PPO baseline. Clamped in forward()
         #   to [aim_log_std_min, aim_log_std_max] so neither σ collapse (entropy
         #   loss → −∞) nor explosion (σ floods policy) is reachable.
-        #   Rung 1a T1: the init is aim_log_std_init, not LOG_STD_INIT — it
-        #   must start strictly INSIDE that clamp band or the parameter
-        #   receives zero gradient for the whole run.
+        #   The init is aim_log_std_init, not LOG_STD_INIT: it must start
+        #   strictly INSIDE that clamp band or the parameter receives zero
+        #   gradient for the whole run.
         # Pitfall: keep `std=0.01` on aim_mu init so the pre-tanh mean
         #   starts ~zero — otherwise the policy starts saturated and
         #   learning the Gaussian head is much slower.
         #
-        # Batch 7 note on the deliberate duplication of these three
-        # expressions across the two branches: the construction ORDER
-        # (7 discrete heads → value_head → aim_mu → aim_log_std) is what
-        # determines how many draws each layer takes from the global torch
-        # RNG. Factoring the head group into a shared helper would move
-        # value_head's draw and change every layer's init relative to the
-        # legacy baseline at the same seed. Repetition here buys exact
-        # RNG-stream parity between the flag-off and flag-on `_t` copies,
-        # which is the whole point of spec §3.7.
+        # The head group is spelled out in each branch, not built by one
+        # helper per team: construction ORDER (7 discrete heads → value_head
+        # → aim_mu → aim_log_std) fixes which draws of the global torch RNG
+        # each layer takes, and the one shared value_head sits between the T
+        # heads and the T aim_mu. A per-team group helper would move
+        # value_head's draw and change every later layer's init at the same
+        # seed. Spelled out, the flag-on `_t` copies draw exactly the flag-off
+        # stream (spec §3.7).
         if not self.tct_split_heads:
             self.action_heads = _make_action_heads(hidden_size)
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, 1), std=1.0)
@@ -167,12 +170,12 @@ class Dust2Policy(nn.Module):
             'max_turn_speed',
             torch.tensor(max_turn_speed, dtype=torch.float32),
         )
-        # R0-E.3/4 (#131): run properties, NOT checkpoint state
-        # (persistent=False so old checkpoints load and new ones don't
-        # carry them; SelfPlayManager re-applies them to past policies).
-        # aim_log_std_max caps σ in every forward (replaces LOG_STD_MAX at
-        # all clamp sites below); aim_dim_mask weights the per-dim
-        # Gaussian log-prob/entropy terms ([1,0] when pitch is pinned).
+        # R0-E.3/4 (#131): run properties, NOT checkpoint state (plain
+        # floats, and a persistent=False buffer, so old checkpoints load and
+        # new ones don't carry them; SelfPlayManager re-applies them to past
+        # policies). aim_log_std_min/max bound σ at every clamp site below;
+        # aim_dim_mask weights the per-dim Gaussian log-prob/entropy terms
+        # ([1,0] when pitch is pinned).
         # PITFALL: sampling still draws BOTH dims (the env ignores dim 1
         # when pinned) — only the density is masked, so the stored
         # cont_action stays byte-identical to what the env consumed.
@@ -257,13 +260,14 @@ class Dust2Policy(nn.Module):
             log_prob and entropy aggregate across all 8 factors (7
             categorical + 1 Normal) — discrete factors are independent so
             their log-probs sum, and the Gaussian factor adds to the
-            total. PPO loss assembly + the matching trainer side
-            (rollout buffer for continuous_action, ratio computation)
-            lands in task 5 via HybridAimVecEnv.
+            total.
+
+        No production path calls this: the trainer samples through
+        forward_eval + `cs2rl.policy._hybrid_sample_logits`. Tests use it.
         """
         hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
         # 2D input (B, obs): the team bit is a column. (The 3D
-        # timestep trap lives in forward(), not here.)
+        # timestep trap lives in forward() and _bptt_trunk(), not here.)
         mask = x[:, 24:25] if self.tct_split_heads else None
         if self.tct_split_heads:
             logits = [
@@ -306,7 +310,7 @@ class Dust2Policy(nn.Module):
             # the trainer ever uses pathwise gradients (PPO doesn't, but
             # cheap to keep this future-proof).
             continuous_action = aim_dist.rsample()
-            # Re-clamp post-sample (T5 carry-forward I-2): σ exploration
+            # Re-clamp post-sample: σ exploration
             # can land outside the tanh band. The C env (env_step, cs2_env.h)
             # clamps |Δyaw| ≤ max_turn_speed silently with fminf/fmaxf —
             # NOT an assert. The Python-side clamp keeps the recorded
@@ -335,10 +339,12 @@ class Dust2Policy(nn.Module):
         return action, continuous_action, log_prob, entropy, value, lstm_state
 
     def forward_eval(self, x, state):
-        # Batch 3: returns 4-tuple (logits, mu_aim, log_std, value) so
-        # downstream samplers (eval loop / record / past-policy mixing)
-        # can construct the full hybrid action. Existing 2-tuple
-        # consumers break here — task 5 updates them.
+        """Rollout forward, one tick: (logits, mu_aim, log_std, value).
+
+        `state` holds optional done / lstm_h / lstm_c; the new (h, c) is written
+        back into it. The 4-tuple is what the samplers (rollout, eval, record,
+        past-policy mixing) build the full hybrid action from.
+        """
         done = state.get("done")
         if done is None:
             done = x.new_zeros(x.shape[0])
@@ -357,39 +363,37 @@ class Dust2Policy(nn.Module):
         return logits, mu_aim, log_std, value
 
     def forward(self, x, state):
-        # Training-path forward: time-batched BPTT (LSTM-BPTT fix).
-        #
-        # WHAT: same 4-tuple contract as forward_eval, but a 3D input
-        #   (B=segments, T=bptt_horizon, OBS_DIM) is now unrolled through
-        #   the LSTM along T — mirroring upstream PufferLib 3.0's
-        #   models.LSTMWrapper.forward (encode flat → reshape seq-first →
-        #   one nn.LSTM call → heads on the flat output). Pre-fix this
-        #   flattened to (B*T, OBS) and ran the LSTM stateless per tick
-        #   (seq-len 1, zero state), so the recurrent weights never saw
-        #   through-time gradients and the PPO update recomputed
-        #   logprobs/values under a DIFFERENT function than the rollout
-        #   (forward_eval carries state tick-to-tick) — importance
-        #   ratios ≠ 1 before the first gradient step.
-        #
-        # WHY zero initial state is CORRECT here (not an approximation):
-        #   evaluate() zeroes trainer.lstm_h/c at its start, and with
-        #   compute_batch_dims' segments == total_agents each agent row
-        #   fills exactly ONE bptt_horizon segment per evaluate() call —
-        #   so every stored segment really did start from zero state.
-        #   PITFALL: if batch dims ever change so a row fills >1 segment
-        #   per evaluate(), zero-init becomes wrong for the later
-        #   segments and initial states must be stored at rollout time.
-        #
-        # state keys consumed (all optional; dict is NOT mutated):
-        #   lstm_h / lstm_c — initial state override, (B, H) or (1, B, H).
-        #     The trainer passes None → zero init (see above).
-        #   terminals — (B, T) done flags from the rollout buffer;
-        #     replicates forward_eval's (1-done)*state reset mid-segment
-        #     (see _lstm_bptt). Omit for the ONNX / single-tick path.
-        #
-        # ONNX (task 6): a 2D (B, OBS_DIM) input takes T=1 through the
-        # same code — one seq-len-1 LSTM call from zero state, identical
-        # math to the pre-fix path — so the export stays single-pathway.
+        """Training-path forward, time-batched BPTT: (logits, mu_aim, log_std, value).
+
+        WHAT: the same 4-tuple as forward_eval, but a 3D input
+          (B=segments, T=bptt_horizon, OBS_DIM) is unrolled through the LSTM
+          along T, as upstream PufferLib 3.0's models.LSTMWrapper.forward does
+          (encode flat → reshape seq-first → one nn.LSTM call → heads on the
+          flat output). That is what lets the recurrent weights see
+          through-time gradients, and it recomputes logprobs/values under the
+          same function as the rollout (forward_eval carries state tick to
+          tick), so the first minibatch's importance ratios are 1 up to float
+          rounding.
+
+        WHY zero initial state is CORRECT here (not an approximation):
+          evaluate() zeroes trainer.lstm_h/c at its start, and with
+          compute_batch_dims' segments == total_agents each agent row
+          fills exactly ONE bptt_horizon segment per evaluate() call —
+          so every stored segment really did start from zero state.
+          PITFALL: if batch dims ever change so a row fills >1 segment
+          per evaluate(), zero-init becomes wrong for the later
+          segments and initial states must be stored at rollout time.
+
+        state keys consumed (all optional; dict is NOT mutated):
+          lstm_h / lstm_c — initial state override, (B, H) or (1, B, H).
+            The trainer passes None → zero init (see above).
+          terminals — (B, T) done flags from the rollout buffer;
+            replicates forward_eval's (1-done)*state reset mid-segment
+            (see _lstm_bptt). Omit for a single-tick input.
+
+        A 2D (B, OBS_DIM) input runs as T=1: one seq-len-1 LSTM call from
+        zero state (BC's stateless `policy(x, {})` path in train_bc.py).
+        """
         if x.ndim == 3:
             B, TT = x.shape[0], x.shape[1]
         else:
@@ -523,7 +527,7 @@ class Dust2Policy(nn.Module):
     def _forward_core(self, x, lstm_state, done):
         """Single-tick encode + LSTM for rollout / eval.
 
-        WHAT: one seq-len-1 LSTM step. Trunk-off is today's
+        WHAT: one seq-len-1 LSTM step. Trunk-off is
         `self.encoder` then `self.lstm(h.unsqueeze(0), ...)`. Trunk-on
         runs both team encoders+lstms the same way, blends hidden, and
         blends the returned `(h,c)` with `mask.view(1, B, 1)` so the
@@ -542,7 +546,7 @@ class Dust2Policy(nn.Module):
             state is `(1-done)`-reset once, then fed to BOTH team LSTMs
             (unused output dropped by the 0/1 blend; used path is exact).
           * 2D mask is `x[:, 24:25]`. The 3D timestep-24 trap lives in
-            `forward()`, not here.
+            `forward()` and `_bptt_trunk()`, not here.
         """
         if not self.tct_split_trunk:
             h = self.encoder(x.float())

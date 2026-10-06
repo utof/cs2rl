@@ -25,7 +25,7 @@ commit 456c361, which made PPO do true BPTT. Today
 
   * PPO's rollout (`cs2rl.train.trainer.Cs2PuffeRL.evaluate`) CARRIES lstm_h/lstm_c
     from tick to tick within an episode (`forward_eval`), and
-  * PPO's update (`cs2rl.policy.build_policy`'s `Dust2Policy.forward` → `_lstm_bptt`) unrolls a
+  * PPO's update (`cs2rl.policy_net.Dust2Policy.forward` → `_lstm_bptt`) unrolls a
     whole 64-tick segment through the LSTM in one call.
 
 So a stateless clone optimises a function PPO never evaluates. Measured on the
@@ -656,7 +656,7 @@ def bc_loss(policy, obs_t, disc_t, cont_t, valid=None, entropy_coef: float = DEF
     the entropy bonus acts only on the discrete heads where it is wanted.
 
     No tanh/atanh change-of-variables: the head tanh-squashes the MEAN only
-    and samples a plain Normal (`cs2rl.policy.build_policy`'s `Dust2Policy.forward()`),
+    and samples a plain Normal (`cs2rl.policy_net.Dust2Policy.forward()`),
     so the density is the plain Gaussian one — see spec D-6, verified against
     _hybrid_sample_logits.
     """

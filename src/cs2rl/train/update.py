@@ -237,7 +237,7 @@ def _hybrid_ppo_loss(policy,
 
     # ── Shape harmonisation ──
     # PufferLib's PPO update path passes mb_obs with shape (segments,
-    # bptt_horizon, OBS_DIM); HybridPolicy.forward flattens to (B*T, ...)
+    # bptt_horizon, OBS_DIM); Dust2Policy.forward flattens to (B*T, ...)
     # before the heads, so logits/mu_aim/log_std/new_value come back at the
     # FLAT batch dim while mb_actions / mb_cont_actions / mb_advantages /
     # mb_old_logp_{d,c} retain their original (segments, bptt_horizon, …)

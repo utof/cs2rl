@@ -1266,7 +1266,7 @@ def test_logstd_clamp_upper():
 # ── Batch 3 Task 5: hybrid-aim trainer integration tests ─────────────────────
 #
 # These two tests exercise the trainer-side wiring that T5 added on top of
-# T4's HybridPolicy:
+# the policy's hybrid aim head:
 #   - test_hybrid_sample_writes_two_buffers: a single get_action_and_value()
 #       call must yield BOTH a finite int discrete action (7 heads) AND a
 #       finite float Δyaw bounded by max_turn_speed. If either buffer is

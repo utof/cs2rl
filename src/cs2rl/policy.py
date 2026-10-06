@@ -27,9 +27,9 @@ def state_dict_is_split(state_dict):
     in exactly one architecture and nowhere else in the key space.
 
     WHY key inference rather than the config flag: config.json is rewritten
-    unconditionally on every launch (the try-wrapped `config.json` write inside
-    `cs2rl.train.loop.train()` — NOT the `--dump-config` early-exit write in
-    `cs2rl.train.__main__`, which is conditional), so a flag-less
+    from the launch's own flags on every launch that builds its trainer
+    (`cs2rl.train.loop._write_config_json`; the `--dump-config` write in
+    `cs2rl.train.__main__` is a separate early exit), so a flag-less
     crash-resume would stamp `tct_split_heads: false` over a split run's
     provenance. Deciding from the keys means resume, self-play snapshot
     loading and the eval/record loader all do the right thing with no flag at
@@ -51,8 +51,9 @@ def state_dict_is_trunk_split(state_dict):
     `encoder_t`/`encoder_ct` (and both LSTMs) are always written together.
 
     WHY key inference rather than the config flag: same as
-    `state_dict_is_split` — `config.json` is rewritten on every launch, so a
-    flag-less crash-resume must recover trunk-ness from the keys. The heads
+    `state_dict_is_split` — `config.json` is rewritten on every launch that
+    builds its trainer, so a flag-less crash-resume must recover trunk-ness
+    from the keys. The heads
     helper stays the heads marker; loaders consult both bits independently.
 
     PITFALL: `"encoder_ct.0.weight".endswith("encoder_t.0.weight")` is False,
@@ -83,12 +84,12 @@ def load_state_dict_arch_checked(policy, state_dict, *, source):
     PITFALL: this does NOT convert. Legacy→split conversion is a deliberate
     act with a σ-re-init → heads convert → trunk convert ordering
     constraint, so it stays at the one call site that means it (the
-    train-main warm split). Policies built before the trunk attr exists
-    compare as trunk-off via getattr(..., False).
+    train-main warm split). An object without the flag attributes (every
+    Dust2Policy has both) compares as legacy on that axis via getattr(..., False).
     """
     ckpt_heads = state_dict_is_split(state_dict)
     ckpt_trunk = state_dict_is_trunk_split(state_dict)
-    # Today's policies have no tct_split_trunk attr; treat missing as off.
+    # A missing flag attribute reads as legacy (off).
     policy_heads = bool(getattr(policy, "tct_split_heads", False))
     policy_trunk = bool(getattr(policy, "tct_split_trunk", False))
     if ckpt_heads != policy_heads or ckpt_trunk != policy_trunk:
@@ -263,7 +264,12 @@ def build_policy(vecenv,
                  tct_split_trunk=False,
                  aim_log_std_max=None,
                  pin_pitch=False):
-    """Build the Dust2 recurrent policy.
+    """Build the run's `cs2rl.policy_net.Dust2Policy` from the env and these knobs, on `device`.
+
+    Reads obs_dim (unless overridden) and max_turn_speed from the driver env,
+    validates the σ cap and resolves the fresh σ init, then constructs the
+    module on CPU and moves it to `device`. Importing `cs2rl.policy_net` here,
+    not at module scope, keeps torch out of this module's import.
 
     aim_log_std_max / pin_pitch (R0-E.3 / R0-E.2, #131): per-RUN aim-head
     properties. The cap replaces LOG_STD_MAX at every σ clamp site; pin_pitch
@@ -285,14 +291,14 @@ def build_policy(vecenv,
     tct_split_trunk (spec 2026-08-15): when True the trunk — encoder + LSTM —
     is replaced by per-team copies (`encoder_t`/`lstm_t`, `encoder_ct`/`lstm_ct`).
     Each team LSTM sees only its own encoder's activations; hidden and the
-    rollout (h,c) blend on obs[24]. Default False keeps today's
-    `self.encoder` / `self.lstm` construction verbatim (legacy RNG pin).
+    rollout (h,c) blend on obs[24]. Default False builds the shared
+    `encoder` / `lstm`.
 
     PITFALL: callers must not decide split-ness from config alone — every
     loader infers it from the checkpoint's keys (state_dict_is_split /
     state_dict_is_trunk_split), because config.json is rewritten on each
-    launch and a flag-less crash-resume would otherwise rebuild the wrong
-    architecture (spec §3.3).
+    launch that builds its trainer and a flag-less crash-resume would
+    otherwise rebuild the wrong architecture (spec §3.3).
     """
     from cs2rl.policy_net import Dust2Policy
 
@@ -314,31 +320,14 @@ def build_policy(vecenv,
                        tct_split_trunk=tct_split_trunk).to(device)
 
 
-# ── SECTION: Batch 3 hybrid PPO helpers ────────────────────────────────────
+# ── SECTION: Hybrid-aim sampling ───────────────────────────────────────────
 #
-# These three functions are the trainer-side complement of T4's HybridPolicy
-# (mu_aim + log_std_aim Gaussian head bolted onto 7 categorical heads).
-#
-#   _hybrid_sample_logits  — the rollout-time replacement for
-#                            pufferlib.pytorch.sample_logits(logits[, action]).
-#                            Pure function; takes the 4-tuple emitted by
-#                            HybridPolicy.forward / forward_eval and produces
-#                            (action, continuous_action, log_prob, entropy).
-#                            Joint factorised log-prob = sum of categorical
-#                            log-probs + Normal log-prob (independence
-#                            assumption per spec L8).
-#
-#   _hybrid_ppo_loss       — the PPO-update-time replacement, doing the
-#                            forward pass + per-factor clipped policy loss
-#                            (Fan et al. IJCAI 2019 H-PPO baseline). Returns
-#                            split discrete/continuous ratios so the caller
-#                            can keep KL/clipfrac diagnostics on the discrete
-#                            half (back-compat with the existing log surface).
-#
-#   HybridAimVecEnv — wraps the backend send and Serial per-env step to
-#                         forward continuous aim. Cs2PuffeRL._init_hybrid_aim
-#                         owns the parallel rollout buffers used by train and
-#                         evaluate. Both are ready before the first rollout.
+# `_hybrid_sample_logits` samples the 4-tuple Dust2Policy's forward and
+# forward_eval emit (7 categorical heads + the Gaussian aim head) in place of
+# pufferlib.pytorch.sample_logits. Joint factorised log-prob = sum of the
+# categorical log-probs + the Normal log-prob (independence assumption per
+# spec L8). Its update-time counterpart is `cs2rl.train.update._hybrid_ppo_loss`,
+# and `cs2rl.train.trainer.HybridAimVecEnv` carries the continuous aim to the envs.
 
 
 def _hybrid_sample_logits(policy_out,
@@ -347,7 +336,7 @@ def _hybrid_sample_logits(policy_out,
                           max_turn_speed=None,
                           mask=None,
                           aim_dim_mask=None):
-    """Hybrid sampler for the 4-tuple HybridPolicy output (Batch 3 task 5).
+    """Hybrid sampler for the 4-tuple Dust2Policy output.
 
     Replaces the four in-tree usages of
     ``pufferlib.pytorch.sample_logits(logits[, action=...])`` that previously
@@ -357,8 +346,8 @@ def _hybrid_sample_logits(policy_out,
     Inputs
     ------
     policy_out : 4-tuple
-        (logits_list[7], mu_aim, log_std_aim, value) — the canonical T4
-        output of HybridPolicy.forward / forward_eval. The value slot is
+        (logits_list[7], mu_aim, log_std_aim, value) — the output of
+        Dust2Policy.forward / forward_eval. The value slot is
         ignored here; the caller already has it from the original call.
     action : (B, ACTION_DIM=7) int64 tensor, or None
         If None, sample fresh from the categorical heads. If supplied
@@ -405,12 +394,10 @@ def _hybrid_sample_logits(policy_out,
             anywhere downstream. Callers that don't need entropy can ignore
             with `*_entropies` unpacking.
 
-    Pre-Fix#1 (Batch 3 T5) this returned the SUMMED log_prob and SUMMED
-    entropy as a 4-tuple, forcing the rollout caller to reconstruct
-    distributions to recover the per-factor halves for self.logprobs_d /
-    self.logprobs_c. That double-construction was measured at +437 ms/epoch
-    on the i7-9750H smoke (16.0 ms/step actual vs 9.1 ms/step minimal).
-    Surfacing the halves directly drops that cost to ~9.1 ms/step.
+    WHY the halves rather than the joint sums: the rollout stores them
+    separately (the trainer's logprobs_d / logprobs_c), and recovering them
+    from sums meant building the 7 Categorical + 1 Normal a second time, which
+    measured +437 ms/epoch on the i7-9750H smoke (16.0 vs 9.1 ms/step).
     """
     import torch
     import torch.nn.functional as F
@@ -460,7 +447,7 @@ def _hybrid_sample_logits(policy_out,
     if continuous_action is None:
         continuous_action = mu_aim + sigma * torch.randn_like(mu_aim)
         if max_turn_speed is not None:
-            # Same clamp logic as HybridPolicy.get_action_and_value (T4).
+            # Same clamp logic as Dust2Policy.get_action_and_value.
             # The C env (env_step, cs2_env.h) clamps silently with fminf/fmaxf;
             # storing the post-clamp value keeps the PPO ratio honest.
             continuous_action = torch.clamp(continuous_action, -max_turn_speed, max_turn_speed)
@@ -586,11 +573,13 @@ def validate_aim_log_std_max(aim_log_std_max) -> float:
     Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
     LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
 
-    WHY a separate torch-free helper: build_policy() only runs after the env
-    and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
-    launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
-    step). main() now calls this right after parse_args(), above the
-    --dump-config exit, so the fingerprint catches it.
+    WHY a separate torch-free helper: build_policy() runs only once the env
+    and torch are up, after `--dump-config` (the Modal runner's fingerprint
+    step) has already exited, so a cap checked only there would let a bad
+    --aim-log-std-max through the fingerprint. The CLI
+    (`cs2rl.train.__main__`'s module-level `if __name__ == "__main__"` block)
+    calls this right after `parser.parse_args()`, above the --dump-config exit,
+    so the fingerprint catches it.
     PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
     log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
     and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
