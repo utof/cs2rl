@@ -388,6 +388,8 @@ layers = [
     "train",
     "train_bc : bc_demos : profile_step : viz : eval",
     "policy",
+    # The nn.Module (torch at module scope); build_policy above imports it lazily.
+    "policy_net",
     "env",
     "spec",
 ]
