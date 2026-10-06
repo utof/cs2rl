@@ -175,17 +175,17 @@ def build_participating_rows(num_envs: int,
         team neither learns nor is counted.
 
     WHY a shared helper: this vector used to be built by two copies of the same
-    expression (`cs2rl.train.loop.train` and
-    `tests._helpers.trainer_harness._harness_parts`), and it sits UPSTREAM of
+    expression (one in train(), one in the test harness), and it sits UPSTREAM of
     global_step, the buffer scatter, every masked loss and
     losses/participating_rows. Patching one copy would have left the headline
     harness test green while production still trained on both teams — precisely
-    the silent failure this experiment cannot afford.
+    the silent failure this experiment cannot afford. Its one caller now is
+    `cs2rl.train.compose._participating_rows`, for production and tests alike.
 
     PITFALLS
     - Derived from ARGS, while the envs are built separately from the same
-      args; train() keeps an explicit driver-env agreement assert beside its
-      call site, and Cs2PuffeRL._init_hybrid_aim re-checks the length.
+      args; its caller keeps an explicit driver-env agreement assert beside the
+      call, and Cs2PuffeRL._init_hybrid_aim re-checks the length.
     - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
       (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
       constant for the whole run because the mode forbids self-play; a

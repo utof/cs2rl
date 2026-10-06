@@ -12,22 +12,21 @@ a subclass and nothing mutates a trainer instance.
 WHY a module of its own and not a class inside cs2rl.train.loop: this module subclasses
 ``PuffeRL``, so it imports torch and pufferlib at module scope and is HEAVY by
 construction. The CLI module's scope (``cs2rl.train.__main__``, which imports
-``cs2rl.train.loop`` at its module level) must stay torch-free
-(tests/train/test_w1_modules.py::test_cli_module_scope_stays_light: it is what keeps
-``--dump-config`` at ~1 s), so ``cs2rl.train.loop`` imports this module function-locally,
-inside ``train()``. tests/_helpers/trainer_harness.py (gh#168 W1.5) imports it the same
-way, function-locally inside ``_build_trainer_for_test``, so
-``from tests._helpers import trainer_harness`` stays as light as the CLI module
-(tests/train/test_w1_modules.py::test_import_train_test_harness_stays_light);
-tests/train/test_trainer_composition.py imports it inside a fixture. Never add
-``from cs2rl.train.trainer import ...`` at ``cs2rl.train.loop``'s module level (knock-out
-W1-K3 in the spec: test_cli_module_scope_stays_light goes red naming torch).
+``cs2rl.train.loop`` and through it ``cs2rl.train.compose`` at module level) must stay
+torch-free (tests/train/test_w1_modules.py::test_cli_module_scope_stays_light: it is
+what keeps ``--dump-config`` at ~1 s), so this module's one importer in src/,
+``cs2rl.train.compose.build_trainer``, imports it function-locally. The test harness
+builds through compose, so ``from tests._helpers import trainer_harness`` stays as light
+as the CLI module (tests/train/test_w1_modules.py::test_import_train_test_harness_stays_light).
+Never add ``from cs2rl.train.trainer import ...`` at the module level of ``compose`` or
+``loop`` (knock-out W1-K3 in the spec: test_cli_module_scope_stays_light goes red naming
+torch).
 
-IMPORT DIRECTION: ``cs2rl.train.loop`` imports this module, inside ``train()``; this
-module imports nothing from ``loop`` or ``__main__``, at any scope. pyproject.toml's
-``cs2rl.train layers`` contract enforces that (``__main__`` and ``loop`` sit above
-``trainer``), so there is no import cycle to order and no ``__main__`` aliasing to get
-right.
+IMPORT DIRECTION: ``cs2rl.train.compose`` imports this module, inside ``build_trainer``;
+this module imports nothing from ``compose``, ``loop`` or ``__main__``, at any scope.
+pyproject.toml's ``cs2rl.train layers`` contract enforces that (``__main__``, ``loop``
+and ``compose`` sit above ``trainer``), so there is no import cycle to order and no
+``__main__`` aliasing to get right.
 """
 
 from __future__ import annotations
@@ -219,30 +218,35 @@ class Cs2PuffeRL(PuffeRL):
 
     Parameters beyond PuffeRL's ``(config, vecenv, policy, logger=None)``:
 
+    The caller is ``cs2rl.train.compose.build_trainer``, for a CLI run and for a test
+    trainer alike; it builds every argument below.
+
     cont_action_view_main : np.ndarray or None
-        Main-process view of the continuous-action shared array. train() allocates it and
-        passes it on BOTH backends (cs2rl.train.loop.train builds `_cont_action_view_main`
-        before the vecenv, unconditionally); only the harness passes None.
+        Main-process view of the continuous-action shared array. A CLI run passes it on
+        both backends; a test trainer (``env_role="harness"``) passes None, and the
+        Serial per-env step wrapper in ``HybridAimVecEnv`` carries the aim.
     mask_view_main : np.ndarray or None
         Main-process view of the action-mask shared array (F8). None: the rollout samples
         unmasked and ``action_masks`` keeps its all-ones default.
     participating_rows : np.ndarray or None
         Static per-run participation vector (Rung 0 §2.2; None: every row participates),
-        built by the caller with ``build_participating_rows`` BEFORE construction, exactly
-        as train() does.
+        from ``build_participating_rows``.
     self_play_mgr : SelfPlayManager
-        Built by the caller (``build_selfplay_manager``) and, on a resume, pre-seeded BEFORE
-        construction. The pool is read only at evaluate() time, so seeding after construction
-        would also work today; the order is kept to match train() byte for byte.
+        From ``build_selfplay_manager``, or given by the caller. The pool is read only at
+        evaluate() time, so a CLI warm start seeds it after construction.
 
     PITFALLS
-    - The order of state setup matches train()'s former patch order. All state
-      must exist before the first evaluate()/train()/save_checkpoint() call.
-    - ``_timing`` is created here because train()'s loop assigns INTO it and the [Timing]
-      print reads it; it is not a patch (#166 deleted the timing patch).
-    - Everything a caller used to set on the instance AFTER construction (``logger.run_id``,
-      ``weight_decay``, the aim-σ param group, the shm GC pins) still happens in train(),
-      after this constructor returns: none of it is read at patch time (spec §W1 table).
+    - State a phase method reads is created here, before the first
+      evaluate()/train()/save_checkpoint() call. Three attributes are the exception:
+      created later and read through getattr fallbacks, ``_selfplay_used_past`` (set by
+      evaluate), ``_tag_metrics`` (reset by the epoch loop, filled by TAG minibatches)
+      and ``_last_nan_warn_t`` (set by the first NaN warning).
+    - ``_timing`` is created here because the epoch loop (cs2rl.train.loop._run_epochs)
+      assigns INTO it and the [Timing] print reads it.
+    - After this constructor returns, build_trainer pins the shared-memory owners
+      (``_action_mask_shm``, and ``_cont_action_shm`` when it allocated one), and a CLI
+      run's train() sets ``logger.run_id``, the weight decay and the aim-σ param group.
+      The constructor reads none of them.
     """
 
     # PuffeRL owns the stock rollout buffers and recurrent-state maps; their
@@ -266,8 +270,11 @@ class Cs2PuffeRL(PuffeRL):
     logprobs_d: torch.Tensor
     participating: torch.Tensor
     _tag_metrics: dict | None
-    # The driver pins this shared-memory owner; the trainer reads its numpy view.
+    # cs2rl.train.compose.build_trainer pins these shared-memory owners after
+    # construction (the continuous one only for a CLI run); the trainer reads their
+    # numpy views.
     _action_mask_shm: object
+    _cont_action_shm: object
 
     def __init__(self,
                  config,
@@ -288,12 +295,10 @@ class Cs2PuffeRL(PuffeRL):
             self._init_return_norm()
             self._init_hybrid_aim(cont_action_view_main, mask_view_main, participating_rows)
             self._init_selfplay(self_play_mgr)
-            # Per-epoch wall-clock, measured at the evaluate()/train() call sites in
-            # train()'s loop (#166 replaced a monkey-patch that wrapped both methods; the
-            # patch had to be installed LAST so selfplay could not shadow it, which made
-            # patch order load-bearing for a measurement). The dict is created here
-            # because the loop assigns INTO it and the [Timing] print reads it, so it
-            # has to exist before the first epoch.
+            # Per-epoch wall-clock, measured around the evaluate()/train() calls in
+            # cs2rl.train.loop._run_epochs. The dict is created here because the loop
+            # assigns INTO it and the [Timing] print reads it, so it has to exist
+            # before the first epoch.
             self._timing = {"collect_ms": 0.0, "update_ms": 0.0}
         except BaseException:
             # Early base-constructor failures may precede thread creation.
@@ -536,9 +541,8 @@ class Cs2PuffeRL(PuffeRL):
         return (mb_returns - self._ret_mean) / std
 
     def _init_selfplay(self, self_play_mgr):
-        """Self-play state for evaluate() (the patch-time half of the former self-play
-        patcher in the flat train.py; W2b of gh#168). Called from __init__ right after
-        hybrid-aim buffer setup and before ``_timing``, where the patch call stood.
+        """Self-play state for evaluate(). Called from __init__ after ``_init_hybrid_aim``
+        and before ``_timing``.
 
         Stores the manager, the past policy's own LSTM state (the same dict structure as
         ``self.lstm_h``: keyed by agent-batch start ``i*n``, one ``(agents_per_batch,

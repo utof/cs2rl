@@ -87,7 +87,7 @@ SRC = REPO_ROOT / "src" / "cs2rl"
 # `self_play_used_past_metric` is on the list although it emits nothing: it is
 # named by the spec as one of "our emitters", and an empty result from it is a
 # fact worth re-checking rather than an omission worth wondering about. Its
-# caller (`train` in train/loop.py) is what writes `self_play/used_past`.
+# caller (`_log_selfplay` in train/loop.py) is what writes `self_play/used_past`.
 #
 # `Cs2Env.step` is listed SEPARATELY from `Cs2Env._build_terminal_info` because
 # the step-stats merge is not in the helper: it is an inline
@@ -122,10 +122,11 @@ EMITTER_SITES = (
     EmitterSite("train/trainer.py", "Cs2PuffeRL._log_and_checkpoint",
                 {"self.stats": "environment/"}),
     EmitterSite("train/update.py", "tag_grad_cossim", {"out": ""}),
-    EmitterSite("train/loop.py", "train", {
-        "logs": "",
-        "log_entry": ""
-    }),
+                                                                                                 # #92 part 2 split the epoch loop out of `train`; these four hold its writes.
+    EmitterSite("train/loop.py", "_run_epochs", {"logs": ""}),
+    EmitterSite("train/loop.py", "_log_epoch", {"logs": ""}),
+    EmitterSite("train/loop.py", "_log_selfplay", {"logs": ""}),
+    EmitterSite("train/loop.py", "_persist_row", {"log_entry": ""}),
     EmitterSite("train/selfplay.py", "self_play_used_past_metric", {"logs": ""}),
     EmitterSite("env/c/cs2_env.py", "Cs2Env._build_terminal_info", {"summary": "environment/"}),
     EmitterSite("env/c/cs2_env.py", "Cs2Env.step", {"summary": "environment/"}),

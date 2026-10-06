@@ -173,11 +173,11 @@ def composed(monkeypatch):
     """(trainer, stock_surface): the trainer ``_build_trainer_for_test`` returns.
 
     ``PuffeRL.__init__`` is wrapped so the stock surface is measured on THIS instance, not
-    copied from a list that could drift with a pufferlib bump. W1 built the trainer here
-    from ``_harness_parts``; since W1.5 the harness constructs ``Cs2PuffeRL`` itself, so
-    going through it is what proves the production class is the one every harness test
-    gets. ``_action_mask_shm`` (a GC pin the harness and train() both set after the
-    constructor) is removed from the measured surface so (2) compares construction only.
+    copied from a list that could drift with a pufferlib bump. The harness builds through
+    ``cs2rl.train.compose.build_trainer``, as train() does, so going through it is what
+    proves the production class is the one every harness test gets. ``_action_mask_shm``
+    (a GC pin build_trainer sets after the constructor) is removed from the measured
+    surface so (2) compares construction only.
     """
     from pufferlib.pufferl import PuffeRL
 
@@ -193,10 +193,10 @@ def composed(monkeypatch):
     monkeypatch.setattr(PuffeRL, "__init__", recording_init)
     trainer, cleanup = _build_trainer_for_test(num_envs=16)
     try:
-        # Pin the pin: folding a name into the stock set that the harness no
+        # Pin the pin: folding a name into the stock set that build_trainer no
         # longer sets would hide its disappearance from (2), so check first.
         assert "_action_mask_shm" in vars(trainer), (
-            "the harness no longer pins the mask RawArray on the trainer after the "
+            "build_trainer no longer pins the mask RawArray on the trainer after the "
             "constructor; (2) would silently absorb the missing name")
         yield trainer, stock["names"] | {"_action_mask_shm"}
     finally:
@@ -565,9 +565,9 @@ def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path)
     Two assertions, both against the interpreter's state rather than the code:
     - every ``Utilization`` thread that exists afterwards has ``stopped`` set (the fix's
       one line), and each one actually ends within its own ``delay`` (1 s) plus slack;
-    - the harness scratch dir is gone (``_harness_parts`` and ``_build_trainer_for_test``
-      both rmtree on a raise; ``tempfile.tempdir`` is pointed at ``tmp_path`` so the
-      check is exact and cannot see another process's scratch dirs).
+    - the harness scratch dir is gone (``_build_trainer_for_test`` rmtrees it on a raise;
+      ``tempfile.tempdir`` is pointed at ``tmp_path`` so the check is exact and cannot
+      see another process's scratch dirs).
     The threads are enumerated by TYPE: pufferlib names them "Thread-N", not
     "Utilization". A mutant that deletes the ``stop()`` is red on the first assertion
     immediately (``stopped`` is False) and on the second after the join times out.

@@ -1,10 +1,11 @@
 """Trainer-level tests for Batch 1 reward architecture changes.
 
 The first two tests exercise the bare Cs2Env factory (obs/rewards shape
-sanity). The Task 6c tests below use the minimal trainer harness from
-tests/_helpers/trainer_harness.py (Task 6b). Do NOT import the full production
-trainer setup — those tests only need to verify the Task 6c changes to the
-self-play state (``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
+sanity). The Task 6c tests below use the trainer harness from
+tests/_helpers/trainer_harness.py, which builds the production trainer through
+cs2rl.train.compose.build_trainer without train()'s run setup — those tests only
+need to verify the Task 6c changes to the self-play state
+(``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
 """
 import numpy as np
 import pytest

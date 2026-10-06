@@ -830,7 +830,7 @@ def test_trunk_split_checkpoint_round_trips_bitwise(env):
         assert torch.equal(pa, pb), n
 
 
-def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
+def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path, capsys):
     """Heads-only + trunk_flag widens trunk only; omitted flags infer both;
     load_policy_from_checkpoint does not KeyError on encoder_t.
 
@@ -839,7 +839,7 @@ def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
 
     PITFALL: this warm-split is trunk-only (heads already split).
     """
-    import inspect
+    from types import SimpleNamespace
 
     heads_pt = tmp_path / "heads.pt"
     both_pt = tmp_path / "both.pt"
@@ -882,8 +882,14 @@ def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
     past = mgr.load_past_policy("cpu", env)
     assert past is not None and past.tct_split_trunk is True and past.tct_split_heads is False
 
-    # Train-main must not discard the resolved trunk bit.
-    src = inspect.getsource(train_loop.train)
-    assert "tct_split_trunk=tct_split_trunk" in src
-    assert ", _tct_split_trunk," not in src
-    assert "duplicated the shared encoder+LSTM into per-team" in src
+    # train() must not discard the resolved trunk bit: the PolicyInit it hands
+    # build_trainer carries both bits and the converted weights
+    # (tests/train/test_driver_cleanup.py checks the bits reach build_policy).
+    capsys.readouterr()
+    init = train_loop._resume_policy_init(SimpleNamespace(resume=str(heads_pt),
+                                                          tct_split_trunk=True),
+                                          full_state=False)
+    assert (init.tct_split_heads, init.tct_split_trunk) == (True, True)
+    assert policy_mod.state_dict_is_trunk_split(init.state_dict)
+    assert init.source == str(heads_pt)
+    assert "duplicated the shared encoder+LSTM into per-team" in capsys.readouterr().out

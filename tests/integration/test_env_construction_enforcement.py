@@ -59,9 +59,10 @@ THE CARVE-OUT, precisely. A construction is `Call(func=Name(X))` or
 `Call(func=Attribute(attr=X))` for X in {make_puffer_env, SelfPlayManager}.
 `Call(func=Attribute(value=Name(X), attr=<other>))` is CLASSMETHOD ACCESS and is
 NOT a construction: `SelfPlayManager.initial_hero_team()` is a live, legitimate
-call in both `train()` and `_build_trainer_for_test`. Matching the ATTRIBUTE
-position (`attr`) rather than the value position is the whole mechanism — a
-naive value-position match flags those two sites, and the tempting fix is to
+call in `cs2rl.train.compose`, which builds the trainer for `train()` and for
+`_build_trainer_for_test`. Matching the ATTRIBUTE position (`attr`) rather than
+the value position is the whole mechanism — a naive value-position match flags
+that site, and the tempting fix is to
 loosen the matcher until the real coverage dies, with nothing to notice.
 
 WHY THE FACTORY HAS NO NAMED CONSTRUCTOR CALL. The manager is constructed in
@@ -110,8 +111,9 @@ _CONSTRUCTED_NAMES = frozenset({"make_puffer_env", "SelfPlayManager"})
 # Explicit roots, per spec §2 W3 — never a walk from the repo root, which would
 # visit `.worktrees/` (checkouts of this same repo, with their own copies of
 # every site) and report findings that belong to another branch.
-# tests/_helpers/ holds the trainer harness (#205 part 3 moved it out of src/): it
-# builds a SelfPlayManager through build_selfplay_manager, so it stays in scope.
+# tests/_helpers/ holds the trainer harness (#205 part 3 moved it out of src/). It builds
+# through cs2rl.train.compose now, and stays in scope so a construction added there is
+# seen.
 ROOTS = (REPO_ROOT / "src", REPO_ROOT / "scripts", REPO_ROOT / "tests" / "_helpers")
 
 # The one file allowed to construct. Everything else routes through it.
@@ -136,14 +138,15 @@ def _exempt(path, symbol) -> bool:
 # current counts (37 and 21 files after #204) so ordinary churn never touches them; they
 # exist to catch a root that resolved to nothing, not to pin a file count.
 MIN_FILES_PER_ROOT = 8
-# tests/_helpers/ holds two modules (the metrics census and the trainer harness).
+# tests/_helpers/ holds a few modules; at least the metrics census and the trainer harness.
 MIN_FILES_BY_ROOT = {REPO_ROOT / "tests" / "_helpers": 2}
 
 # Anchors that must be among the scanned files. A root can exist, contain .py
 # files and still be the WRONG directory; naming the files whose contents this
 # test is actually about removes that.
-ANCHORS = ("src/cs2rl/train/loop.py", "tests/_helpers/trainer_harness.py",
-           "src/cs2rl/env/factory.py", "src/cs2rl/train/selfplay.py")
+ANCHORS = ("src/cs2rl/train/compose.py", "src/cs2rl/train/loop.py",
+           "tests/_helpers/trainer_harness.py", "src/cs2rl/env/factory.py",
+           "src/cs2rl/train/selfplay.py")
 
 # ── The lower layer this file deliberately does NOT ban ─────────────────────
 #
@@ -748,23 +751,21 @@ def test_classmethod_access_is_not_a_construction():
 def test_the_real_classmethod_call_sites_still_exist_and_are_not_flagged():
     """The carve-out is exercised by LIVE source, not only by the synthetic case.
 
-    `train()` and `_build_trainer_for_test` both call
+    `cs2rl.train.compose._participating_rows` calls
     `SelfPlayManager.initial_hero_team()` to build the participation vector
-    before any manager exists. If those two calls were ever removed, the carve-out
-    would still be "correct" and would be protecting nothing — and the synthetic
-    test above would keep passing. This pins that the real sites are there and
-    that the scan leaves them alone.
+    before any manager exists; it builds the trainer for `train()` and for
+    `_build_trainer_for_test` alike (#92 part 2; each had its own call before). If
+    that call were ever removed, the carve-out would still be "correct" and would
+    be protecting nothing — and the synthetic test above would keep passing. This
+    pins that the real site is there and that the scan leaves it alone.
     """
-    live = []
-    for path in (REPO_ROOT / "src" / "cs2rl" / "train" / "loop.py",
-                 REPO_ROOT / "tests" / "_helpers" / "trainer_harness.py"):
-        tree = ast.parse(path.read_text())
-        live += [(path.name, n.lineno) for n in ast.walk(tree)
-                 if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                 and isinstance(n.func.value, ast.Name) and n.func.value.id == "SelfPlayManager"]
-    assert len(live) >= 2, (
-        f"expected the two SelfPlayManager.<classmethod>() call sites, found {live}; the "
-        "carve-out below is no longer protecting anything real")
+    path = REPO_ROOT / "src" / "cs2rl" / "train" / "compose.py"
+    live = [(path.name, n.lineno) for n in ast.walk(ast.parse(path.read_text()))
+            if isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+            and isinstance(n.func.value, ast.Name) and n.func.value.id == "SelfPlayManager"]
+    assert len(live) >= 1, (
+        f"expected the SelfPlayManager.<classmethod>() call site in {path.name}, found none; "
+        "the carve-out below is no longer protecting anything real")
 
     _, found = scan(ROOTS)
     flagged = {(p.name, lineno) for p, _, lineno, _ in found}

@@ -1,4 +1,9 @@
-"""Drive train(args) through resource ownership and failures, without GPU or W&B I/O."""
+"""Drive train(args) on fakes, without GPU or W&B I/O: resource ownership and failures,
+and the wiring between train() and the trainer it builds.
+
+The trainer is built by the real `cs2rl.train.compose.build_trainer`; only the expensive
+acquisitions it and train() call are replaced.
+"""
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -6,7 +11,7 @@ import numpy as np
 import pytest
 import torch
 
-from cs2rl.train import loop
+from cs2rl.train import compose, loop
 
 
 @pytest.fixture
@@ -25,6 +30,8 @@ def run_driver(monkeypatch, tmp_path):
     from cs2rl.train import trainer as trainer_module
 
     events, files, failures = [], [], {}
+    # What the fakes were handed and what they returned, keyed by boundary.
+    captured: dict = {}
     args = SimpleNamespace(
         device="cpu",
         checkpoint_dir=str(tmp_path),
@@ -100,8 +107,10 @@ def run_driver(monkeypatch, tmp_path):
             hit("vec.close")
 
     def make_vec(*a, **kw):
+        captured["vec.make"] = (a, kw)
         hit("vec.make")
-        return RawVec()
+        captured["vec"] = RawVec()
+        return captured["vec"]
 
     class Policy:
         """A seeded tensor lets the normal control check checkpoint contents."""
@@ -117,6 +126,7 @@ def run_driver(monkeypatch, tmp_path):
             return {"weight": self.weight}
 
     def make_policy(*a, **kw):
+        captured["build_policy"] = kw
         hit("policy")
         return Policy()
 
@@ -124,9 +134,12 @@ def run_driver(monkeypatch, tmp_path):
         """Run two epochs, including a throttled row, with the real wrapper."""
 
         def __init__(self, config, vecenv, policy, **kw):
+            captured["trainer.init"] = kw
             hit("trainer.init")
             self.vecenv = vecenv
-            self.policy = policy
+            self.policy = self.uncompiled_policy = policy
+            self._self_play_mgr = kw["self_play_mgr"]
+            self._participating_rows_np = kw["participating_rows"]
             self.logger = SimpleNamespace(run_id="old")
             self.optimizer = SimpleNamespace(param_groups=[{}])
             self.epoch, self.total_epochs, self.global_step = 0, 2, 0
@@ -162,8 +175,14 @@ def run_driver(monkeypatch, tmp_path):
             hit("eval.close")
 
     def make_eval(*a, **kw):
+        captured["eval.make"] = kw
         hit("eval.make")
-        return EvalEnv()
+        captured["eval.env"] = EvalEnv()
+        return captured["eval.env"]
+
+    def check_eval(*a):
+        captured["eval.check"] = a
+        hit("eval.check")
 
     class Evaluator:
 
@@ -185,17 +204,21 @@ def run_driver(monkeypatch, tmp_path):
     monkeypatch.setattr(Path, "open", open_metrics)
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=wandb_init))
     monkeypatch.setattr(pufferlib.vector, "make", make_vec)
-    monkeypatch.setattr(loop, "check_spawn_counts", lambda *a: hit("spawn.check"))
-    monkeypatch.setattr(loop, "build_policy", make_policy)
-    monkeypatch.setattr(loop, "build_train_config", lambda *a, **kw: {
-        "aim_log_std_init": -1.0,
-        "aim_log_std_max": 0.0,
-    })
+    monkeypatch.setattr(compose, "check_spawn_counts", lambda *a: hit("spawn.check"))
+    monkeypatch.setattr(compose, "build_policy", make_policy)
+    monkeypatch.setattr(
+        loop, "build_train_config", lambda *a, **kw: {
+            "aim_log_std_init": -1.0,
+            "aim_log_std_max": 0.0,
+            "weight_decay": 1e-4,
+            "total_timesteps": 20,
+            "participating_timesteps": 20,
+        })
     monkeypatch.setattr(trainer_module, "Cs2PuffeRL", Trainer)
-    monkeypatch.setattr(loop, "assert_pin_pitch_agreement", lambda *a: hit("pin.check"))
-    monkeypatch.setattr(loop, "assert_max_turn_speed_agreement", lambda *a: None)
+    monkeypatch.setattr(compose, "assert_pin_pitch_agreement", lambda *a: hit("pin.check"))
+    monkeypatch.setattr(compose, "assert_max_turn_speed_agreement", lambda *a: None)
     monkeypatch.setattr(loop, "build_eval_env", make_eval)
-    monkeypatch.setattr(loop, "assert_eval_env_agreement", lambda *a: hit("eval.check"))
+    monkeypatch.setattr(loop, "assert_eval_env_agreement", check_eval)
     monkeypatch.setattr(baselines, "BaselineEvaluator", Evaluator)
     monkeypatch.setattr(loop, "_atomic_save_state_dict", save)
     try:
@@ -203,6 +226,7 @@ def run_driver(monkeypatch, tmp_path):
                               events=events,
                               failures=failures,
                               files=files,
+                              captured=captured,
                               trainer_module=trainer_module,
                               directory=tmp_path)
     finally:
@@ -227,6 +251,8 @@ def test_success_preserves_order_scheduling_and_outputs(run_driver):
     assert (rows[0]["epoch"], rows[0]["step"], rows[0]["eval/epoch"]) == (2, 20, 2)
     assert rows[0]["eval/test"] == 0.75
     assert rows[0]["timing/collect_ms"] >= 0 and rows[0]["timing/update_ms"] >= 0
+    # F11: --no-self-play keeps the manager (evaluate() needs it) but logs none of its keys.
+    assert not [key for key in rows[0] if key.startswith("self_play/")]
     expected = torch.rand(2, generator=torch.Generator().manual_seed(7))
     assert torch.equal(torch.load(run.directory / "dust2_policy.pt")["weight"], expected)
 
@@ -351,3 +377,206 @@ def test_periodic_save_failure_closes_resources(run_driver):
         "eval.run", "save", "trainer.close", "vec.close", "eval.close", "metrics.close",
         ("wandb.finish", 1)
     ]
+
+
+# ── What train() hands the trainer it builds ───────────────────────────────
+# Each test below replaces a source-text pin on train() from before #92 part 2, when
+# train() could not be driven without a real run.
+
+
+def _rows(run):
+    import json
+
+    return [json.loads(line) for line in (run.directory / "metrics.jsonl").read_text().splitlines()]
+
+
+def test_train_envs_get_the_run_config_their_seed_and_their_shm_slot(run_driver, monkeypatch):
+    """Env i is built with the run's EnvConfig, `_seed = env_seed_base(--seed) + i` and
+    shared-memory slot i.
+
+    The creators and per-env kwargs given to vector.make are called the way pufferlib's
+    Serial backend calls them, with the env builder replaced by a recorder. The reward
+    override proves the config is the run's and not EnvConfig(): a dropped config trains
+    the default weights with nothing failing. vector.make must get no `seed=`: pufferlib
+    never forwards it, so the envs would silently ignore --seed.
+    """
+    from cs2rl.train import envs as train_envs
+    from cs2rl.train.config import env_config_from_args
+
+    run = run_driver
+    run.args.num_envs = 3
+    run.args.reward_ct_survival = 0.0
+    run.args.map_data = object()
+    loop.train(run.args)
+
+    class Env:
+        """Records its construction kwargs and the shared-memory views attached to it."""
+
+        def __init__(self, kw):
+            self.kw, self.views = kw, []
+
+        def _attach_cont_action_view(self, shm, idx):
+            self.views.append(("cont", shm, idx))
+
+        def _attach_mask_view(self, shm, idx):
+            self.views.append(("mask", shm, idx))
+
+    built = []
+    monkeypatch.setattr(train_envs, "build_train_env",
+                        lambda **kw: built.append(Env(kw)) or built[-1])
+    (creators, ), kw = run.captured["vec.make"]
+    assert "seed" not in kw
+    for i, creator in enumerate(creators):
+        creator(*kw["env_args"][i], buf=None, seed=i, **kw["env_kwargs"][i])
+    config = env_config_from_args(run.args)
+    assert config.rewards.reward_ct_survival == 0.0
+    assert len(built) == 3
+    for i, env in enumerate(built):
+        assert env.kw["_seed"] == train_envs.env_seed_base(7) + i
+        assert env.kw["config"] == config
+        assert env.kw["map_data"] is run.args.map_data
+        assert [(view, idx) for view, _, idx in env.views] == [("cont", i), ("mask", i)]
+    trainer_kw = run.captured["trainer.init"]
+    assert trainer_kw["cont_action_view_main"].shape[0] == trainer_kw["mask_view_main"].shape[
+        0] == 30
+
+
+def test_eval_env_gets_the_run_config_and_is_checked_against_the_training_env(run_driver):
+    """--eval-interval's env is built from the run's map and EnvConfig and checked against
+    the training vecenv's driver env (Task 13).
+
+    The check is the only guard against scoring the policy on a different sim than it
+    trains on, a failure that only shows as worse numbers.
+    """
+    from cs2rl.train.config import env_config_from_args
+
+    run = run_driver
+    run.args.reward_ct_survival = 0.0
+    run.args.map_data = object()
+    loop.train(run.args)
+    made = run.captured["eval.make"]
+    assert made.keys() == {"map_data", "config"}
+    assert made["map_data"] is run.args.map_data
+    assert made["config"] == env_config_from_args(run.args)
+    eval_env, driver_env = run.captured["eval.check"]
+    assert eval_env is run.captured["eval.env"]
+    assert driver_env is run.captured["vec"].driver_env
+
+
+def test_noop_opponent_trains_only_the_hero_team_rows(run_driver, capsys):
+    """--opponent noop gives the trainer the hero team's rows only, and says so in the log.
+
+    Hardwiring opponent_mode="self" here would train on the statue's rows too and spend
+    half the budget on an opponent that never moves, with every metric still finite.
+    """
+    from cs2rl.train.config import build_participating_rows
+
+    run = run_driver
+    run.args.opponent = "noop"
+    loop.train(run.args)
+    rows = run.captured["trainer.init"]["participating_rows"]
+    assert np.array_equal(rows, build_participating_rows(1, 5, opponent_mode="noop", hero_team="t"))
+    assert rows.sum() == 5
+    assert run.captured["trainer.init"]["self_play_mgr"].opponent_mode == "noop"
+    assert "team CT is a stationary statue; 5 of 10 agent rows participate" in capsys.readouterr(
+    ).out
+
+
+def test_selfplay_manager_is_built_from_the_run_flags(run_driver, monkeypatch):
+    """--no-self-play, --opponent, the aim-σ cap and the pitch pin each reach their own
+    build_selfplay_manager slot.
+
+    The values have distinct types (bool, str, float, int), so two crossed slots give a
+    wrong type rather than an equal-looking value. The manager re-applies the cap and
+    the pin to every past policy it loads, and a wrong one fails nothing (see
+    tests/train/test_selfplay_factory.py).
+    """
+    from cs2rl.train import selfplay
+
+    recorded, made = [], []
+
+    def spy(**kw):
+        recorded.append(kw)
+        made.append(selfplay.build_selfplay_manager(**kw))
+        return made[-1]
+
+    monkeypatch.setattr(compose, "build_selfplay_manager", spy)
+    run = run_driver
+    run.args.opponent, run.args.aim_log_std_max, run.args.pin_pitch = "noop", -1.2345, 1
+    loop.train(run.args)
+    assert [{
+        k: (type(v), v)
+        for k, v in kw.items()
+    } for kw in recorded] == [{
+        "self_play_enabled": (bool, False),
+        "aim_log_std_max": (float, -1.2345),
+        "pin_pitch": (int, 1),
+        "opponent_mode": (str, "noop"),
+    }]
+    assert run.captured["trainer.init"]["self_play_mgr"] is made[0]
+
+
+def test_selfplay_row_reports_the_pool_and_past_opponent_use(run_driver, monkeypatch):
+    """With self-play on, the persisted row carries self_play/pool_size and
+    self_play/used_past, the 0/1 flag evaluate() leaves on the trainer, as floats that
+    the numeric persist filter keeps.
+    """
+    run = run_driver
+    run.args.self_play = True
+    trainer_class = run.trainer_module.Cs2PuffeRL
+    evaluate = trainer_class.evaluate
+
+    def evaluate_against_a_past_policy(self):
+        evaluate(self)
+        self._selfplay_used_past = True
+
+    monkeypatch.setattr(trainer_class, "evaluate", evaluate_against_a_past_policy)
+    loop.train(run.args)
+    (row, ) = _rows(run)
+    assert row["self_play/used_past"] == 1.0
+    assert row["self_play/pool_size"] == 0.0
+
+
+def test_split_flags_reach_build_policy(run_driver):
+    """--tct-split-trunk without a checkpoint builds a trunk-split policy.
+
+    With a checkpoint the bits come from cs2rl.train.resume.resolve_resume_split
+    (tests/test_tct_split.py drives that half through loop._resume_policy_init).
+    """
+    run = run_driver
+    run.args.tct_split_trunk = True
+    loop.train(run.args)
+    built = run.captured["build_policy"]
+    assert (built["tct_split_heads"], built["tct_split_trunk"]) == (False, True)
+
+
+def test_collect_and_update_times_reach_the_row(run_driver, monkeypatch):
+    """timing/collect_ms is evaluate()'s wall time and timing/update_ms is train()'s.
+
+    A fake perf_counter advances 0.25 s inside evaluate() and 0.5 s inside train(), so
+    a timer started or stopped at the wrong call, or a key never written, gives another
+    number. The real clock is kept for time.time (checkpoint throttle) and strftime.
+    """
+    import time
+
+    now = [0.0]
+    monkeypatch.setattr(
+        loop, "time",
+        SimpleNamespace(perf_counter=lambda: now[0], time=time.time, strftime=time.strftime))
+    run = run_driver
+    trainer_class = run.trainer_module.Cs2PuffeRL
+    evaluate, update = trainer_class.evaluate, trainer_class.train
+
+    def slow_evaluate(self):
+        now[0] += 0.25
+        return evaluate(self)
+
+    def slow_update(self):
+        now[0] += 0.5
+        return update(self)
+
+    monkeypatch.setattr(trainer_class, "evaluate", slow_evaluate)
+    monkeypatch.setattr(trainer_class, "train", slow_update)
+    loop.train(run.args)
+    (row, ) = _rows(run)
+    assert (row["timing/collect_ms"], row["timing/update_ms"]) == (250.0, 500.0)

@@ -130,13 +130,3 @@ def test_self_play_used_past_metric():
     assert isinstance(used, float) and used == 1.0
     assert isinstance(unused, float) and unused == 0.0
     assert isinstance(missing, float) and missing == 0.0
-
-
-def test_self_play_used_past_is_assigned_on_outer_logs():
-    """The persist site is the outer logs dict, not trainer.losses."""
-    import inspect
-
-    from cs2rl.train import loop as train_loop
-    src = inspect.getsource(train_loop)
-    assert 'logs["self_play/used_past"] = self_play_used_past_metric(trainer)' in src
-    assert src.index('logs["self_play/pool_size"]') < src.index('logs["self_play/used_past"]')

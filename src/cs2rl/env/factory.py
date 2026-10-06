@@ -33,11 +33,11 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                training knobs. #143 tracks that; this module is not the fix, it
                just reduces the future fix to one role's config source.
   smoke        `smoke_test`, fixed seed 42.
-  harness      `tests._helpers.trainer_harness._build_trainer_for_test`, whose contract is
-               "shaped exactly like production" — hence its own role rather
-               than a reuse of `train`, since it adds
-               `include_step_stats_in_info=True` and builds its config from
-               plain function arguments rather than from a CLI args namespace.
+  harness      test trainers: `tests._helpers.trainer_harness._build_trainer_for_test`,
+               through `cs2rl.train.compose.build_trainer(env_role="harness")`.
+               Its own role rather than a reuse of `train`, since it adds
+               `include_step_stats_in_info=True` and takes pufferlib's seed
+               rather than the train role's per-env `_seed`.
   external     the public `make_env(team_spirit, map_data)` wrapper.
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
@@ -104,9 +104,9 @@ tests/env/test_env_factory.py's `_construct` is built on exactly that.
 
 `cs2rl.train.selfplay.build_selfplay_manager` (moved there from this module) covers
 the three pre-migration `SelfPlayManager` sites (`train()` plus two in
-`_build_trainer_for_test`); they are two calls now, `cs2rl.train.loop.train()` and
-the one in tests/_helpers/trainer_harness.py's `_harness_parts`. Its own pre-migration
-capture is `tests/fixtures/selfplay_kwargs_pre_w3.json`, recorded one commit before
+`_build_trainer_for_test`); they are one call now, in
+`cs2rl.train.compose._selfplay_manager`, for train() and the test harness alike. Its
+own pre-migration capture is `tests/fixtures/selfplay_kwargs_pre_w3.json`, recorded one commit before
 the builder was written for the same reason the env capture was — a builder
 transcribed from the sites it is meant to check asserts nothing.
 
@@ -299,7 +299,7 @@ def build_smoke_env():
 
 
 def build_harness_env(*, shared_ts, buf, seed: int | None, map_data, config: EnvConfig):
-    """`tests._helpers.trainer_harness._build_trainer_for_test`'s per-env construction.
+    """A test trainer's per-env construction: `build_env_factory`'s "harness" role.
 
     ``0 if seed is None else seed`` — an explicit None check, NOT ``seed or 0``:
     pufferlib forwards seed=None for the first reset, and a falsy-remap would
@@ -312,10 +312,10 @@ def build_harness_env(*, shared_ts, buf, seed: int | None, map_data, config: Env
 
     ``config`` is REQUIRED and passed straight through. The four knobs it
     carries used to be four separate parameters here; since #165 PR B2 the
-    mapping from `_build_trainer_for_test`'s plain arguments into an EnvConfig
-    lives at the CALL SITE, and that is where the coverage question moved with
-    it — see the closure comment in `tests/_helpers/trainer_harness.py` for which knob
-    each test can and cannot see going missing.
+    caller builds the EnvConfig (`cs2rl.train.envs.build_train_env_factory`,
+    from the harness's args namespace through `env_config_from_args`) — see the
+    comment above that namespace in `tests/_helpers/trainer_harness.py` for which
+    knob each test can and cannot see going missing.
 
     NOTE the mask view is NOT attached here. `env._attach_mask_view(mask_shm,
     _mask_idx)` is post-construction wiring that needs the caller's shm handle

@@ -20,7 +20,6 @@ from cs2rl.train.update import (
     masked_normalize_adv,
     masked_std_unbiased,
 )
-from tests.conftest import REPO_ROOT
 
 
 @pytest.fixture
@@ -220,9 +219,10 @@ def test_build_participating_rows_noop_marks_the_hero_team_only():
 
     `self` must stay bit-identical to the pre-T3 expression — it is what every
     existing run's config.json and every masked-loss test was computed against
-    — while `noop` drops the statue team entirely. Both call sites (train() and
-    train_test_harness) call THIS function, so this test plus the two call
-    sites is what makes the harness and production agree by construction.
+    — while `noop` drops the statue team entirely. Its one call site,
+    cs2rl.train.compose._participating_rows, builds the trainer for train() and
+    for the test harness alike; tests/train/test_driver_cleanup.py checks that
+    train() hands --opponent noop's rows to the trainer.
     """
     from cs2rl.train.config import TEAM_SIZE, build_participating_rows
 
@@ -247,43 +247,6 @@ def test_build_participating_rows_noop_marks_the_hero_team_only():
     from cs2rl.train.selfplay import SelfPlayManager
     assert SelfPlayManager.initial_hero_team() == "t"
     assert SelfPlayManager().opponent_team == "ct"
-
-
-def test_train_passes_the_resolved_opponent_mode_to_build_participating_rows():
-    """AST pin of the PRODUCTION call site (same rationale as the source-scan in
-    tests/train/test_train_cli.py::test_opponent_flag_declared_with_both_modes:
-    train() is a ~500-line function that cannot be imported and driven).
-
-    WHY: every other noop test reaches the participation vector through
-    train_test_harness, which makes its OWN call to build_participating_rows.
-    So hardwiring `opponent_mode="self"` here — the one line that decides which
-    rows train in a real run — leaves the whole suite green while production
-    trains on the statue's rows and burns half its budget on an opponent that
-    never moves. Reviewer-verified: that mutation passed all 975 tests. This is
-    the only guard on that line, so it also pins where `_opponent_mode` comes
-    from: a literal would satisfy the keyword check alone.
-    """
-    import ast
-
-    tree = ast.parse((REPO_ROOT / "src" / "cs2rl" / "train" / "loop.py").read_text())
-    fn = next(n for n in ast.walk(tree) if isinstance(n, ast.FunctionDef) and n.name == "train")
-    calls = [
-        c for c in ast.walk(fn) if isinstance(c, ast.Call) and isinstance(c.func, ast.Name)
-        and c.func.id == "build_participating_rows"
-    ]
-    assert len(calls) == 1, f"train() must build the vector exactly once, found {len(calls)}"
-    kw = {k.arg: k.value for k in calls[0].keywords}
-    mode = kw.get("opponent_mode")
-    assert isinstance(mode, ast.Name) and mode.id == "_opponent_mode", (
-        "train() must pass opponent_mode=_opponent_mode; "
-        f"got {ast.dump(mode) if mode is not None else 'no opponent_mode keyword'}")
-    # ...and `_opponent_mode` must be the flag, not a local constant.
-    assert any(
-        isinstance(n, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "_opponent_mode"
-            for t in n.targets) and isinstance(n.value, ast.Call)
-        and isinstance(n.value.func, ast.Name) and n.value.func.id == "resolve_opponent_mode"
-        for n in ast.walk(fn)), "_opponent_mode must come from resolve_opponent_mode(args)"
 
 
 @pytest.mark.parametrize("bad", [
@@ -479,9 +442,10 @@ def test_the_trainer_statue_and_the_oracle_statue_are_the_same_opponent():
 
 
 def test_harness_refuses_noop_with_selfplay():
-    """The harness mirrors train()'s startup guard, so no test can construct a
-    trainer in a configuration production refuses (a past-policy opponent is
-    not a statue, and maybe_switch_teams would move the statue's team)."""
+    """The harness runs train()'s startup guard (both build through
+    cs2rl.train.compose.build_trainer), so no test can construct a trainer in a
+    configuration production refuses (a past-policy opponent is not a statue,
+    and maybe_switch_teams would move the statue's team)."""
     from tests._helpers.trainer_harness import _build_trainer_for_test
     with pytest.raises(ValueError, match="no-self-play"):
         _build_trainer_for_test(num_envs=4, opponent="noop", with_selfplay=True)

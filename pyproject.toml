@@ -418,6 +418,7 @@ exhaustive = true
 layers = [
     "__main__",
     "loop",
+    "compose",
     "record : evaluate : trainer",
     "selfplay : envs : update : rewards : entropy : resume : metrics",
     "config",
