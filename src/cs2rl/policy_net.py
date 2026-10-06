@@ -22,6 +22,41 @@ import torch.nn as nn
 from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
 
 
+def _make_trunk(obs_dim, hidden_size):
+    """One encoder (Linear-ReLU-Linear-ReLU) and one LSTM, initialised in that order.
+
+    The order is the global RNG stream: the two encoder layer_init draws, the LSTM's
+    default parameter draw, then orthogonal weights over it (biases zeroed). Every
+    trunk, shared or per team, is built by this one function, so the copies cannot
+    drift apart in shape or init.
+    """
+    encoder = nn.Sequential(
+        pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden_size)),
+        nn.ReLU(),
+        pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
+        nn.ReLU(),
+    )
+    lstm = nn.LSTM(hidden_size, hidden_size, batch_first=False)
+    for name, p in lstm.named_parameters():
+        if "bias" in name:
+            nn.init.constant_(p, 0)
+        elif "weight" in name:
+            nn.init.orthogonal_(p, gain=1.0)
+    return encoder, lstm
+
+
+def _make_action_heads(hidden_size):
+    """One Linear per discrete head (ACTION_HEAD_SIZES), std 0.01 so logits start near 0."""
+    return nn.ModuleList([
+        pufferlib.pytorch.layer_init(nn.Linear(hidden_size, n), std=0.01) for n in ACTION_HEAD_SIZES
+    ])
+
+
+def _make_aim_mu(hidden_size):
+    """The aim-mean projection. std 0.01 keeps the pre-tanh mean near 0, unsaturated."""
+    return pufferlib.pytorch.layer_init(nn.Linear(hidden_size, AIM_DIM), std=0.01)
+
+
 class Dust2Policy(nn.Module):
     """Encoder + LSTM trunk, 7 categorical action heads, a Gaussian aim head, a value head.
 
@@ -57,47 +92,14 @@ class Dust2Policy(nn.Module):
         # Trunk-on REPLACES those modules — do not keep a shared encoder
         # or lstm beside the copies.
         if not tct_split_trunk:
-            self.encoder = nn.Sequential(
-                pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden_size)),
-                nn.ReLU(),
-                pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
-                nn.ReLU(),
-            )
-            self.lstm = nn.LSTM(hidden_size, hidden_size, batch_first=False)
-            for name, p in self.lstm.named_parameters():
-                if "bias" in name:
-                    nn.init.constant_(p, 0)
-                elif "weight" in name:
-                    nn.init.orthogonal_(p, gain=1.0)
+            self.encoder, self.lstm = _make_trunk(obs_dim, hidden_size)
         else:
-            self.encoder_t = nn.Sequential(
-                pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden_size)),
-                nn.ReLU(),
-                pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
-                nn.ReLU(),
-            )
-            self.lstm_t = nn.LSTM(hidden_size, hidden_size, batch_first=False)
-            for name, p in self.lstm_t.named_parameters():
-                if "bias" in name:
-                    nn.init.constant_(p, 0)
-                elif "weight" in name:
-                    nn.init.orthogonal_(p, gain=1.0)
+            self.encoder_t, self.lstm_t = _make_trunk(obs_dim, hidden_size)
             # RNG hygiene (same as heads §3.7): CT construction is forked
             # so the subsequent heads draw stays at the same stream point
             # as flag-off. devices=[] forks the CPU generator only.
             with torch.random.fork_rng(devices=[]):
-                self.encoder_ct = nn.Sequential(
-                    pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden_size)),
-                    nn.ReLU(),
-                    pufferlib.pytorch.layer_init(nn.Linear(hidden_size, hidden_size)),
-                    nn.ReLU(),
-                )
-                self.lstm_ct = nn.LSTM(hidden_size, hidden_size, batch_first=False)
-                for name, p in self.lstm_ct.named_parameters():
-                    if "bias" in name:
-                        nn.init.constant_(p, 0)
-                    elif "weight" in name:
-                        nn.init.orthogonal_(p, gain=1.0)
+                self.encoder_ct, self.lstm_ct = _make_trunk(obs_dim, hidden_size)
 
         # Batch 7 (spec 2026-08-13 §3.1): plain bool, NOT a buffer — it
         # must never enter state_dict() or every existing checkpoint would
@@ -134,20 +136,14 @@ class Dust2Policy(nn.Module):
         # RNG-stream parity between the flag-off and flag-on `_t` copies,
         # which is the whole point of spec §3.7.
         if not self.tct_split_heads:
-            self.action_heads = nn.ModuleList([
-                pufferlib.pytorch.layer_init(nn.Linear(hidden_size, n), std=0.01)
-                for n in ACTION_HEAD_SIZES
-            ])
+            self.action_heads = _make_action_heads(hidden_size)
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, 1), std=1.0)
-            self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, AIM_DIM), std=0.01)
+            self.aim_mu = _make_aim_mu(hidden_size)
             self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), aim_log_std_init))
         else:
-            self.action_heads_t = nn.ModuleList([
-                pufferlib.pytorch.layer_init(nn.Linear(hidden_size, n), std=0.01)
-                for n in ACTION_HEAD_SIZES
-            ])
+            self.action_heads_t = _make_action_heads(hidden_size)
             self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, 1), std=1.0)
-            self.aim_mu_t = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, AIM_DIM), std=0.01)
+            self.aim_mu_t = _make_aim_mu(hidden_size)
             self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), aim_log_std_init))
             # RNG hygiene (spec §3.7): the CT copy's construction is what
             # draws from the default stream, so it is forked — post-hoc
@@ -158,12 +154,8 @@ class Dust2Policy(nn.Module):
             # generator only (construction is on CPU; .to(device) happens
             # after) and skips CUDA device enumeration.
             with torch.random.fork_rng(devices=[]):
-                self.action_heads_ct = nn.ModuleList([
-                    pufferlib.pytorch.layer_init(nn.Linear(hidden_size, n), std=0.01)
-                    for n in ACTION_HEAD_SIZES
-                ])
-                self.aim_mu_ct = pufferlib.pytorch.layer_init(nn.Linear(hidden_size, AIM_DIM),
-                                                              std=0.01)
+                self.action_heads_ct = _make_action_heads(hidden_size)
+                self.aim_mu_ct = _make_aim_mu(hidden_size)
             self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), aim_log_std_init))
 
         # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
@@ -270,10 +262,10 @@ class Dust2Policy(nn.Module):
             lands in task 5 via HybridAimVecEnv.
         """
         hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
+        # 2D input (B, obs): the team bit is a column. (The 3D
+        # timestep trap lives in forward(), not here.)
+        mask = x[:, 24:25] if self.tct_split_heads else None
         if self.tct_split_heads:
-            # 2D input (B, obs): the team bit is a column. (The 3D
-            # timestep trap lives in forward(), not here.)
-            mask = x[:, 24:25]
             logits = [
                 self._blend(mask, ht(hidden_out), hct(hidden_out))
                 for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
@@ -406,44 +398,7 @@ class Dust2Policy(nn.Module):
         lstm_h = state.get("lstm_h") if isinstance(state, dict) else None
         lstm_c = state.get("lstm_c") if isinstance(state, dict) else None
         terminals = state.get("terminals") if isinstance(state, dict) else None
-        H = self.hidden_size
-
-        if not self.tct_split_trunk:
-            h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
-            # (T, B, H) seq-first
-            h = h.reshape(B, TT, H).transpose(0, 1)
-            if lstm_h is not None and lstm_c is not None:
-                hc = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
-            else:
-                hc = (h.new_zeros(1, B, H), h.new_zeros(1, B, H))
-            h = self._lstm_bptt(self.lstm, h, hc, terminals)
-            # transpose back to (B, T, H) then flatten row-major so flat row
-            # b*T + t lines up with mb_actions.reshape(-1, ...) in
-            # _hybrid_ppo_loss — segment-major, time-minor. Changing this
-            # ordering silently misaligns every logprob/advantage pairing.
-            hidden_out = h.transpose(0, 1).reshape(B * TT, H)
-        else:
-            # Encoder is stateless: both copies see the same flat rows.
-            # LSTM is not a head: each team LSTM sees ONLY its encoder's
-            # activations. Never feed a mixed batch through one LSTM.
-            x_flat = x.reshape(B * TT, x.shape[-1]).float()
-            h_t = self.encoder_t(x_flat).reshape(B, TT, H).transpose(0, 1)
-            h_ct = self.encoder_ct(x_flat).reshape(B, TT, H).transpose(0, 1)
-            # zero-init BOTH team states when the trainer does not pass lstm_h/c
-            if lstm_h is not None and lstm_c is not None:
-                hc_t = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
-                hc_ct = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
-            else:
-                hc_t = (h_t.new_zeros(1, B, H), h_t.new_zeros(1, B, H))
-                hc_ct = (h_ct.new_zeros(1, B, H), h_ct.new_zeros(1, B, H))
-            y_t = self._lstm_bptt(self.lstm_t, h_t, hc_t, terminals)
-            y_ct = self._lstm_bptt(self.lstm_ct, h_ct, hc_ct, terminals)
-            # PITFALL (spec §3.2): mask from 3D x with x[..., 24], never
-            # x[:, 24] — that silently selects TIMESTEP 24.
-            mask = x[..., 24].reshape(B * TT, 1)
-            hidden_out = self._blend(mask,
-                                     y_t.transpose(0, 1).reshape(B * TT, H),
-                                     y_ct.transpose(0, 1).reshape(B * TT, H))
+        hidden_out = self._bptt_trunk(x, B, TT, lstm_h, lstm_c, terminals)
 
         mask = None
         if self.tct_split_heads:
@@ -459,6 +414,50 @@ class Dust2Policy(nn.Module):
         logits, mu_aim, log_std = self._project_heads(hidden_out, mask)
         value = self.value_head(hidden_out)
         return logits, mu_aim, log_std, value
+
+    def _bptt_trunk(self, x, B, TT, lstm_h, lstm_c, terminals):
+        """Encode (B, T, obs) rows and unroll the trunk LSTM(s) along T: (B*T, H) out.
+
+        `forward`'s trunk. Initial state is `lstm_h`/`lstm_c` when both are given, else
+        zeros; `terminals` resets it mid-segment (see `_lstm_bptt`). Trunk-split runs
+        each team's encoder and LSTM separately and blends their outputs on obs[24].
+        """
+        H = self.hidden_size
+        if not self.tct_split_trunk:
+            h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
+            # (T, B, H) seq-first
+            h = h.reshape(B, TT, H).transpose(0, 1)
+            if lstm_h is not None and lstm_c is not None:
+                hc = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+            else:
+                hc = (h.new_zeros(1, B, H), h.new_zeros(1, B, H))
+            h = self._lstm_bptt(self.lstm, h, hc, terminals)
+            # transpose back to (B, T, H) then flatten row-major so flat row
+            # b*T + t lines up with mb_actions.reshape(-1, ...) in
+            # _hybrid_ppo_loss — segment-major, time-minor. Changing this
+            # ordering silently misaligns every logprob/advantage pairing.
+            return h.transpose(0, 1).reshape(B * TT, H)
+        # Encoder is stateless: both copies see the same flat rows.
+        # LSTM is not a head: each team LSTM sees ONLY its encoder's
+        # activations. Never feed a mixed batch through one LSTM.
+        x_flat = x.reshape(B * TT, x.shape[-1]).float()
+        h_t = self.encoder_t(x_flat).reshape(B, TT, H).transpose(0, 1)
+        h_ct = self.encoder_ct(x_flat).reshape(B, TT, H).transpose(0, 1)
+        # zero-init BOTH team states when the trainer does not pass lstm_h/c
+        if lstm_h is not None and lstm_c is not None:
+            hc_t = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+            hc_ct = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
+        else:
+            hc_t = (h_t.new_zeros(1, B, H), h_t.new_zeros(1, B, H))
+            hc_ct = (h_ct.new_zeros(1, B, H), h_ct.new_zeros(1, B, H))
+        y_t = self._lstm_bptt(self.lstm_t, h_t, hc_t, terminals)
+        y_ct = self._lstm_bptt(self.lstm_ct, h_ct, hc_ct, terminals)
+        # PITFALL (spec §3.2): mask from 3D x with x[..., 24], never
+        # x[:, 24] — that silently selects TIMESTEP 24.
+        mask = x[..., 24].reshape(B * TT, 1)
+        return self._blend(mask,
+                           y_t.transpose(0, 1).reshape(B * TT, H),
+                           y_ct.transpose(0, 1).reshape(B * TT, H))
 
     def _lstm_bptt(self, lstm, h_seq, hc, terminals):
         """Run one LSTM over a full (T, B, H) segment with done-masking.
