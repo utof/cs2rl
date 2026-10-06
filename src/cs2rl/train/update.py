@@ -22,8 +22,9 @@ reachable module.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
-load-bearing). Every torch, pufferlib and cs2rl.train.entropy import below is
-function-local ON PURPOSE.
+load-bearing). Every runtime torch, pufferlib and cs2rl.train.entropy import below is
+function-local ON PURPOSE; the module-scope torch import sits under
+``if TYPE_CHECKING:``, for annotations only.
 """
 
 from typing import TYPE_CHECKING, Literal, overload

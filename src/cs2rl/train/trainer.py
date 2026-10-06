@@ -236,13 +236,19 @@ class Cs2PuffeRL(PuffeRL):
         evaluate() time, so a CLI warm start seeds it after construction.
 
     PITFALLS
-    - State a phase method reads is created here, before the first
-      evaluate()/train()/save_checkpoint() call, and read without a getattr default.
-      That includes the three a phase method also overwrites: ``_selfplay_used_past``
-      (False here, set by every evaluate), ``_tag_metrics`` (None here, reset by the
-      epoch loop, filled by TAG minibatches) and ``_last_nan_warn_t`` (0.0 here, set by
-      each NaN warning). The body-read anchor in tests/train/test_trainer_composition.py
-      cannot see a name a body also stores, so those three are pinned there by name.
+    - State a phase method carries across calls is created here, before the first
+      evaluate()/train()/save_checkpoint() call, and read without a getattr default or
+      hasattr; tests/train/test_trainer_composition.py fails on such a read in a phase
+      method. Per-call scratch a method stores and then reads within the same call is
+      not declared here: ``full_rows`` (evaluate) and ``_event_oversample_fraction``
+      (stored by ``_begin_update``, read by ``_finish_update`` in the same train()).
+    - That test's body-read anchor (reads minus stores) cannot require a declared name
+      a phase method also overwrites. Three such names are pinned there by name:
+      ``_selfplay_used_past`` (False here, set by every evaluate), ``_tag_metrics``
+      (None here, reset by the epoch loop, filled by TAG minibatches) and
+      ``_last_nan_warn_t`` (0.0 here, set by each NaN warning). The test requires those
+      in ``_WARMSTART_ATTRS`` on the instance; a dropped ``_effective_alpha`` or
+      ``_reward_scratch`` declaration is caught only by tests that run those bodies.
     - ``_timing`` is created here because the epoch loop (cs2rl.train.loop._run_epochs)
       assigns INTO it and the [Timing] print reads it.
     - After this constructor returns, build_trainer pins the shared-memory owners

@@ -108,7 +108,7 @@ def test_split_copies_draw_the_flag_off_rng_stream(env):
 
     WHY: the CT copies are drawn under fork_rng so that the split is the only changed
     variable at a given seed. Reordering two constructions in one branch, or dropping
-    a fork, shifts every later draw; no other test reads initial weights.
+    a fork, shifts every later draw.
 
     LIMIT: a reorder applied to every branch alike (inside `_make_trunk`, say) keeps
     the parity and passes here. That changes every seeded run's initial weights; the

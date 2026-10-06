@@ -329,9 +329,9 @@ class Dust2Policy(nn.Module):
         # contributes neither log-prob nor entropy (mirrors
         # _hybrid_sample_logits / _hybrid_ppo_loss).
         log_prob_c = (aim_dist.log_prob(continuous_action) * self.aim_dim_mask).sum(-1)
-        # Closed-form Gaussian entropy: 0.5·log(2πe·σ²), summed across
-        # AIM_DIM. .entropy() returns per-dim, so .sum(-1) is correct
-        # for AIM_DIM=1 today and stays correct if AIM_DIM bumps to ≥2.
+        # Closed-form Gaussian entropy, 0.5·log(2πe·σ²) per dim: .entropy()
+        # returns one value per aim dim, aim_dim_mask zeroes a pinned one,
+        # and .sum(-1) adds the AIM_DIM dims.
         entropy_c = (aim_dist.entropy() * self.aim_dim_mask).sum(-1)
 
         log_prob = log_prob_d + log_prob_c
@@ -373,8 +373,10 @@ class Dust2Policy(nn.Module):
           flat output). That is what lets the recurrent weights see
           through-time gradients, and it recomputes logprobs/values under the
           same function as the rollout (forward_eval carries state tick to
-          tick), so the first minibatch's importance ratios are 1 up to float
-          rounding.
+          tick), so on the first minibatch every row the current policy
+          sampled has an importance ratio of 1 up to float rounding. On a
+          past-policy epoch the opponent rows hold the past policy's
+          logprobs, so their ratios are not 1.
 
         WHY zero initial state is CORRECT here (not an approximation):
           evaluate() zeroes trainer.lstm_h/c at its start, and with
@@ -413,7 +415,7 @@ class Dust2Policy(nn.Module):
             # TIMESTEP 24 instead of the team column. The reshape to
             # (B*TT, 1) is aligned with hidden_out's
             # h.transpose(0,1).reshape(B*TT, H) — both segment-major,
-            # time-minor. Works unchanged for the 2D/ONNX path, where
+            # time-minor. Works unchanged for a 2D (B, OBS_DIM) input, where
             # TT == 1 and x[..., 24] is already the team column.
             mask = x[..., 24].reshape(B * TT, 1)
         logits, mu_aim, log_std = self._project_heads(hidden_out, mask)
@@ -471,9 +473,10 @@ class Dust2Policy(nn.Module):
         boundaries (the common case — native PufferLib BPTT); otherwise
         the sequence is split at every tick where ANY row has a done and
         h/c are zero-masked per-row at those ticks before continuing.
-        `lstm` is the module to run — flag-off forward passes
-        `self.lstm`; trunk-on passes `self.lstm_t` / `self.lstm_ct`
-        separately so each copy sees only its encoder's activations.
+        `lstm` is the module to run — `_bptt_trunk` passes `self.lstm`
+        when the trunk is shared, and `self.lstm_t` / `self.lstm_ct`
+        separately when it is split, so each copy sees only its
+        encoder's activations.
 
         WHY: the rollout (forward_eval → _forward_core) multiplies the
         carried state by (1 - done) BEFORE processing each tick, so a

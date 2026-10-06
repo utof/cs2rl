@@ -6,7 +6,8 @@ Owns: `build_policy` (the factory of `cs2rl.policy_net.Dust2Policy`), the hybrid
 (`init_policy_state`, `select_policy_actions_native`, `resolve_policy_mode`), the
 log-std constants and the action-mask layout.
 
-Module scope stays torch-free: every torch import is function-local, and so is
+Module scope stays torch-free at run time: every runtime torch import is function-local
+(the module-scope one sits under `if TYPE_CHECKING:`, for annotations only), and so is
 `build_policy`'s import of `cs2rl.policy_net` (torch at its module scope), so eval, viz
 and BC can import this module without paying for torch until they build a policy.
 """
@@ -445,7 +446,8 @@ def _hybrid_sample_logits(
     entropy_d = cast(torch.Tensor, sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head))
 
     # ── Continuous: 1D Gaussian aim head — hand-rolled (Fix #2) ──
-    # σ comes pre-clamped from forward()/forward_eval() (LOG_STD_MIN/MAX), so
+    # σ comes pre-clamped from forward()/forward_eval() (to the policy's
+    # aim_log_std_min/aim_log_std_max), so
     # we don't re-clamp here — would silently mask a regression in the policy
     # if the clamp were removed upstream.
     # Analytic forms (replace torch.distributions.Normal):
@@ -589,8 +591,8 @@ def validate_aim_log_std_max(aim_log_std_max) -> float:
     step) has already exited, so a cap checked only there would let a bad
     --aim-log-std-max through the fingerprint. The CLI
     (`cs2rl.train.__main__`'s module-level `if __name__ == "__main__"` block)
-    calls this right after `parser.parse_args()`, above the --dump-config exit,
-    so the fingerprint catches it.
+    calls this after `parser.parse_args()` and the --seed check, above the
+    --dump-config exit, so the fingerprint catches it.
     PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
     log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5
     and is REJECTED — pass -0.69315 (or omit the flag) for "σ cap 0.5".
