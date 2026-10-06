@@ -1828,13 +1828,20 @@ def stats_collection_is_append_shaped():
     on this loop appending to a list that PufferLib later np.means. If it were
     ever rewritten to `self.stats[k] = v`, every one of those declarations
     would become wrong at once — and nothing else in the suite would notice.
+    Both halves are required: an `append` (the scalar branch, which is what the
+    terminal infos' scalars take) and no store into `self.stats[...]`. Requiring
+    only "some append or extend" stayed green with the scalar branch turned into
+    an assignment (gh#92 knock-out K7).
     """
     tree = _module_ast("train/trainer.py")
     fn = _find_qualname(tree, "Cs2PuffeRL._collect_infos")
+    appends = stores = 0
     for node in ast.walk(fn):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("append", "extend")
-                and isinstance(node.func.value, ast.Subscript)
+                and node.func.attr == "append" and isinstance(node.func.value, ast.Subscript)
                 and _container_name(node.func.value.value) == "self.stats"):
-            return True
-    return False
+            appends += 1
+        if (isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load)
+                and _container_name(node.value) == "self.stats"):
+            stores += 1
+    return appends > 0 and stores == 0
