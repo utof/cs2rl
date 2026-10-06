@@ -215,8 +215,9 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
         target = trainer._current_target_entropy
         assert target is not None
         assert abs(target - h_after_1) < 1e-3
-        # COUPLING: the assertion above only proves the MIRROR (the wandb
-        # trace) was overridden. This one proves the CONSUMED target — the
+        # COUPLING: the assertion above only proves the MIRROR
+        # (trainer._current_target_entropy) was overridden. This one proves the
+        # CONSUMED target — the
         # target_entropy that alpha_loss is actually computed from — was
         # overridden too, which is the half that steers training.
         # The numerical measurements below used the earlier num_envs=32 workload.

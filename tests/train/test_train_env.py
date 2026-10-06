@@ -334,7 +334,7 @@ def test_event_mask_detects_injected_bomb_planted():
 #       fraction metric must read 0.0.
 #   (3) test_event_oversample_fraction_exposed — pins the metric semantics:
 #       _event_oversample_fraction reports the RAW fraction of event
-#       segments (mask.float().mean()), NOT the sampled fraction. This is the
+#       segments among the participating ones, NOT the sampled fraction. This is the
 #       reportable wandb metric.
 
 
@@ -484,11 +484,12 @@ def test_event_oversample_fraction_exposed():
 #   (B) log_alpha reset — first train() after construction sets log_alpha to
 #       log(ent_coef); idempotent thereafter.
 #   (C) Metric exposure — log_alpha, effective_alpha, per-channel std,
-#       grad_norm exposed as trainer attributes for the wandb log layer.
+#       grad_norm exposed as trainer attributes, which these tests and
+#       tests/env/c/smoke_test.py read.
 #
-# gh#168 W1.5: the harness applies that patch itself (Cs2PuffeRL.__init__), so
-# none of these tests applies it; each reads the attributes straight off the
-# built trainer (Task 8 tests are the same shape).
+# The harness trainer is a Cs2PuffeRL (gh#168 W1.5), whose constructor creates
+# this state, so each test reads the attributes straight off the built trainer
+# (Task 8 tests are the same shape).
 
 
 @pytest.mark.training

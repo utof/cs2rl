@@ -516,11 +516,10 @@ class Cs2PuffeRL(PuffeRL):
         """Return normalized copy of mb_returns; update running stats first.
 
         mb_part (Rung 0 §2.2): BOOL [S, T] participation mask. The running
-        mean/var are updated from the PARTICIPATING rows ONLY — parked rows
-        carry reward 0 and value 0, so feeding them in would drag the return
-        scale toward 0 by a factor of n_active/TEAM_SIZE and shrink every
-        normalized value target. None ⇒ all rows (pre-Rung-0 behaviour,
-        bit-identical).
+        mean/var are updated from the PARTICIPATING rows ONLY: parked rows are
+        never value targets (their value loss is masked), so their returns must
+        not set the scale of the normalized value targets. None ⇒ all rows
+        (pre-Rung-0 behaviour, bit-identical).
         PITFALL: the whole tensor is still normalized and returned — masking
         applies to the STATISTICS, not the output. The parked rows' value loss
         is dropped later, by the masked_mean over the same mask.
@@ -855,8 +854,8 @@ class Cs2PuffeRL(PuffeRL):
         # Participation is written whether or not the run is masked: the buffer is
         # zero-initialised, and the training loop asserts participating.any() after
         # every rollout. Parked rows' values are zeroed so GAE never bootstraps
-        # through rows whose reward is identically 0 (the masked reductions in the
-        # update are what make training correct; this is defence in depth).
+        # through a parked row's value (the masked reductions in the update are
+        # what make training correct; this is defence in depth).
         part_rows = self._participating_rows[env_id]
         self.participating[batch_rows, seq_pos] = part_rows
         self.values[batch_rows, seq_pos] = step.value.flatten() * part_rows.to(step.value.dtype)
@@ -969,7 +968,7 @@ class Cs2PuffeRL(PuffeRL):
            policy backward; ``_write_back_values``; ``_accumulate_minibatch``; the NaN
            guard; ``_record_tag``; ``_step_policy``.
         3. ``_finish_update``: means over the executed minibatches plus the per-call
-           absolutes, and the trainer attributes the log layer reads.
+           absolutes, and the per-update trainer attributes.
         4. ``_log_and_checkpoint``: the throttled log flush and the checkpoint.
 
         The stock ``@record`` decorator is not re-applied: nothing runs under torchrun.
@@ -1088,9 +1087,8 @@ class Cs2PuffeRL(PuffeRL):
     def _sample_minibatch(self, advantages, anneal_beta) -> _Minibatch | None:
         """Draw ``minibatch_segments`` segments by replay priority and gather their rows.
 
-        Returns None when no drawn row participates: every reduction would be 0/0.
-        That needs a draw of fewer segments than the buffer holds, all of them parked
-        (rare at production minibatch sizes; likelier with prio_alpha > 0).
+        Returns None when no drawn row participates (every drawn segment parked):
+        every reduction would be 0/0.
         """
         prio_probs = self._segment_probs(advantages)
         idx = torch.multinomial(prio_probs, self.minibatch_segments)
@@ -1397,8 +1395,9 @@ class Cs2PuffeRL(PuffeRL):
 
         Means divide by the EXECUTED minibatch count (gh#90: a KL-truncated update
         must not scale its losses by k/N). Every other key is written here, after the
-        division, into the dict the division produced. Also refreshes the trainer
-        attributes the log layer reads.
+        division, into the dict the division produced. Also refreshes the
+        per-update trainer attributes: ``_last_entropy_mean`` (the warm-start
+        anchor's source), ``_log_alpha``, ``_effective_alpha`` and the ``_std_*``.
         """
         n = update.minibatches_run
         losses = defaultdict(float, {key: total / n for key, total in update.sums.items()})
@@ -1419,8 +1418,8 @@ class Cs2PuffeRL(PuffeRL):
         if self.config["anneal_lr"]:
             self.scheduler.step()
 
-        # Explained variance over PARTICIPATING rows: parked rows (value 0, advantage
-        # 0) are a perfect prediction and would inflate EV by the parked fraction.
+        # Explained variance over PARTICIPATING rows: parked rows are not value
+        # targets (their stored value is 0), so including them would distort EV.
         advantages = update.advantages
         assert advantages is not None, "train() ran no minibatch (total_minibatches == 0)"
         losses["explained_variance"] = masked_explained_variance(
