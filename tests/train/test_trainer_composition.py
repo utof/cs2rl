@@ -8,7 +8,8 @@ an unexecuted declaration turns the test red.
 
 The independent anchor reads every post-construction Cs2PuffeRL method and the
 checkpoint helpers to check that required attributes exist. Method identity tests
-pin train, evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings.
+pin train, evaluate and save_checkpoint to Cs2PuffeRL, with no instance bindings,
+and one real rollout checks that evaluate() still feeds every info to the collector.
 """
 from __future__ import annotations
 
@@ -414,6 +415,48 @@ def test_evaluate_is_the_class_method(composed):
         "evaluate is an INSTANCE attribute again: something re-bound it after construction "
         "and shadows Cs2PuffeRL.evaluate")
     assert trainer.evaluate.__func__ is Cs2PuffeRL.evaluate
+
+
+@pytest.mark.training
+def test_evaluate_collects_every_info_into_stats():
+    """A real rollout: every info value the env returns lands in ``trainer.stats``.
+
+    ``evaluate()`` hands each chunk's infos to ``_collect_infos``, which appends each
+    value to ``stats[key]``; ``mean_and_log`` then means each list, and every
+    ``environment/*`` window mean in eval/metrics_schema.py rests on that.
+    tests/eval/test_metrics_schema.py pins the collector's shape from its source; this
+    test pins that ``evaluate()`` still calls it. The expected counts come from what
+    ``vecenv.recv`` returned. In the harness every info carries one ``step_stats`` view
+    object (include_step_stats_in_info is on), so each occurrence adds one list entry:
+    a dropped call leaves ``stats`` empty, and an assignment in place of the append
+    stores the view itself, which has no ``len``.
+    """
+    import collections
+
+    import pufferlib
+
+    from tests._helpers.trainer_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=4)
+    try:
+        seen = collections.Counter()
+        recv = trainer.vecenv.recv
+
+        def recording_recv():
+            out = recv()
+            for entry in out[4]:
+                seen.update(k for k, _ in pufferlib.unroll_nested_dict(entry))
+            return out
+
+        trainer.vecenv.recv = recording_recv
+        stats = trainer.evaluate()
+        assert seen, "the harness env returned no info; the comparison below would be vacuous"
+        counts = {k: len(v) for k, v in stats.items()}
+        assert counts == dict(seen), (
+            "evaluate() no longer feeds every info value to trainer.stats one entry per "
+            "occurrence; every environment/* window mean would be wrong or missing")
+    finally:
+        cleanup()
 
 
 def test_a_raise_inside_init_stops_the_utilization_thread(monkeypatch, tmp_path):

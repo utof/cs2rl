@@ -180,8 +180,10 @@ def test_environment_star_window_means_still_rest_on_an_append_shaped_collector(
 
     Cs2PuffeRL._collect_infos accumulates each episode's terminal info into `self.stats[k]` as a
     LIST that mean_and_log later np.means. Rewritten to `self.stats[k] = v`, all
-    ~70 of those declarations become wrong at once and nothing else in the suite
-    would notice — the values would still be numbers of a plausible size.
+    ~70 of those declarations become wrong at once and no other default-tier test
+    would notice — the values would still be numbers of a plausible size. The
+    rollout check that evaluate() feeds the collector needs a real trainer, so it is
+    a training test (test_trainer_composition.py::test_evaluate_collects_every_info_into_stats).
     """
     assert census.stats_collection_is_append_shaped(), (
         "Cs2PuffeRL._collect_infos no longer appends scalars into self.stats, or it assigns "

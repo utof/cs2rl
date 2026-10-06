@@ -1827,8 +1827,9 @@ def stats_collection_is_append_shaped():
     The `window-mean-pufferlib` aggregation of every `environment/*` key rests
     on this loop appending to a list that PufferLib later np.means. If it were
     ever rewritten to `self.stats[k] = v`, every one of those declarations
-    would become wrong at once — and nothing else in the suite would notice.
-    Both halves are required: an `append` (the scalar branch, which is what the
+    would become wrong at once — and no other default-tier test would notice:
+    the behaviour check (a real rollout, in tests/train/test_trainer_composition.py)
+    runs only under `-m training`. Both halves are required: an `append` (the scalar branch, which is what the
     terminal infos' scalars take) and no store into `self.stats[...]`. Requiring
     only "some append or extend" stayed green with the scalar branch turned into
     an assignment (gh#92 knock-out K7).
