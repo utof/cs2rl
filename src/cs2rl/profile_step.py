@@ -94,6 +94,8 @@ def _profile_loop(step_fn, steps: int, top_n: int) -> dict[str, list[dict[str, A
 def _extract_profile_rows(pr: cProfile.Profile, sort_by: str, top_n: int) -> list[dict[str, Any]]:
     stats = pstats.Stats(pr, stream=io.StringIO())
     items = []
+    # KNOWN LIMIT: typeshed declares no Stats.stats. The typed get_stats_profile() keys
+    # functions by bare name (same-named functions collapse) and gives ncalls as a str.
     for func, (cc, nc, tt, ct, _callers) in stats.stats.items():
         filename, line, name = func
         items.append({
