@@ -398,10 +398,15 @@ def _rooms_raster(rooms, x_min: float, y_min: float, x_max: float, y_max: float,
 def _prune_cliff_edges(adjacency: np.ndarray, centroids_z: np.ndarray, is_ramp: np.ndarray) -> None:
     """L9 adjacency post-prune (spec §2 L9), IN PLACE on `adjacency`.
 
-    Removes the edges whose endpoints are BOTH non-ramp AND |Δz| > MAX_STEP_HEIGHT. This
-    mirrors the C-env cliff guard (cs2_movement.h SV_MAX_STEP_HEIGHT_CS) so that
-    nav-distance shaping does not assign shortcut bonuses for movement edges that the C
-    env will physically refuse.
+    Removes the edges whose endpoints are BOTH non-ramp AND |Δz| > MAX_STEP_HEIGHT, in both
+    directions. It uses the threshold of the C-env cliff guard (cs2_movement.h
+    SV_MAX_STEP_HEIGHT_CS), and the C env checks this adjacency before that guard, so a pruned
+    edge is neither walkable nor counted by nav-distance shaping.
+    KNOWN LIMIT: the two rules differ. The guard refuses a grounded step up more than the
+    threshold into a non-ramp target, whatever the source area; this prune keeps every edge
+    with a ramp endpoint. So an edge from a ramp up a cliff to a non-ramp area is kept here
+    although the guard refuses the climb: on the default simple map, ramps 13 and 14 (top
+    z=64) to catwalk 15 (z=128).
     Pitfall: only prune non-ramp↔non-ramp cliff edges — ramp targets are always allowed
     (is_ramp=True is the explicit walk-up affordance, spec L11). MAX_STEP_HEIGHT (module
     constant) MUST numerically match SV_MAX_STEP_HEIGHT_CS in cs2_movement.h. See the
