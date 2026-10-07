@@ -23,7 +23,7 @@ import textwrap
 from collections import Counter
 from enum import IntEnum
 from pathlib import Path, PurePosixPath
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 
 import pytest
 from modal.exception import NotFoundError, PermissionDeniedError, ServiceError
@@ -81,8 +81,10 @@ class FakeModal:
         self.Dict = self._dict_type()
         self.Secret = self._secret_type()
 
-    def as_module(self) -> SimpleNamespace:
-        return SimpleNamespace(
+    def as_module(self) -> ModuleType:
+        """A real module: typeshed types the values of `sys.modules` as ModuleType."""
+        fake_module = ModuleType("modal")
+        fake_module.__dict__.update(
             Image=self.Image,
             App=self.App,
             Volume=self.Volume,
@@ -92,6 +94,7 @@ class FakeModal:
             NotFoundError=NotFoundError,
             __version__=self.__version__,
         )
+        return fake_module
 
     def _app_type(self):
         fake = self
@@ -1370,7 +1373,7 @@ def test_train_remote_writes_manifest_and_rejects_completed_without_evidence(
 
     monkeypatch.setattr(module, "_remote_run_root", fake_run_root)
     real_execute = mrl.execute_training_attempt
-    captured: dict[str, object] = {}
+    captured: dict[str, mrl.Manifest] = {}
 
     def fake_prepare(**kwargs):
         manifest = kwargs["manifest"]
@@ -1483,7 +1486,9 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
 
     def fake_run(cmd, **kwargs):
         if "--dump-config" in list(cmd):
-            _write_dumped_config(Path(captured["run_root"]))
+            run_root = captured["run_root"]
+            assert isinstance(run_root, Path)
+            _write_dumped_config(run_root)
         assert kwargs["env"] is not None
         assert "PYTHONPATH" not in kwargs["env"]
         return subprocess.CompletedProcess(cmd, 0)
@@ -1545,7 +1550,8 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
                                app_obj=module.app,
                                now=_aware(),
                                stdout=_capture_stdout())
-    run_root = Path(captured["run_root"])
+    run_root = captured["run_root"]
+    assert isinstance(run_root, Path)
     dumped = json.loads((run_root / "checkpoints" / "config.json").read_text())
     expected_hash = mrl.sha256_bytes(
         json.dumps(checkpoint.normalize_config_for_transport(dumped),
@@ -1553,8 +1559,12 @@ def test_train_remote_completes_against_post_dump_manifest_hash(fake_modal, tmp_
                    separators=(",", ":")).encode())
     on_disk = json.loads((run_root / core.MANIFEST_FILENAME).read_text())
     prepared = captured["prepared"]
+    assert isinstance(prepared, core.PreparedSource)
     execute_manifest = captured["execute_manifest"]
-    assert captured["prepare_in_manifest"].config_hash == "0" * 64
+    assert isinstance(execute_manifest, mrl.Manifest)
+    prepare_in_manifest = captured["prepare_in_manifest"]
+    assert isinstance(prepare_in_manifest, mrl.Manifest)
+    assert prepare_in_manifest.config_hash == "0" * 64
     assert prepared.config_hash == expected_hash
     assert on_disk["config_hash"] == expected_hash
     assert execute_manifest.config_hash == expected_hash
