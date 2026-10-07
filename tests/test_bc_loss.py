@@ -368,8 +368,6 @@ def test_build_bc_policy_is_reproducible_under_seed():
 # ── demo provenance ────────────────────────────────────────────────────────
 
 
-# KNOWN LIMIT: numpy's savez stub has a keyword `allow_pickle: bool`, so `np.savez(path, **d)` of
-# this mixed-value dict is a snapshot row: a checker cannot rule out that key in a `**` dict.
 def _demo_dict(**overrides):
     """Minimal spec-§7-shaped demo payload; overrides patch individual keys."""
     T = 3
@@ -403,13 +401,13 @@ def test_load_demos_rejects_schema_mismatch(tmp_path):
     assert len(loaded) == 3
     assert loaded.lengths.tolist() == [3]
 
-    bad_dim = dict(good, OBS_DIM=OBS_DIM + 1)
+    bad_dim = _demo_dict(OBS_DIM=OBS_DIM + 1)
     np.savez(tmp_path / "bad_dim.npz", **bad_dim)
     with pytest.raises(ValueError, match="demo schema"):
         train_bc.load_demos(tmp_path, verbose=False)
     (tmp_path / "bad_dim.npz").unlink()
 
-    bad_map = dict(good, map="de_dust2")
+    bad_map = _demo_dict(map="de_dust2")
     np.savez(tmp_path / "bad_map.npz", **bad_map)
     with pytest.raises(ValueError, match="map"):
         train_bc.load_demos(tmp_path, verbose=False)
@@ -417,8 +415,7 @@ def test_load_demos_rejects_schema_mismatch(tmp_path):
 
     # Δyaw labels above the env's clamp mean the recorded action is not the
     # executed one — the labels would be lies.
-    bad_cont = dict(good)
-    bad_cont["continuous_actions"] = np.full((3, AIM_DIM), 10.0, dtype=np.float32)
+    bad_cont = _demo_dict(continuous_actions=np.full((3, AIM_DIM), 10.0, dtype=np.float32))
     np.savez(tmp_path / "bad_cont.npz", **bad_cont)
     with pytest.raises(ValueError, match="MAX_TURN_SPEED_RAD"):
         train_bc.load_demos(tmp_path, verbose=False)
@@ -432,9 +429,9 @@ def test_load_demos_dedupes_byte_identical_episodes(tmp_path):
     T = 3
     base = _demo_dict(obs=np.ones((T, OBS_DIM), dtype=np.float32))
     np.savez(tmp_path / "a.npz", **base)
-    np.savez(tmp_path / "b.npz", **dict(base, seed=1))                 # identical arrays
-    different = dict(base, seed=2)
-    different["obs"] = np.full((T, OBS_DIM), 2.0, dtype=np.float32)
+    same_arrays = _demo_dict(obs=np.ones((T, OBS_DIM), dtype=np.float32), seed=1)
+    np.savez(tmp_path / "b.npz", **same_arrays)        # identical arrays
+    different = _demo_dict(obs=np.full((T, OBS_DIM), 2.0, dtype=np.float32), seed=2)
     np.savez(tmp_path / "c.npz", **different)
 
     deduped = train_bc.load_demos(tmp_path, dedupe=True, verbose=False)
