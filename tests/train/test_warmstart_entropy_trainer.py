@@ -48,7 +48,7 @@ def _force_floor_above_entropy(trainer, floor=1e6):
     """Raise the trainer's entropy floor far above any achievable entropy (gh#96).
 
     WHAT: sets `trainer._entropy_floor` so `current_entropy.item() <
-    self._entropy_floor` in Cs2PuffeRL.train is true by an explicit margin,
+    self._entropy_floor` in Cs2PuffeRL._entropy_terms is true by an explicit margin,
     not by the harness's numbers.
 
     WHY a margin and not a precondition: on this harness the floor trips
@@ -86,7 +86,7 @@ def test_floor_stays_disarmed_during_grace_even_below_floor():
     """gh#96: the min=0.5 floor clamp must NOT re-arm inside the warm-start window.
 
     Forces the collapse condition (entropy below floor) while GRACE is active. If a
-    refactor drops the `_ws_floor_active and` guard, effective_alpha jumps from the
+    refactor drops the `update.floor_active and` guard, effective_alpha jumps from the
     0.0 ceiling to 0.5 — a ~500x discontinuity mid-window (spec finding 2) — and
     the ceiling assertion below fails.
     """
@@ -100,7 +100,7 @@ def test_floor_stays_disarmed_during_grace_even_below_floor():
         assert trainer._effective_alpha <= 1e-8, (
             "floor re-armed during GRACE: effective_alpha "
             f"{trainer._effective_alpha} left the ceiling despite "
-            "_ws_floor_active being False")
+            "the warm-start window disarming the floor (update.floor_active False)")
     finally:
         cleanup()
 
@@ -110,7 +110,7 @@ def test_floor_clamps_effective_alpha_when_mode_off():
     """gh#96: the other half of the gate — with the mode off the floor still bites.
 
     Same forced collapse condition as the GRACE test, but no warmstart keys, so
-    _ws_floor_active stays True and the clamp must raise effective_alpha to >=0.5.
+    the floor stays active and the clamp must raise effective_alpha to >=0.5.
     Without this, the GRACE test above would also pass on a build where the floor
     clamp was deleted outright.
     """
@@ -141,8 +141,9 @@ def test_floor_below_entropy_leaves_alpha_unclamped_when_mode_off():
     entropy_floor_fires must be 0 and effective alpha must stay at the raw alpha
     (exp(log_alpha) ~ ent_coef = 0.1 after the Task 9B reset), i.e. < 0.5.
 
-    Historical num_envs=32 mutants of `if _ws_floor_active and current_entropy.item() <
-    self._entropy_floor:` in Cs2PuffeRL.train: comparison replaced by `True` -> this
+    Historical num_envs=32 mutants of the floor comparison (then `if _ws_floor_active and
+    current_entropy.item() < self._entropy_floor:` in Cs2PuffeRL.train, now the
+    `update.floor_active` test in Cs2PuffeRL._entropy_terms): comparison replaced by `True` -> this
     test red (fires 7, alpha 0.5), the mode-off test above green; replaced by `False`
     -> the mode-off test above red (alpha ~0.1), this one green. The pair pins both
     constant replacements; neither alone does.
@@ -214,8 +215,9 @@ def test_grace_zero_anchors_on_second_update_and_ramps():
         target = trainer._current_target_entropy
         assert target is not None
         assert abs(target - h_after_1) < 1e-3
-        # COUPLING: the assertion above only proves the MIRROR (the wandb
-        # trace) was overridden. This one proves the CONSUMED target — the
+        # COUPLING: the assertion above only proves the MIRROR
+        # (trainer._current_target_entropy) was overridden. This one proves the
+        # CONSUMED target — the
         # target_entropy that alpha_loss is actually computed from — was
         # overridden too, which is the half that steers training.
         # The numerical measurements below used the earlier num_envs=32 workload.

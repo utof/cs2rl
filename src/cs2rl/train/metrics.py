@@ -19,7 +19,7 @@ lines and their order are pinned by tests/train/test_kl_break_metrics.py inside
 ``inspect.getsource(cs2rl.train.loop)``, and they guard the key cs2rl/experiment/gate.py
 reads; keeping the call sites beside the pool bookkeeping is the lower-risk spelling.
 PufferLib's own ``self.mean_and_log()`` likewise stays out of this module — its
-single call site lives inside ``cs2rl.train.trainer.Cs2PuffeRL.train`` (gh#168 W2a).
+single call site is ``cs2rl.train.trainer.Cs2PuffeRL._log_and_checkpoint``.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
@@ -176,8 +176,9 @@ def log_aim_log_std(policy, logs):
     # for the CLI/help paths) — keep that convention here.
     import torch
 
-    # R0-E.3: clamp to the RUN's cap (policy.aim_log_std_max), not the module
-    # constant — otherwise the log would report a σ the forward never used.
+    # R0-E.3: clamp to the RUN's bounds (policy.aim_log_std_min/max), not the module
+    # constants — otherwise the log would report a σ the forward never used.
+    floor = float(getattr(policy, "aim_log_std_min", LOG_STD_MIN))
     cap = float(getattr(policy, "aim_log_std_max", LOG_STD_MAX))
     # R0-E.2 (#131): when pitch is pinned (aim_dim_mask[1] == 0) the pitch σ
     # is a dead parameter — never sampled, never in log_prob_c, never
@@ -191,8 +192,8 @@ def log_aim_log_std(policy, logs):
         if hasattr(policy, "aim_log_std_t"):
             raw_t = policy.aim_log_std_t.detach().cpu().numpy()
             raw_ct = policy.aim_log_std_ct.detach().cpu().numpy()
-            ls_t = torch.clamp(policy.aim_log_std_t, LOG_STD_MIN, cap).cpu().numpy()
-            ls_ct = torch.clamp(policy.aim_log_std_ct, LOG_STD_MIN, cap).cpu().numpy()
+            ls_t = torch.clamp(policy.aim_log_std_t, floor, cap).cpu().numpy()
+            ls_ct = torch.clamp(policy.aim_log_std_ct, floor, cap).cpu().numpy()
             logs["policy/aim_log_std_yaw_t"] = float(ls_t[0])
             logs["policy/aim_log_std_yaw_ct"] = float(ls_ct[0])
             logs["policy/aim_log_std_yaw_t_raw"] = float(raw_t[0])
@@ -211,7 +212,7 @@ def log_aim_log_std(policy, logs):
             raw = np.maximum(raw_t, raw_ct)
         else:
             raw = policy.aim_log_std.detach().cpu().numpy()
-            clamped = torch.clamp(policy.aim_log_std, LOG_STD_MIN, cap).cpu().numpy()
+            clamped = torch.clamp(policy.aim_log_std, floor, cap).cpu().numpy()
     logs["policy/aim_log_std_yaw"] = float(clamped[0])
     logs["policy/aim_log_std_yaw_raw"] = float(raw[0])
     if pitch_live:
@@ -469,13 +470,14 @@ def _inject_tag_metrics(trainer, logs):
     documented in tag_grad_cossim) and check() raises RuntimeError on any
     NaN in the metrics dict; injecting earlier aborts the run with exit
     code 3 on the first degenerate subset. Also never route these through
-    the `losses` dict: its keys are divided by _mb_run (gh#90), prefixed
-    losses/, and lag environment/* by one epoch.
+    the `losses` dict: its minibatch sums are divided by the executed-minibatch
+    count (gh#90), its keys are prefixed losses/, and they lag environment/*
+    by one epoch.
 
     logs=None (throttled epoch) is a no-op: the top-of-loop reset then
     DROPS the measurement — injecting it next epoch would mislabel its
     step/epoch (spec §4.2 drop semantics).
     """
-    pending = getattr(trainer, "_tag_metrics", None)
+    pending = trainer._tag_metrics
     if pending and isinstance(logs, dict):
         logs.update(pending)

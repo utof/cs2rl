@@ -66,10 +66,11 @@ from tests.conftest import REPO_ROOT
 #
 # `cs2rl.train.trainer` (gh#168 W1) is deliberately NOT here: it subclasses PuffeRL, so
 # it imports pufferlib (and through it torch) at module scope and is heavy by
-# construction. It cannot pass property 3, and cs2rl.train.loop and
-# tests/_helpers/trainer_harness.py import it function-locally for exactly that reason
+# construction. It cannot pass property 3, and its one src/ importer,
+# cs2rl.train.compose (which cs2rl.train.loop and tests/_helpers/trainer_harness.py both
+# import at module scope), imports it function-locally for exactly that reason
 # (knock-out W1-K3: a module-level `from cs2rl.train.trainer import Cs2PuffeRL` in
-# cs2rl/train/loop.py turns test_cli_module_scope_stays_light red naming torch).
+# cs2rl/train/loop.py turned test_cli_module_scope_stays_light red naming torch).
 W1_MODULES = ("cs2rl.policy", "cs2rl.train.resume", "cs2rl.train.config", "cs2rl.train.metrics",
               "cs2rl.train.update", "cs2rl.env.factory", "cs2rl.eval.metrics_schema",
               "cs2rl.env.config")
@@ -180,13 +181,14 @@ assert not heavy, f"the CLI's module scope pulled {{heavy}} — --dump-config is
 def test_import_train_test_harness_stays_light():
     """`from tests._helpers import trainer_harness` pulls nothing heavy either.
 
-    The harness is not a W1 module (it is test-only and imports the train modules
-    function-locally), so the probes above never import it. Its lightness is what lets a
-    test import it without paying for torch, and it rests on `_harness_parts` and
-    `_build_trainer_for_test` importing `cs2rl.train.trainer` function-locally: the
-    trainer subclasses PuffeRL and imports torch at module scope, so one module-scope
-    trainer import here loads torch. No import-linter contract sees the harness (it
-    lives under tests/, outside `cs2rl`), so this probe is the check that does.
+    The harness is not a W1 module (it is test-only), so the probes above never import
+    it. Its lightness is what lets a test import it without paying for torch, and it
+    rests on everything it imports at module scope (`cs2rl.train.compose`,
+    `cs2rl.train.config`, `cs2rl.env.config`) importing `cs2rl.train.trainer` only
+    function-locally: the trainer subclasses PuffeRL and imports torch at module scope,
+    so one module-scope trainer import on that path loads torch. No import-linter
+    contract sees the harness (it lives under tests/, outside `cs2rl`), so this probe is
+    the check that does.
     """
     r = _run_child(f"""
 from tests._helpers import trainer_harness

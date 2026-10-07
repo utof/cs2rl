@@ -52,8 +52,8 @@ SHAPE of the write, per `tests/_helpers/metrics_census.SHAPES`:
                                                             identity; this is
                                                             `environment/episodes`)
   `self.stats[k]` via the append/extend collection loop → `window-mean-pufferlib`
-  `losses[k] += ...` BEFORE the gh#90 divisor loop      → `mean`
-  `losses[k] = ...`  AFTER  the gh#90 divisor loop      → `last`
+  `sums[k] += ...` into the gh#90 minibatch sums      → `mean`
+  `losses[k] = ...`  after the sums are divided        → `last`
   a write into `logs` / `log_entry` after `mean_and_log` → `last`
   a `game/*` re-key of a value `_get()` read out of `logs` → `window-mean-pufferlib`
 Anything declared here that contradicts its emitter's shape fails the assert BY
@@ -268,8 +268,8 @@ REGISTRY.update({
 })
 
 # ── environment/* — Cs2Env._build_terminal_info, one entry per episode ────
-# Every key here is appended into `self.stats` by the info-collection loop in
-# `cs2rl.train.trainer.Cs2PuffeRL.evaluate` and np.mean'd over the collection window by
+# Every key here is appended into `self.stats` by the info-collection loop,
+# `cs2rl.train.trainer.Cs2PuffeRL._collect_infos`, and np.mean'd over the collection window by
 # mean_and_log, hence window-mean-pufferlib. `environment/episodes` is the one exception
 # (below).
 _GAME_METRICS = ("compute_game_metrics", )
@@ -382,16 +382,17 @@ REGISTRY.update({
     _e("window-mean-pufferlib", "flag", _GAME_METRICS,
        "Denominator of the game/min_enemy_distance conditional mean."),
                                                                                            # The one non-window key on this path, and the one the aggregation assert has
-                                                                                           # an explicit case for: cs2rl.train.trainer.Cs2PuffeRL.train writes it as a ONE-ELEMENT LIST so
+                                                                                           # an explicit case for: cs2rl.train.trainer.Cs2PuffeRL._log_and_checkpoint writes it as a ONE-ELEMENT LIST so
                                                                                            # PufferLib's np.mean is an identity. It is the denominator of every
                                                                                            # weighted_sum(...)/episodes ratio in both gate scripts.
     "environment/episodes":
     _e(
         "last", "count", ("rung1_gate", "rung1a_smoke_read"),
-        "ONE-ELEMENT-LIST wrap in trainer.Cs2PuffeRL.train — np.mean over a "
-        "1-list is an identity, so this is the episode COUNT of the window, not a mean. "
-        "Turning it into a bare write would silently divide every gate ratio by the "
-        "window length; that is the case the aggregation assert pins by name."),
+        "ONE-ELEMENT-LIST wrap in trainer.Cs2PuffeRL._log_and_checkpoint — np.mean "
+        "over a 1-list is an identity, so this is the episode COUNT of the window, "
+        "not a mean. Turning it into a bare write would silently divide every gate "
+        "ratio by the window length; that is the case the aggregation assert pins by "
+        "name."),
                                                                                            # Not a metric: a ctypes view merged into the terminal info when
                                                                                            # include_step_stats_in_info=True (the test harness; `cs2rl.train.envs.build_env_factory`
                                                                                            # never sets it, so it stays False).
@@ -439,10 +440,11 @@ for _head, _bins in (("move", 9), ("shoot", 2), ("use", 2), ("reload", 2), ("wea
         REGISTRY[f"environment/action_{_head}_{_i}"] = _e("window-mean-pufferlib", "count", _cons)
 
 # ── losses/* — trainer.losses, prefixed by mean_and_log ───────────────────
-# `mean` = accumulated across minibatches then divided by the EXECUTED minibatch
-# count by the gh#90 divisor loop. `last` = written AFTER that loop, so it is an
-# absolute epoch scalar. Moving a write across that loop changes the aggregation,
-# which is exactly what the structural assert re-derives from source every run.
+# `mean` = summed across minibatches (Cs2PuffeRL._accumulate_minibatch) then divided
+# by the EXECUTED minibatch count (gh#90) in Cs2PuffeRL._finish_update. `last` =
+# written into the divided dict, so it is an absolute per-update scalar. Moving a
+# write between the two changes the aggregation, which is exactly what the
+# structural assert re-derives from source every run.
 REGISTRY.update({
     "losses/policy_loss":
     _e("mean", "dimensionless", ()),
@@ -453,7 +455,11 @@ REGISTRY.update({
     "losses/entropy_unmasked":
     _e("mean", "nats", ()),
     "losses/alpha":
-    _e("mean", "dimensionless", (), "Entropy-coefficient α (the value used)."),
+    _e(
+        "mean", "dimensionless", (),
+        "Raw entropy coefficient α = exp(log_alpha), before each minibatch's α step. The "
+        "α the loss used (after the GRACE ceiling and the floor clamp) is "
+        "losses/effective_alpha, logged for the last minibatch that ran."),
     "losses/alpha_loss":
     _e("mean", "dimensionless", ()),
     "losses/old_approx_kl":
@@ -474,8 +480,8 @@ REGISTRY.update({
     "losses/minibatches_run":
     _e(
         "last", "count", (),
-        "Inserted immediately AFTER the gh#90 divisor loop — it is the divisor itself "
-        "and must not be divided by it."),
+        "Written right after the gh#90 division — it is the divisor itself and must "
+        "not be divided by it."),
     "losses/entropy_floor_fires":
     _e("last", "count", ()),
     "losses/empty_minibatches":
@@ -485,7 +491,7 @@ REGISTRY.update({
     "losses/warmstart_phase":
     _e("last", "flag", ()),
     "losses/warmstart_h_over_h0":
-    _e("last", "ratio", (), "Post-divisor losses/entropy over the warm-start reference H0."),
+    _e("last", "ratio", (), "Post-division losses/entropy over the warm-start reference H0."),
     "losses/explained_variance":
     _e("last", "dimensionless", ()),
     "losses/ret_mean":
@@ -707,8 +713,8 @@ REGISTRY["health/weight_norm_*"] = _f(
 #   group axis  `for g in pg_group_names`, one hop back to the literal
 #               `pg_group_names = ("trunk", "policy_heads")` in the same function.
 #   label axis  `mb_label` is a PARAMETER; the single call site passes
-#               `mb_label="mb0" if _tag_mb0 else "mbL"` (mb0 = the epoch's first
-#               minibatch, mbL = the throttled later one).
+#               `mb_label="mb0" if is_mb0 else "mbL"` (mb0 = the update's first
+#               minibatch, mbL = its last executed one).
 # tests/_helpers/metrics_census.py resolves both from source and
 # test_metrics_schema.test_tag_families_are_census_closed_on_both_axes pins that
 # they stay resolved — an OPEN tag/* template would alibi any `tag/...` entry the

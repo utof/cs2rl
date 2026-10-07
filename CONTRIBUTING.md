@@ -99,6 +99,23 @@ absence. Name interfaces for what they own, preserve old-format resume where
 state is serialized, and verify the full combined diff. Reuse the measured
 prototype on the same branch instead of rebuilding it from prose.
 
+For a trainer change that claims zero behaviour change, compare seeded CPU trainers
+before and after with `scripts/trainer_equivalence.py`, from the base checkout and then
+from HEAD, with the same thread settings on both sides (in a worktree, use the venv
+interpreter form from the setup section instead of `uv run`):
+
+```bash
+env CUDA_VISIBLE_DEVICES= uv run python scripts/trainer_equivalence.py run --out base.json
+env CUDA_VISIBLE_DEVICES= uv run python scripts/trainer_equivalence.py run --out head.json
+env CUDA_VISIBLE_DEVICES= uv run python scripts/trainer_equivalence.py compare base.json head.json
+```
+
+`compare` exits 1 on any differing component; `seedctl CASE` is the positive control.
+The tool builds through `cs2rl.train.compose.build_trainer` the way the test harness
+does, so it does not see what only `train()` adds (weight decay, the aim-σ group, W&B,
+metrics rows, the eval hook): compare a short CPU CLI run for that. An intended numeric
+change moves the digests; it is a review instrument, not a test.
+
 See the [training-test workload postmortem](docs/postmortem-2026-10-04-training-test-workloads.md)
 and [architecture-refactor postmortem](docs/postmortem-2026-10-04-architecture-refactors.md).
 

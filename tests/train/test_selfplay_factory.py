@@ -1,4 +1,4 @@
-"""`env.factory.build_selfplay_manager` must construct what the three old sites did.
+"""`cs2rl.train.selfplay.build_selfplay_manager` must construct what the three old sites did.
 
 WHY THIS FILE EXISTS, separately from `test_env_factory.py`. W3 collapsed THREE
 `SelfPlayManager(...)` constructions — `train()` and both branches of
@@ -28,7 +28,6 @@ harness). The fixture records all three pre-migration shapes independently, and
 this file drives each one through the single builder — so the claim "they were
 the same construction" is asserted from the pre-migration source, not assumed.
 """
-import ast
 import copy
 import json
 
@@ -348,127 +347,31 @@ def test_knockout_the_fixture_itself_is_load_bearing(monkeypatch):
     assert got != capture["explicit_kwargs"]
 
 
-# ── the three MIGRATED CALL SITES ───────────────────────────────────────────
+# ── the MIGRATED CALL SITE ──────────────────────────────────────────────────
 #
 # Everything above feeds the fixture's bindings to `build_selfplay_manager` by
 # hand, which measures the BUILDER only: a call site that fills its slots wrongly
 # passes every one of those tests. `pin_pitch=aim_log_std_max` swapped at the
-# harness site would be green above and green across the whole suite.
+# call site would be green above.
 #
-# The harness site is driven for real below. train()'s site cannot be — reaching
-# it needs a full training run — so it is checked against its pre-migration
-# `call_source` over the AST, which is what the fixture recorded and therefore
-# the one comparison that is not against the new code itself.
-
-
-def _routing(call_source):
-    """{kwarg -> the source text the call passed for it}, from an unparsed Call.
-
-    `ast.unparse` of each argument rather than a bare Name id: all THREE captured
-    SPM sites pass a wrapped `pin_pitch` — train()'s passes `bool(args.pin_pitch)`
-    and the two `_build_trainer_for_test` branches (which the migration collapsed
-    into one call) pass `bool(pin_pitch)` — and train()'s wraps its cap on top of
-    that, as `getattr(args, 'aim_log_std_max', None)`, where those two branches
-    pass a bare `aim_log_std_max`. A map keyed on `kw.value.id` would have no
-    entry AT ALL for a wrapped argument, so it would route only the kwargs that
-    happen to be bare names; train()'s site — the only one this function is
-    applied to — is where both wrappings land. The env oracle's AST layer
-    unparses per kwarg for
-    the same reason (`test_env_factory._keywords`); its `_free_names` companion
-    reads bare Name ids, but it unions them across ALL arguments instead of
-    keying by kwarg, so it is a different comparison rather than a cheaper
-    spelling of this one.
-    """
-    call = ast.parse(call_source, mode="eval").body
-    return {kw.arg: ast.unparse(kw.value) for kw in call.keywords if kw.arg is not None}
-
-
-def _factory_call_in(path, qualname, func_name):
-    """The one `func_name(...)` call inside `qualname`, as an ast.Call.
-
-    Located by enclosing qualname, never by line number — the same discipline the
-    capture script uses, and for the same reason.
-    """
-    tree = ast.parse(path.read_text())
-    found = []
-
-    def walk(node, prefix):
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
-                walk(child, prefix + [child.name])
-                continue
-            if (isinstance(child, ast.Call) and isinstance(child.func, ast.Name)
-                    and child.func.id == func_name and ".".join(prefix) == qualname):
-                found.append(child)
-            walk(child, prefix)
-
-    walk(tree, [])
-    assert len(found) == 1, (f"expected exactly one {func_name}(...) in {path.name}:{qualname}, "
-                             f"found {len(found)}")
-    return found[0]
-
-
-PACKAGE = REPO_ROOT / "src" / "cs2rl"
-
-
-def test_train_call_site_forwards_the_same_expressions_it_used_to():
-    """train()'s migrated site passes the pre-migration argument EXPRESSIONS.
-
-    WHY AST AND NOT A LIVE CALL: this site sits ~200 lines into `train()`, after
-    the vecenv, the policy and the PuffeRL trainer are built; nothing short of a
-    real run reaches it, and the §3 gate that does run it is `--no-self-play`
-    and structurally blind to every kwarg here but `p_past`.
-
-    WHAT IS COMPARED: the three pass-through arguments, as SOURCE TEXT, against
-    `capture["call_source"]` — the pre-migration call recorded verbatim one
-    commit before the builder existed. So this checks the migrated site against
-    the OLD site, not against the builder it now calls.
-    `pool_size`/`save_every_epochs`/`win_threshold`/`phase_length` moved INTO the
-    builder by design and are covered by the captured-kwargs oracle above;
-    `p_past` became the `self_play_enabled` flag, asserted separately here.
-    """
-    capture = FIXTURE_DATA["sites"]["train"][0]
-    old = _routing(capture["call_source"])
-    new = _routing(
-        ast.unparse(
-            _factory_call_in(PACKAGE / "train" / "loop.py", "train", "build_selfplay_manager")))
-
-    for kwarg in ("aim_log_std_max", "opponent_mode"):
-        assert new.get(kwarg) == old[kwarg], (
-            f"train() now passes {kwarg}={new.get(kwarg)!r}; the pre-migration site passed "
-            f"{old[kwarg]!r}. Pre-migration call: {capture['call_source']}")
-
-    # pin_pitch's `bool(...)` moved into the builder ON PURPOSE (so the kwarg the
-    # captured oracle compares is still the coerced one), hence the argument
-    # itself must now be the BARE expression the old call wrapped.
-    assert old["pin_pitch"] == "bool(args.pin_pitch)"
-    assert new["pin_pitch"] == "args.pin_pitch", (
-        f"train() passes pin_pitch={new.get('pin_pitch')!r}; expected the unwrapped "
-        "`args.pin_pitch` — build_selfplay_manager applies the bool()")
-
-    assert old["p_past"] == "0.3 if self_play_enabled else 0.0"
-    assert new["self_play_enabled"] == "self_play_enabled", (
-        f"train() passes self_play_enabled={new.get('self_play_enabled')!r}; the flag the old "
-        f"p_past expression branched on was `self_play_enabled`")
-    assert "p_past" not in new, "train() is passing p_past again; the rule belongs to the builder"
+# Since #92 part 2 the three captured sites are one call, in
+# cs2rl.train.compose._selfplay_manager, which builds the manager for train() and
+# for the test harness. It is driven for real below through the harness, and
+# through train() in tests/train/test_driver_cleanup.py
+# (test_selfplay_manager_is_built_from_the_run_flags).
 
 
 @pytest.mark.parametrize("with_selfplay", [False, True])
 def test_harness_call_site_builds_the_captured_manager(monkeypatch, with_selfplay):
     """`_build_trainer_for_test`, run for real, still constructs the captured manager.
 
-    This is the site with NO other oracle: the §3 gate cannot see the harness and
-    nothing else on this branch reaches it. It is also the site the migration
-    changed most — two constructions under `if not with_selfplay:` became one
-    call taking the flag — so a live drive is worth its ~7 s.
+    The §3 gate cannot see the harness. The harness site is also the one the W3
+    migration changed most — two constructions under `if not with_selfplay:`
+    became one call taking the flag.
 
-    A SPY, NOT A STUB — and the difference is not stylistic. Aborting at the
-    construction (recording, then raising) leaves the vecenv and the PuffeRL
-    trainer built and unclosed, because `_build_trainer_for_test` hands its
-    `cleanup()` back only on the way out; the interpreter then never exits.
-    Measured: `pytest` and a bare `python -c` both hang indefinitely that way.
-    So the spy records and DELEGATES to the real builder, the harness finishes,
-    and the test closes it properly. Cost is the full ~7 s build per case.
+    A SPY, NOT A STUB: the spy records and DELEGATES to the real builder, so the
+    build finishes and the test can also check that the trainer carries the
+    manager the builder returned, and then closes it.
 
     WHY THE SENTINELS ARE NOT STRINGS here, unlike the fixture's. These arguments
     are consumed by `build_train_config` on the way to the site
@@ -483,6 +386,7 @@ def test_harness_call_site_builds_the_captured_manager(monkeypatch, with_selfpla
     NON-default at this site, so a builder that dropped it (falling back to
     SelfPlayManager's own "self") is caught here rather than nowhere.
     """
+    from cs2rl.train import compose
     from cs2rl.train import selfplay as train_selfplay
     from tests._helpers import trainer_harness
 
@@ -495,20 +399,25 @@ def test_harness_call_site_builds_the_captured_manager(monkeypatch, with_selfpla
     aim_cap = -1.2345
     opponent = "self" if with_selfplay else "noop"
 
-    recorded = []
+    recorded, made = [], []
     real_builder = train_selfplay.build_selfplay_manager
 
     def _spy(**kwargs):
         recorded.append(kwargs)
-        return real_builder(**kwargs)
+        made.append(real_builder(**kwargs))
+        return made[-1]
 
-    monkeypatch.setattr(trainer_harness, "build_selfplay_manager", _spy)
-    _, cleanup = trainer_harness._build_trainer_for_test(num_envs=2,
-                                                         with_selfplay=with_selfplay,
-                                                         opponent=opponent,
-                                                         aim_log_std_max=aim_cap,
-                                                         pin_pitch=capture["bindings"]["pin_pitch"])
-    cleanup()
+    monkeypatch.setattr(compose, "build_selfplay_manager", _spy)
+    trainer, cleanup = trainer_harness._build_trainer_for_test(
+        num_envs=2,
+        with_selfplay=with_selfplay,
+        opponent=opponent,
+        aim_log_std_max=aim_cap,
+        pin_pitch=capture["bindings"]["pin_pitch"])
+    try:
+        assert trainer._self_play_mgr is made[0]
+    finally:
+        cleanup()
 
     assert len(recorded) == 1
     got = recorded[0]
@@ -532,14 +441,15 @@ def test_harness_given_manager_skips_the_builder(monkeypatch):
     way a resume does (tests/train/test_resume_state.py, tests/train/test_pitch_pin.py). The
     companion case above pins the 1-call path; without this one, a harness that built a
     second manager and silently discarded the given one would keep every test green
-    (the trainer would carry the builder's manager, not the caller's). Same spy shape as
-    the companion, for the same reason: a stub that raised would leave the trainer
-    unclosed. The manager passed must agree with the harness knobs (the harness asserts
+    (the trainer would carry the builder's manager, not the caller's). Same delegating
+    spy as the companion, so a builder call is recorded without changing the build.
+    The manager passed must agree with the harness knobs (build_trainer asserts
     that), so it is built with the values the harness would pass: ``opponent_mode="self"``
     and ``pin_pitch=bool(_ENV_DEFAULTS.pin_pitch)`` (spelled, not left to
     SelfPlayManager's own default coinciding with the env default), with ``p_past=0.0``
     (no self-play).
     """
+    from cs2rl.train import compose
     from cs2rl.train import selfplay as train_selfplay
     from cs2rl.train.selfplay import SelfPlayManager
     from tests._helpers import trainer_harness
@@ -551,32 +461,15 @@ def test_harness_given_manager_skips_the_builder(monkeypatch):
         recorded.append(kwargs)
         return real_builder(**kwargs)
 
-    monkeypatch.setattr(trainer_harness, "build_selfplay_manager", _spy)
+    monkeypatch.setattr(compose, "build_selfplay_manager", _spy)
     mgr = SelfPlayManager(p_past=0.0,
                           opponent_mode="self",
                           pin_pitch=bool(trainer_harness._ENV_DEFAULTS.pin_pitch))
-    _, cleanup = trainer_harness._build_trainer_for_test(num_envs=2, self_play_mgr=mgr)
+    trainer, cleanup = trainer_harness._build_trainer_for_test(num_envs=2, self_play_mgr=mgr)
     try:
         assert recorded == [], (
             f"the harness called build_selfplay_manager {len(recorded)}x although a manager "
             "was given; the caller's pre-seeded manager would be discarded")
+        assert trainer._self_play_mgr is mgr
     finally:
         cleanup()
-
-
-def test_harness_no_longer_branches_on_with_selfplay_to_construct():
-    """The two harness constructions really did collapse to one call site.
-
-    Without this, the migration could have left the `if not with_selfplay:` in
-    place with a `build_selfplay_manager(...)` in each arm — every other test in
-    this file would stay green, and the next knob would go into one arm only,
-    which is the drift W3 exists to end.
-    """
-    tree = ast.parse((PACKAGE.parents[1] / "tests" / "_helpers" / "trainer_harness.py").read_text())
-    calls = [
-        n for n in ast.walk(tree) if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
-        and n.func.id == "build_selfplay_manager"
-    ]
-    assert len(calls) == 1, (
-        f"trainer_harness.py has {len(calls)} build_selfplay_manager call sites; the two "
-        "pre-migration branches were identical apart from p_past and must stay collapsed")

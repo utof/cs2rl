@@ -533,7 +533,7 @@ def test_failed_resume_preserves_checkpoints_and_releases_workers(tmp_path, monk
     from types import SimpleNamespace
 
     from cs2rl.env.map import make_simple_map
-    from cs2rl.train import loop
+    from cs2rl.train import compose, loop
     from cs2rl.train.trainer import Cs2PuffeRL
 
     args = SimpleNamespace(
@@ -582,7 +582,8 @@ def test_failed_resume_preserves_checkpoints_and_releases_workers(tmp_path, monk
         def fail(*a):
             raise setup_error
 
-        monkeypatch.setattr(loop, "assert_pin_pitch_agreement", fail)
+        # The agreement checks run inside build_trainer, after the trainer exists.
+        monkeypatch.setattr(compose, "assert_pin_pitch_agreement", fail)
 
     # Snapshot the ENTIRE checkpoint namespace, including root aliases and every
     # model/optimizer/sidecar byte, after the intentional input corruption.

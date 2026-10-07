@@ -175,17 +175,17 @@ def build_participating_rows(num_envs: int,
         team neither learns nor is counted.
 
     WHY a shared helper: this vector used to be built by two copies of the same
-    expression (`cs2rl.train.loop.train` and
-    `tests._helpers.trainer_harness._harness_parts`), and it sits UPSTREAM of
+    expression (one in train(), one in the test harness), and it sits UPSTREAM of
     global_step, the buffer scatter, every masked loss and
     losses/participating_rows. Patching one copy would have left the headline
     harness test green while production still trained on both teams — precisely
-    the silent failure this experiment cannot afford.
+    the silent failure this experiment cannot afford. Its one caller now is
+    `cs2rl.train.compose._participating_rows`, for production and tests alike.
 
     PITFALLS
     - Derived from ARGS, while the envs are built separately from the same
-      args; train() keeps an explicit driver-env agreement assert beside its
-      call site, and Cs2PuffeRL._init_hybrid_aim re-checks the length.
+      args; its caller keeps an explicit driver-env agreement assert beside the
+      call, and Cs2PuffeRL._init_hybrid_aim re-checks the length.
     - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
       (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
       constant for the whole run because the mode forbids self-play; a
@@ -225,10 +225,11 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (target re-anchored at measured H, rising to base_frac*max; floor still
     # off, re-arms at ramp end). At the default ceiling of 0.0 the GRACE window
     # turns the entropy bonus fully OFF — pure PPO on reward, not merely a small
-    # bonus. Explicit flag, NO auto-detection: config.json is dumped BEFORE the
-    # resume block loads the checkpoint, so an auto-set flag would be recorded
-    # False — provenance poison (spec finding 3). The getattr defaults keep
-    # harness/dump-config args objects (which may predate these flags) working.
+    # bonus. Explicit flag, NO auto-detection: this dict is built before the resume
+    # weights are read (cs2rl.train.loop._prepare_run; --dump-config reads none), so
+    # a flag set from the checkpoint would be recorded False — provenance poison
+    # (spec finding 3). The getattr defaults keep harness/dump-config args objects
+    # (which may predate these flags) working.
     # Read out here rather than inline in the dict below: yapf snaps that dict's
     # comment column past the longest line in the block, so long inline
     # getattr() calls would re-indent every comment in it.
@@ -288,7 +289,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # (total_epochs = total_timesteps // batch_size, pufferl.py:168-170, which
     # also sets the cosine-LR T_max) counts RAW buffer rows, so the raw budget
     # handed to it is scaled by (rows per env) / (participating rows per env).
-    # Both numbers are recorded: done_training in Cs2PuffeRL.train
+    # Both numbers are recorded: done_training in Cs2PuffeRL._log_and_checkpoint
     # compares global_step (participating units) against
     # participating_timesteps, and the epoch clause catches the floor-division
     # slack.
@@ -419,7 +420,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
                                                                        # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
                                                                        # ≈ 2.87 nats still allows broad exploration but permits commitment.
                                                                        # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                                       # Cs2PuffeRL.train (self._entropy_floor) clamps α ≥ 0.5 when H < 0.3·max;
+                                                                       # Cs2PuffeRL._entropy_terms (self._entropy_floor) clamps α ≥ 0.5 when H < 0.3·max;
                                                                        # a base target below the floor would make the two mechanisms fight.
         "entropy_target_warmup_frac": 0.5,
         "entropy_target_base_frac": 0.35,

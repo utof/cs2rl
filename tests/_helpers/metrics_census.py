@@ -51,9 +51,9 @@ THE THREE THINGS THIS FILE PRODUCES, per emitter site:
                        which the expected aggregation follows.
 
 PITFALL — why the extractor is keyed on WRITE POSITIONS and not on "every
-string constant in the function": ``Cs2PuffeRL.train`` is ~700 lines and
-mentions dozens of identifier-shaped strings that are config keys, tensor group
-names and dict labels. Collecting all of them and then exempting the
+string constant in the function": the trainer's update methods mention dozens
+of identifier-shaped strings that are config keys, tensor group names and dict
+labels. Collecting all of them and then exempting the
 false positives is how an extractor gets loosened until it enforces nothing.
 Only subscript-assignment targets, dict literals that reach a metrics
 container, and ``<container>.update({...})`` arguments count.
@@ -80,14 +80,14 @@ SRC = REPO_ROOT / "src" / "cs2rl"
 # reaches metrics.jsonl: PufferLib's mean_and_log re-keys `self.stats` under
 # `environment/` and `self.losses` under `losses/` (pufferl.py mean_and_log),
 # and Cs2Env._build_terminal_info's summary dict becomes `self.stats` entries via
-# train.py's info-collection loop. Writing the prefix down here — rather than
-# registering the bare names — is what makes the registry's keys the keys an
-# analyst actually greps for.
+# the info-collection loop, `Cs2PuffeRL._collect_infos`. Writing the prefix down
+# here — rather than registering the bare names — is what makes the registry's keys
+# the keys an analyst actually greps for.
 #
 # `self_play_used_past_metric` is on the list although it emits nothing: it is
 # named by the spec as one of "our emitters", and an empty result from it is a
 # fact worth re-checking rather than an omission worth wondering about. Its
-# caller (train.py `train`) is what writes `self_play/used_past`.
+# caller (`_log_selfplay` in train/loop.py) is what writes `self_play/used_past`.
 #
 # `Cs2Env.step` is listed SEPARATELY from `Cs2Env._build_terminal_info` because
 # the step-stats merge is not in the helper: it is an inline
@@ -103,9 +103,10 @@ class EmitterSite(NamedTuple):
     containers: dict                   # container expression -> key prefix
 
 
-# gh#168 W2a: the return-norm train body is `Cs2PuffeRL.train` (src/cs2rl/trainer.py); its
-# `trainer._tag_metrics` container became `self._tag_metrics` with the trainer->self
-# rename. The site's key multiset is pinned identical across the move (ledger W2a, O6).
+# gh#92: `Cs2PuffeRL.train` writes no key itself; its phase methods do. The minibatch
+# SUMS go into `sums` (`_UpdateState.sums`, see GH90_ACCUMULATOR below), the per-update
+# absolutes into the `losses` dict `_finish_update` builds from them. The trainer sites'
+# (key, shape) multiset is the one the single pre-gh#92 `Cs2PuffeRL.train` site produced.
 EMITTER_SITES = (
     EmitterSite("train/metrics.py", "compute_network_health", {"metrics": ""}),
     EmitterSite("train/metrics.py", "log_aim_log_std", {"logs": ""}),
@@ -114,16 +115,18 @@ EMITTER_SITES = (
     EmitterSite("train/metrics.py", "ScheduledEval.after_train", {"self.pending": ""}),
     EmitterSite("train/metrics.py", "compute_game_metrics", {"game_metrics": ""}),
     EmitterSite("train/metrics.py", "_inject_tag_metrics", {"logs": ""}),
-    EmitterSite("train/trainer.py", "Cs2PuffeRL.train", {
-        "losses": "losses/",
-        "self.stats": "environment/",
-        "self._tag_metrics": "",
-    }),
+    EmitterSite("train/trainer.py", "Cs2PuffeRL._accumulate_minibatch", {"sums": "losses/"}),
+    EmitterSite("train/trainer.py", "Cs2PuffeRL._finish_update", {"losses": "losses/"}),
+    EmitterSite("train/trainer.py", "Cs2PuffeRL._warmstart_metrics", {"losses": "losses/"}),
+    EmitterSite("train/trainer.py", "Cs2PuffeRL._record_tag", {"self._tag_metrics": ""}),
+    EmitterSite("train/trainer.py", "Cs2PuffeRL._log_and_checkpoint",
+                {"self.stats": "environment/"}),
     EmitterSite("train/update.py", "tag_grad_cossim", {"out": ""}),
-    EmitterSite("train/loop.py", "train", {
-        "logs": "",
-        "log_entry": ""
-    }),
+                                                                                                 # #92 part 2 split the epoch loop out of `train`; these four hold its writes.
+    EmitterSite("train/loop.py", "_run_epochs", {"logs": ""}),
+    EmitterSite("train/loop.py", "_log_epoch", {"logs": ""}),
+    EmitterSite("train/loop.py", "_log_selfplay", {"logs": ""}),
+    EmitterSite("train/loop.py", "_persist_row", {"log_entry": ""}),
     EmitterSite("train/selfplay.py", "self_play_used_past_metric", {"logs": ""}),
     EmitterSite("env/c/cs2_env.py", "Cs2Env._build_terminal_info", {"summary": "environment/"}),
     EmitterSite("env/c/cs2_env.py", "Cs2Env.step", {"summary": "environment/"}),
@@ -214,9 +217,9 @@ ISLAND_MERGE_SOURCES = (
         "`eval_output_keys()` and pinned by "
         "test_eval_keys_match_the_evaluate_output_contract."),
     IslandMerge(
-        "_inject_tag_metrics", "getattr(trainer, '_tag_metrics', None)",
+        "_inject_tag_metrics", "trainer._tag_metrics",
         "A re-read of the island's OWN `trainer._tag_metrics` container: every key in it "
-        "was written under Cs2PuffeRL.train / tag_grad_cossim, both of which are "
+        "was written under Cs2PuffeRL._record_tag / tag_grad_cossim, both of which are "
         "EMITTER_SITES entries, so the merge adds no key the census has not already seen."),
 )
 
@@ -266,17 +269,17 @@ NON_KEY_CALLS = ("replace", "compile", "Path")
 SHAPES = {
                                                        # `self.stats[k] = [scalar]` — a ONE-ELEMENT list, so PufferLib's np.mean
                                                        # over the window list is an identity. `environment/episodes` is written
-                                                       # this way on purpose (train_update.py, see its comment).
+                                                       # this way on purpose (Cs2PuffeRL._log_and_checkpoint, see its comment).
     "stats-one-element-list": "last",
                                                        # `self.stats[k]` fed by the append/extend collection loop — PufferLib
                                                        # np.means the whole collection window.
     "stats-window": "window-mean-pufferlib",
-                                                       # `losses[k] += ...` BEFORE the gh#90 divisor loop: the sum is divided by
-                                                       # the executed-minibatch count, i.e. a mean over minibatches.
+                                                       # `sums[k] += ...` into the gh#90 accumulator: `_finish_update` divides the
+                                                       # sum by the executed-minibatch count, i.e. a mean over minibatches.
     "losses-accumulated": "mean",
-                                                       # `losses[k] = ...` AFTER the divisor loop: an absolute epoch scalar. The
-                                                       # gh#90 comment at that loop names the trap this distinction encodes —
-                                                       # anything written before the loop is silently scaled by 1/minibatches.
+                                                       # `losses[k] = ...` into the dict that division produced: an absolute
+                                                       # per-update scalar. gh#90 is the trap this distinction encodes — an
+                                                       # absolute written into the sums is silently scaled by 1/minibatches.
     "losses-absolute": "last",
                                                        # Re-keyed inside compute_game_metrics out of values `_get()` read from
                                                        # `logs`, i.e. out of PufferLib window means that mean_and_log already
@@ -285,7 +288,7 @@ SHAPES = {
                                                        # Written straight into the outer `logs` dict (or a dict merged into it)
                                                        # AFTER mean_and_log returned — one value per logged row, no windowing.
     "logs-post-mean": "last",
-                                                       # Written straight into the persisted `log_entry` row in train.py, never
+                                                       # Written straight into the persisted `log_entry` row in train/loop.py, never
                                                        # through PufferLib at all (run_id, step, epoch, team_spirit,
                                                        # resumed_from_step). Same "one value per row" contract as the above; kept
                                                        # separate so the registry says which pipeline a key belongs to.
@@ -293,7 +296,7 @@ SHAPES = {
                                                        # A `summary[k] = <bare attribute>` write — the ONE shape in the terminal-info
                                                        # dict that is not wrapped in int()/float(): `summary["step_stats"] =
                                                        # self._step_stats_view`. mean_and_log's np.mean raises on a list of those
-                                                       # and train.py's isinstance(v, (int, float)) persist filter drops the key, so
+                                                       # and train/loop.py's isinstance(v, (int, float)) persist filter drops the key, so
                                                        # calling it a window mean would be the registry lying about a ctypes view.
                                                        # This is a TIGHTENING, not an exemption: the key is still censused and still
                                                        # requires a registry entry — it just gets an honest one.
@@ -703,27 +706,107 @@ def _template(node, env):
 
 # ── Shape classification ──────────────────────────────────────────────────
 
+# The gh#90 accumulator (gh#92 made it a container instead of a divisor loop). A
+# `losses/*` key is a minibatch MEAN when it is summed into `sums` and an absolute when
+# it is written into the dict `_finish_update` divides those sums into, so the split
+# is by container and `_classify` reads it off the container name. That is only true
+# while the accumulator keeps the shape `gh90_accumulator_violations` checks.
+GH90_ACCUMULATOR = "sums"
+_GH90_SUMS_SITE = "Cs2PuffeRL._accumulate_minibatch"
+_GH90_DIVIDE_SITE = "Cs2PuffeRL._finish_update"
 
-def _divisor_lineno(fn):
-    """Line of `for _lk in list(losses): losses[_lk] /= ...` (gh#90).
 
-    Every `losses` key written before this line is divided by the executed
-    minibatch count; every key written after it is an absolute. Located by
-    shape, so moving the loop moves the classification with it — and deleting
-    it fails here rather than silently reclassifying every loss key.
+def gh90_accumulator_violations():
+    """Why `sums` is not (only) the minibatch-mean accumulator; [] when it is.
+
+    The facts the mean/last split rests on, each a way it was or could be broken:
+
+      * `.sums` and `.minibatches_run` are touched only in `_accumulate_minibatch`
+        (alias `sums = update.sums`, then `+=` writes and the count) and in
+        `_finish_update` (the division). A write anywhere else would be divided as
+        a mean, or dropped if it lands after the division.
+      * every use of the `sums` alias is the target of a `+=`: `sums[k] = v` would
+        replace a sum with one minibatch's value and `sums.update(...)` would hide
+        keys from the census.
+      * `.minibatches_run` is incremented exactly once, beside the sums, so the
+        divisor counts the minibatches that added to them.
+      * `_finish_update` divides first: `losses` is bound to a dict built by
+        dividing every `update.sums` item by `update.minibatches_run`, before any
+        `losses[k] = ...` write. That divisor is the gh#90 fix (a KL-truncated
+        update divides by the minibatches it ran, not by total_minibatches).
     """
-    for node in ast.walk(fn):
-        if not isinstance(node, ast.For):
-            continue
-        for sub in node.body:
-            if (isinstance(sub, ast.AugAssign) and isinstance(sub.op, ast.Div)
-                    and isinstance(sub.target, ast.Subscript)
-                    and _container_name(sub.target.value) == "losses"):
-                return node.lineno
-    raise AssertionError(
-        "the gh#90 `for _lk in list(losses): losses[_lk] /= ...` divisor loop is gone from "
-        "Cs2PuffeRL.train — every losses/* aggregation in eval/metrics_schema.py is "
-        "classified relative to it, so its removal is a registry-wide event, not a refactor")
+    tree = _module_ast("train/trainer.py")
+    sums_fn = _find_qualname(tree, _GH90_SUMS_SITE)
+    divide_fn = _find_qualname(tree, _GH90_DIVIDE_SITE)
+    out = []
+    allowed = {id(n) for fn in (sums_fn, divide_fn) for n in ast.walk(fn)}
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Attribute) and node.attr in ("sums", "minibatches_run")
+                and id(node) not in allowed):
+            out.append(f"line {node.lineno}: `.{node.attr}` used outside "
+                       f"{_GH90_SUMS_SITE} / {_GH90_DIVIDE_SITE}")
+
+    alias = [
+        n for n in ast.walk(sums_fn) if isinstance(n, ast.Assign) and len(n.targets) == 1
+        and isinstance(n.targets[0], ast.Name) and n.targets[0].id == GH90_ACCUMULATOR
+    ]
+    if len(alias) != 1 or ast.unparse(alias[0].value) != "update.sums":
+        out.append(f"{_GH90_SUMS_SITE}: expected exactly one `{GH90_ACCUMULATOR} = update.sums`")
+    added = {
+        id(n.target.value)
+        for n in ast.walk(sums_fn) if isinstance(n, ast.AugAssign) and isinstance(n.op, ast.Add)
+        and isinstance(n.target, ast.Subscript)
+    }
+    for n in ast.walk(sums_fn):
+        if (isinstance(n, ast.Name) and n.id == GH90_ACCUMULATOR and isinstance(n.ctx, ast.Load)
+                and id(n) not in added):
+            out.append(f"line {n.lineno}: `{GH90_ACCUMULATOR}` used other than as "
+                       f"`{GH90_ACCUMULATOR}[k] += ...`")
+    counts = [
+        n for n in ast.walk(sums_fn) if isinstance(n, ast.AugAssign) and isinstance(n.op, ast.Add)
+        and ast.unparse(n.target) == "update.minibatches_run"
+    ]
+    stores = [
+        n for n in ast.walk(sums_fn) if isinstance(n, ast.Attribute) and n.attr == "minibatches_run"
+        and not isinstance(n.ctx, ast.Load)
+    ]
+    if len(counts) != 1 or len(stores) != 1:
+        out.append(f"{_GH90_SUMS_SITE}: expected exactly one `update.minibatches_run += ...` "
+                   f"(found {len(counts)} increments, {len(stores)} stores)")
+
+    divide = next((n
+                   for n in ast.walk(divide_fn) if isinstance(n, ast.Assign) and len(n.targets) == 1
+                   and isinstance(n.targets[0], ast.Name) and n.targets[0].id == "losses"), None)
+    comps = [c for c in ast.walk(divide) if isinstance(c, ast.DictComp)] if divide else []
+    comp = comps[0] if len(comps) == 1 and len(comps[0].generators) == 1 else None
+    quotient = (comp.value if comp is not None
+                and ast.unparse(comp.generators[0].iter) == "update.sums.items()" else None)
+    divisor = ""
+    if isinstance(quotient, ast.BinOp) and isinstance(quotient.op, ast.Div):
+        divisor = ast.unparse(quotient.right)
+        bound = [
+            ast.unparse(n.value) for n in ast.walk(divide_fn) if isinstance(n, ast.Assign) and any(
+                isinstance(t, ast.Name) and t.id == divisor for t in n.targets)
+        ]
+        if bound == ["update.minibatches_run"]:
+            divisor = "update.minibatches_run"
+    if divide is None or divisor != "update.minibatches_run":
+        out.append(f"{_GH90_DIVIDE_SITE}: `losses` is not built as "
+                   "`{key: total / update.minibatches_run for key, total in update.sums.items()}`")
+        return out
+    sums_reads = [
+        n for n in ast.walk(divide_fn) if isinstance(n, ast.Attribute) and n.attr == "sums"
+    ]
+    if len(sums_reads) != 1:
+        out.append(f"{_GH90_DIVIDE_SITE}: `update.sums` read {len(sums_reads)} times; "
+                   "only the division may read it")
+    early = [
+        w for n in ast.walk(divide_fn) for _, _, _, w in site_write_targets(n, {"losses": ""})
+        if w < divide.lineno
+    ]
+    if early:
+        out.append(f"{_GH90_DIVIDE_SITE}: `losses` written at {early}, before the division")
+    return out
 
 
 def _game_passthrough_names(fn):
@@ -770,11 +853,13 @@ def _classify(site, container, value, lineno, ctx):
     if container.endswith(".stats"):
         one_element_list = (isinstance(value, (ast.List, ast.Tuple)) and len(value.elts) == 1)
         return "stats-one-element-list" if one_element_list else "stats-window"
+    if container == GH90_ACCUMULATOR:
+        return "losses-accumulated"
     if container == "losses":
-        return "losses-accumulated" if lineno < ctx["divisor_lineno"] else "losses-absolute"
+        return "losses-absolute"
     if container == "summary":
-        # cs2_env's terminal-info dict is appended into self.stats by train.py's
-        # collection loop, one entry per episode → a PufferLib window mean.
+        # cs2_env's terminal-info dict is appended into self.stats by
+        # Cs2PuffeRL._collect_infos, one entry per episode → a PufferLib window mean.
         # Exception, by SHAPE not by name: every numeric write in that dict
         # coerces with int()/float() (or is a local bound to such a coercion); a
         # BARE ATTRIBUTE read is the non-numeric payload case. Adding a numeric
@@ -900,7 +985,7 @@ def emitter_param_bindings(site, fn):
     `tag/*` families come out OPEN — and an OPEN template is a glob alibi in
     `test_every_registered_emitted_key_is_actually_emitted`, so the registry
     could carry any `tag/...` key it liked. The single call site passes
-    ``mb_label="mb0" if _tag_mb0 else "mbL"``: two constants, an `ast.IfExp` that
+    ``mb_label="mb0" if is_mb0 else "mbL"``: two constants, an `ast.IfExp` that
     `_resolve` already unions. The label axis is a static fact; it just is not
     written down inside the emitter.
 
@@ -981,13 +1066,19 @@ class _SiteWithFn:
 
 
 def census():
-    """(emitted keys, key families) over the whole emitter island."""
+    """(emitted keys, key families) over the whole emitter island.
+
+    Raises when the gh#90 accumulator lost its shape: every losses/* aggregation in
+    eval/metrics_schema.py is classified by it, so that is a registry-wide event.
+    """
+    violations = gh90_accumulator_violations()
+    if violations:
+        raise AssertionError("the gh#90 accumulator lost its shape; the losses/* mean/last "
+                             "split is unchecked:\n  " + "\n  ".join(violations))
     keys, families = [], []
     for site in EMITTER_SITES:
         fn = _find_qualname(_module_ast(site.path), site.qualname)
         ctx = {
-            "divisor_lineno":
-            _divisor_lineno(fn) if "losses" in site.containers else 0,
             "passthrough_names":
             (_game_passthrough_names(fn) if site.qualname == "compute_game_metrics" else set()),
             "nested_calls":
@@ -1091,7 +1182,7 @@ def metrics_write_sites(src=None):
     container whose keys are BARE and whose name resembles no island container
     (``tmp["kills"] = ...``) — dropped by the key predicate above before the
     container check can see it — and the one-argument ``c.setdefault(k)``, which
-    writes None and is therefore dropped by train.py's numeric persist filter
+    writes None and is therefore dropped by train/loop.py's numeric persist filter
     before it can reach a row.
     """
     containers = {c.split(".")[-1] for s in EMITTER_SITES for c in s.containers}
@@ -1664,42 +1755,41 @@ def eval_output_keys():
 def losses_entropy_head_source():
     """Name of the constant the per-head `losses/entropy/<head>` loop iterates.
 
-    `losses/entropy/*` is an OPEN family to this extractor — the loop runs over a
-    local bound to `list(ACTION_HEAD_NAMES)`, an imported Name, and the rule that
-    only LITERAL iterables bind a loop variable stops one hop short of it on
-    purpose. metrics_schema therefore declares that family's members FROM
-    `spec.action.ACTION_HEAD_NAMES`, which is circular unless something pins that
-    the emitter reads the same tuple. This is that pin: it returns the constant's
-    name, so re-pointing the emitter at a different head list fails the test
-    instead of silently leaving the registry describing the old heads.
+    `losses/entropy/*` is an OPEN family to this extractor — the loop zips an
+    imported Name with the policy's distributions, and the rule that only LITERAL
+    iterables bind a loop variable stops short of it on purpose. metrics_schema
+    therefore declares that family's members FROM `spec.action.ACTION_HEAD_NAMES`,
+    which is circular unless something pins that the emitter reads the same tuple.
+    This is that pin: it returns the constant's name, so re-pointing the emitter at
+    a different head list fails the test instead of silently leaving the registry
+    describing the old heads. A local copy (`names = list(ACTION_HEAD_NAMES)`) is
+    resolved one hop, to the constant it copies.
     """
-    fn = _find_qualname(_module_ast("train/trainer.py"), "Cs2PuffeRL.train")
-    # The write we are anchored on: `losses[f"entropy/{_hn}"] += ...` inside a
+    fn = _find_qualname(_module_ast("train/trainer.py"), _GH90_SUMS_SITE)
+    # The write we are anchored on: `sums[f"entropy/{name}"] += ...` inside a
     # `for ... in zip(<names>, ...)`. Walk outwards from the write to its loop.
-    loops = [n for n in ast.walk(fn) if isinstance(n, ast.For)]
-    for loop in loops:
+    for loop in (n for n in ast.walk(fn) if isinstance(n, ast.For)):
         writes = [
             n for n in ast.walk(loop)
             if isinstance(n, ast.AugAssign) and isinstance(n.target, ast.Subscript)
-            and _container_name(n.target.value) == "losses" and isinstance(
+            and _container_name(n.target.value) == GH90_ACCUMULATOR and isinstance(
                 n.target.slice, ast.JoinedStr) and "entropy/" in ast.unparse(n.target.slice)
         ]
         if not writes:
             continue
-        # `for _hi, (_hn, _hd) in enumerate(zip(_head_names, _dists, strict=True))`
-        names = [n.id for n in ast.walk(loop.iter) if isinstance(n, ast.Name)]
-        for local in names:
-            # Resolve one hop: the `_head_names = list(ACTION_HEAD_NAMES)` binding.
-            for node in ast.walk(fn):
-                if (isinstance(node, ast.Assign) and len(node.targets) == 1
-                        and isinstance(node.targets[0], ast.Name) and node.targets[0].id == local):
-                    inner = [n.id for n in ast.walk(node.value) if isinstance(n, ast.Name)]
-                    if inner:
-                        return inner[-1]
+        it = loop.iter
+        if isinstance(it, ast.Call) and _callee_name(it) == "enumerate" and it.args:
+            it = it.args[0]
+        if (isinstance(it, ast.Call) and _callee_name(it) == "zip" and it.args
+                and isinstance(it.args[0], ast.Name)):
+            for bound in _one_hop_bindings(fn, it.args[0]):
+                inner = [n.id for n in ast.walk(bound) if isinstance(n, ast.Name)]
+                if inner:
+                    return inner[-1]
     raise AssertionError(
-        "no `losses[f\"entropy/{...}\"] += ...` loop found in Cs2PuffeRL.train — the "
-        "per-head entropy family moved, and metrics_schema's losses/entropy/* member list "
-        "is no longer tied to anything")
+        f"no `{GH90_ACCUMULATOR}[f\"entropy/{{...}}\"] += ...` loop over `zip(<names>, ...)` found "
+        f"in {_GH90_SUMS_SITE} — the per-head entropy family moved, and metrics_schema's "
+        "losses/entropy/* member list is no longer tied to anything")
 
 
 def tag_key_axes():
@@ -1733,19 +1823,27 @@ def tag_key_axes():
 
 
 def stats_collection_is_append_shaped():
-    """True iff Cs2PuffeRL.evaluate accumulates episode infos into `self.stats` as LISTS.
+    """True iff Cs2PuffeRL._collect_infos accumulates episode infos into `self.stats` as LISTS.
 
     The `window-mean-pufferlib` aggregation of every `environment/*` key rests
     on this loop appending to a list that PufferLib later np.means. If it were
     ever rewritten to `self.stats[k] = v`, every one of those declarations
-    would become wrong at once — and nothing else in the suite would notice.
+    would become wrong at once — and no other default-tier test would notice:
+    the behaviour check (a real rollout, in tests/train/test_trainer_composition.py)
+    runs only under `-m training`. Both halves are required: an `append` (the scalar branch, which is what the
+    terminal infos' scalars take) and no store into `self.stats[...]`. Requiring
+    only "some append or extend" stayed green with the scalar branch turned into
+    an assignment (gh#92 knock-out K7).
     """
     tree = _module_ast("train/trainer.py")
-    fn = _find_qualname(tree, "Cs2PuffeRL.evaluate")
+    fn = _find_qualname(tree, "Cs2PuffeRL._collect_infos")
+    appends = stores = 0
     for node in ast.walk(fn):
         if (isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
-                and node.func.attr in ("append", "extend")
-                and isinstance(node.func.value, ast.Subscript)
+                and node.func.attr == "append" and isinstance(node.func.value, ast.Subscript)
                 and _container_name(node.func.value.value) == "self.stats"):
-            return True
-    return False
+            appends += 1
+        if (isinstance(node, ast.Subscript) and not isinstance(node.ctx, ast.Load)
+                and _container_name(node.value) == "self.stats"):
+            stores += 1
+    return appends > 0 and stores == 0

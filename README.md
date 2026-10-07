@@ -71,7 +71,8 @@ writes the run's `config.json` without training. Outputs go under `outputs/`.
 | `src/cs2rl/experiment/` | gates and analyses that read a finished run's files | `src/cs2rl/experiment/CONTEXT.md` |
 | `src/cs2rl/spec/` | the obs and action layouts generated from the C header, and the output paths | |
 | `src/cs2rl/eval/`, `src/cs2rl/viz/`, `src/cs2rl/deploy/` | scripted baselines and the metrics registry; rerun and play viewers; ONNX export | |
-| `src/cs2rl/policy.py` | the policy network | |
+| `src/cs2rl/policy.py` | the policy factory (`build_policy`), checkpoint loaders and the hybrid-aim sampler | |
+| `src/cs2rl/policy_net.py` | the policy network (`Dust2Policy`) | |
 | `src/cs2rl/train_bc.py`, `src/cs2rl/bc_demos.py` | behaviour cloning and its scripted demos | |
 | `scripts/` | command-line tools run by path | `scripts/CONTEXT.md` |
 | `scripts/modal_runner/` | the optional Modal cloud-training runner | `scripts/modal_runner/CONTEXT.md` |

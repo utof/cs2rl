@@ -10,14 +10,16 @@ enforced Python import layers, highest first:
 | `experiment`, `deploy` | Finished-run readers and policy/map export |
 | `train` | CLI, run loop and the PufferLib trainer subclass |
 | `train_bc`, `bc_demos`, `profile_step`, `viz`, `eval` | Cloning, demos, profiling, viewing, evaluation and metric schema |
-| `policy` | Neural network and hybrid action distribution |
+| `policy` | Policy factory, checkpoint loaders and hybrid action distribution |
+| `policy_net` | The neural network (`Dust2Policy`), imported lazily by `policy` |
 | `env` | Simulation wrapper, maps, navigation, configuration and construction |
 | `spec` | Generated observation/action layouts and output paths |
 
 Higher layers may import lower layers. The contracts also forbid sibling cycles;
 the top `experiment` and `deploy` members may not import one another. Inside
 `env`: factory → C wrapper → map/navigation → configuration. Inside `train`:
-CLI → loop → modes/trainer → training parts → configuration.
+CLI → loop → compose (the trainer builder) → modes/trainer → training parts →
+configuration.
 
 The [env](../src/cs2rl/env/CONTEXT.md), [train](../src/cs2rl/train/CONTEXT.md),
 [experiment](../src/cs2rl/experiment/CONTEXT.md) and [scripts](../scripts/CONTEXT.md)

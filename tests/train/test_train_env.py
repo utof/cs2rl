@@ -1,10 +1,11 @@
 """Trainer-level tests for Batch 1 reward architecture changes.
 
 The first two tests exercise the bare Cs2Env factory (obs/rewards shape
-sanity). The Task 6c tests below use the minimal trainer harness from
-tests/_helpers/trainer_harness.py (Task 6b). Do NOT import the full production
-trainer setup — those tests only need to verify the Task 6c changes to the
-self-play state (``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
+sanity). The Task 6c tests below use the trainer harness from
+tests/_helpers/trainer_harness.py, which builds the production trainer through
+cs2rl.train.compose.build_trainer without train()'s run setup — those tests only
+need to verify the Task 6c changes to the self-play state
+(``Cs2PuffeRL._init_selfplay`` / ``evaluate``, gh#168 W2b).
 """
 import numpy as np
 import pytest
@@ -13,7 +14,7 @@ from cs2rl import policy as policy_mod
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.spec import action as spec_action
 from cs2rl.spec import obs as spec_obs
-from cs2rl.train import envs as train_envs
+from tests._helpers import envs as helper_envs
 
 
 def test_make_env_reset_returns_expected_batch():
@@ -28,7 +29,7 @@ def test_make_env_reset_returns_expected_batch():
 
 
 def test_make_env_alias_steps_without_nan():
-    env = train_envs.make_env()
+    env = helper_envs.make_env()
     try:
         obs, _ = env.reset(seed=7)
         actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
@@ -316,14 +317,14 @@ def test_event_mask_detects_injected_bomb_planted():
 
 
 # ── Task 8: prio_probs event-biased oversampling ───────────────────────────
-# These tests cover the prio_probs boosting added to the replacement train()
-# body (Cs2PuffeRL.train in src/cs2rl/train/trainer.py since gh#168 W2a — the harness
-# trainer is a Cs2PuffeRL since gh#168 W1.5).
+# These tests cover the event boost of the replay probabilities in
+# Cs2PuffeRL._segment_probs (src/cs2rl/train/trainer.py), which train() reaches
+# once per minibatch (the harness trainer is a Cs2PuffeRL since gh#168 W1.5).
 # The plan target: segments
 # whose _event_mask is True get sampled at least 25% of the time when
 # at least one event segment exists.
 #
-# Why these three tests:
+# Why these four tests:
 #   (1) test_prio_probs_event_oversample — proves the boost actually shifts
 #       the multinomial distribution toward event segments. Captures the
 #       sampled idx tensor by wrapping torch.multinomial; over multiple
@@ -334,8 +335,12 @@ def test_event_mask_detects_injected_bomb_planted():
 #       fraction metric must read 0.0.
 #   (3) test_event_oversample_fraction_exposed — pins the metric semantics:
 #       _event_oversample_fraction reports the RAW fraction of event
-#       segments (mask.float().mean()), NOT the sampled fraction. This is the
-#       reportable wandb metric.
+#       segments, NOT the sampled fraction. It is logged as
+#       losses/event_oversample_fraction. Every agent participates here.
+#   (4) test_event_oversample_fraction_counts_participating_segments_only — the
+#       fraction is taken among the participating segments: at
+#       n_active_per_team=1, marking half of them reads 0.5, where a mean over
+#       every segment would read 0.1.
 
 
 def _capture_multinomial_calls():
@@ -360,7 +365,7 @@ def _capture_multinomial_calls():
 
 @pytest.mark.training
 def test_prio_probs_event_oversample():
-    """Task 8: with ~50% of segments marked as events and OVERSAMPLE_FACTOR=4
+    """Task 8: with ~50% of segments marked as events and EVENT_OVERSAMPLE_FACTOR=4
     applied to prio_probs, the sampled minibatch must hit event segments well
     above the raw event-segment fraction.
 
@@ -379,8 +384,8 @@ def test_prio_probs_event_oversample():
 
     trainer, cleanup = _build_trainer_for_test(num_envs=32, with_selfplay=True)
     try:
-        # The prio_probs boost lives in the return-norm train() body, which
-        # the harness trainer carries by construction (gh#168 W1.5).
+        # The boost lives in Cs2PuffeRL._segment_probs, which train() calls
+        # once per minibatch.
         trainer.evaluate()             # populate the rollout buffer
 
         # Force half of segments to be "event" segments. Segment count
@@ -409,7 +414,7 @@ def test_prio_probs_event_oversample():
         # which fails immediately if the boost is missing (sampled would
         # then track the raw rate ~0.5 instead of ~0.8).
         assert hits >= 0.25, (f"Task 8: event-segment sampling fraction = {hits:.3f}, "
-                              f"expected >= 0.25 with OVERSAMPLE_FACTOR=4 and 50% event mask")
+                              f"expected >= 0.25 with EVENT_OVERSAMPLE_FACTOR=4 and 50% event mask")
         assert hits >= raw_event_fraction + 0.2, (
             f"Task 8: sampled rate {hits:.3f} did not exceed raw event "
             f"fraction {raw_event_fraction:.3f} by 20pp — boost branch likely "
@@ -475,19 +480,52 @@ def test_event_oversample_fraction_exposed():
         cleanup()
 
 
+@pytest.mark.training
+def test_event_oversample_fraction_counts_participating_segments_only():
+    """At n_active_per_team=1 four of every five segments are parked. Half of the
+    participating segments and no parked one are marked as events, so the fraction
+    over participating segments is 0.5 and the mean over every segment is 0.1; the
+    metric must read the first, or parked rows dilute it."""
+    import torch
+
+    from tests._helpers.trainer_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=8, n_active_per_team=1)
+    try:
+        trainer.evaluate()
+
+        part_segs = torch.where(trainer.participating[:, 0])[0]
+        assert 5 * len(part_segs) == trainer.segments, (
+            "n_active_per_team=1 no longer parks four of every five segments; the "
+            "0.5 / 0.1 split below assumes it")
+        trainer._event_mask.zero_()
+        trainer._event_mask[part_segs[:len(part_segs) // 2]] = True
+
+        trainer.train()
+
+        frac = trainer._event_oversample_fraction
+        assert frac == pytest.approx(0.5), (
+            f"event fraction {frac:.3f}: expected 0.5 over the participating segments "
+            "(0.1 means the mean ran over every segment, parked ones included)")
+    finally:
+        cleanup()
+
+
 # ── Task 9: target_entropy schedule + log_alpha reset + Batch 1 metrics ────
 # These tests cover three sub-features of the return-norm machinery
-# (Cs2PuffeRL._init_return_norm + Cs2PuffeRL.train, src/cs2rl/train/trainer.py, gh#168 W2a):
+# (Cs2PuffeRL._init_return_norm, _prepare_entropy_update and _finish_update in
+# src/cs2rl/train/trainer.py):
 #   (A) target_entropy schedule — config-driven linear ramp (defaults
 #       0.5→0.35 * max_entropy) over entropy_target_warmup_steps; constant after.
 #   (B) log_alpha reset — first train() after construction sets log_alpha to
 #       log(ent_coef); idempotent thereafter.
 #   (C) Metric exposure — log_alpha, effective_alpha, per-channel std,
-#       grad_norm exposed as trainer attributes for the wandb log layer.
+#       grad_norm exposed as trainer attributes, which these tests and
+#       tests/env/c/smoke_test.py read.
 #
-# gh#168 W1.5: the harness applies that patch itself (Cs2PuffeRL.__init__), so
-# none of these tests applies it; each reads the attributes straight off the
-# built trainer (Task 8 tests are the same shape).
+# The harness trainer is a Cs2PuffeRL (gh#168 W1.5), whose constructor creates
+# this state, so each test reads the attributes straight off the built trainer
+# (Task 8 tests are the same shape).
 
 
 @pytest.mark.training
@@ -1228,7 +1266,7 @@ def test_logstd_clamp_upper():
 # ── Batch 3 Task 5: hybrid-aim trainer integration tests ─────────────────────
 #
 # These two tests exercise the trainer-side wiring that T5 added on top of
-# T4's HybridPolicy:
+# the policy's hybrid aim head:
 #   - test_hybrid_sample_writes_two_buffers: a single get_action_and_value()
 #       call must yield BOTH a finite int discrete action (7 heads) AND a
 #       finite float Δyaw bounded by max_turn_speed. If either buffer is

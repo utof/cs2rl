@@ -99,6 +99,10 @@ def test_train_restores_autocast_scope(monkeypatch, precision, path):
                     assert trainer.losses["minibatches_run"] == 2
                     assert trainer.losses["empty_minibatches"] == 0
                     assert bool(trainer.optimizer.state) == (path == "normal")
+                    # alpha steps before the NaN guard and the policy step, so a skipped
+                    # minibatch still steps it: one alpha step per minibatch run.
+                    alpha_state = trainer._alpha_optimizer.state[trainer._log_alpha_tensor]
+                    assert alpha_state["step"].item() == 2
                 if path == "normal":
                     assert backward_states
                     # A second call also checks reuse of the same autocast object.

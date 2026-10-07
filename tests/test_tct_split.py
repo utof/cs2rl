@@ -14,6 +14,7 @@ and every test here only needs its observation space + static data.
 """
 
 import math
+import re
 
 import pytest
 import torch
@@ -96,6 +97,43 @@ def test_flag_off_builds_exactly_the_legacy_modules(env):
     assert not any(
         n.endswith(("_t", "_ct")) or "_t." in n or "_ct." in n for n, _ in p.named_parameters())
     assert not hasattr(p, "aim_log_std_t")
+
+
+def test_split_copies_draw_the_flag_off_rng_stream(env):
+    """Spec §3.7: at one seed, the split's T copies equal the flag-off modules.
+
+    WHAT: for each split architecture, every parameter that is not a CT copy (the T
+    copies and the shared value_head) is bitwise equal to its flag-off counterpart, and
+    construction leaves the global torch RNG where flag-off leaves it.
+
+    WHY: the CT copies are drawn under fork_rng so that the split is the only changed
+    variable at a given seed. Reordering two constructions in one branch, or dropping
+    a fork, shifts every later draw.
+
+    LIMIT: a reorder applied to every branch alike (inside `_make_trunk`, say) keeps
+    the parity and passes here. That changes every seeded run's initial weights; the
+    base-vs-head policy oracle of a refactor catches it, this test does not.
+    """
+
+    def build(**flags):
+        torch.manual_seed(0)
+        p = policy_mod.build_policy(env, device="cpu", **flags)
+        return p.state_dict(), torch.get_rng_state()
+
+    legacy, legacy_rng = build()
+    t_copy = re.compile(r"^(encoder|lstm|action_heads|aim_mu|aim_log_std)_t(?=\.|$)")
+    for flags in (dict(tct_split_heads=True), dict(tct_split_trunk=True),
+                  dict(tct_split_heads=True, tct_split_trunk=True)):
+        split, rng = build(**flags)
+        assert torch.equal(rng, legacy_rng), f"{flags}: construction moved the RNG stream"
+        compared = 0
+        for key, value in split.items():
+            if re.match(r"^(encoder|lstm|action_heads|aim_mu|aim_log_std)_ct(?=\.|$)", key):
+                continue
+            legacy_key = t_copy.sub(r"\1", key)
+            assert torch.equal(value, legacy[legacy_key]), f"{flags}: {key} != {legacy_key}"
+            compared += 1
+        assert compared == len(legacy), f"{flags}: compared {compared} of {len(legacy)}"
 
 
 def test_flag_off_forward_equals_direct_legacy_head_application(env):
@@ -428,7 +466,7 @@ def test_self_play_loads_both_checkpoint_vintages(env, tmp_path):
         policy_mod.build_policy(env, device="cpu", tct_split_heads=True).state_dict(), split_pt)
 
     for path, expect_split in ((legacy_pt, False), (split_pt, True)):
-        # Constructor is all-default at HEAD, and Cs2PuffeRL.evaluate calls
+        # Constructor is all-default at HEAD, and Cs2PuffeRL._draw_past_policy calls
         # `self._self_play_mgr.load_past_policy(dev, self.vecenv)` — mirrored here.
         mgr = train_selfplay.SelfPlayManager()
         mgr.pool = [path]
@@ -830,7 +868,7 @@ def test_trunk_split_checkpoint_round_trips_bitwise(env):
         assert torch.equal(pa, pb), n
 
 
-def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
+def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path, capsys):
     """Heads-only + trunk_flag widens trunk only; omitted flags infer both;
     load_policy_from_checkpoint does not KeyError on encoder_t.
 
@@ -839,7 +877,7 @@ def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
 
     PITFALL: this warm-split is trunk-only (heads already split).
     """
-    import inspect
+    from types import SimpleNamespace
 
     heads_pt = tmp_path / "heads.pt"
     both_pt = tmp_path / "both.pt"
@@ -882,8 +920,14 @@ def test_loaders_infer_both_bits_and_warm_split_trunk_only(env, tmp_path):
     past = mgr.load_past_policy("cpu", env)
     assert past is not None and past.tct_split_trunk is True and past.tct_split_heads is False
 
-    # Train-main must not discard the resolved trunk bit.
-    src = inspect.getsource(train_loop.train)
-    assert "tct_split_trunk=tct_split_trunk" in src
-    assert ", _tct_split_trunk," not in src
-    assert "duplicated the shared encoder+LSTM into per-team" in src
+    # train() must not discard the resolved trunk bit: the PolicyInit it hands
+    # build_trainer carries both bits and the converted weights
+    # (tests/train/test_driver_cleanup.py checks the bits reach build_policy).
+    capsys.readouterr()
+    init = train_loop._resume_policy_init(SimpleNamespace(resume=str(heads_pt),
+                                                          tct_split_trunk=True),
+                                          full_state=False)
+    assert (init.tct_split_heads, init.tct_split_trunk) == (True, True)
+    assert policy_mod.state_dict_is_trunk_split(init.state_dict)
+    assert init.source == str(heads_pt)
+    assert "duplicated the shared encoder+LSTM into per-team" in capsys.readouterr().out

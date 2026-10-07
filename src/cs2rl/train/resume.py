@@ -394,7 +394,7 @@ def restore_train_state(trainer, self_play_mgr, state: dict):
     copy. Since W2a the two cases differ: `_log_alpha_tensor` MUST stay in
     place, because `_alpha_optimizer` holds the original tensor as its
     parameter and a rebound one would never be stepped; `_ret_*` could be
-    rebound harmlessly now (Cs2PuffeRL.train, _update_return_stats and
+    rebound harmlessly now (the trainer's update methods and
     collect_train_state all read the attribute), and copy_() is kept there
     for the bit-exact round trip and so that all four follow one rule.
     """

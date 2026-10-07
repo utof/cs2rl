@@ -1,22 +1,28 @@
-"""The policy network and everything that reads or writes its outputs.
+"""The policy network's factory and everything that reads or writes its outputs.
 
-Owns: `build_policy` (the nested `Dust2Policy`), the hybrid-aim sampler
+Owns: `build_policy` (the factory of `cs2rl.policy_net.Dust2Policy`), the hybrid-aim sampler
 `_hybrid_sample_logits`, checkpoint loading (`load_policy_from_checkpoint`,
 `load_state_dict_arch_checked`, the split-ness sniffers), the rollout-side helpers
 (`init_policy_state`, `select_policy_actions_native`, `resolve_policy_mode`), the
 log-std constants and the action-mask layout.
 
-Module scope stays torch-free: every torch import is function-local, so eval, viz
+Module scope stays torch-free at run time: every runtime torch import is function-local
+(the module-scope one sits under `if TYPE_CHECKING:`, for annotations only), and so is
+`build_policy`'s import of `cs2rl.policy_net` (torch at its module scope), so eval, viz
 and BC can import this module without paying for torch until they build a policy.
 """
 
 import math
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import numpy as np
 
 from cs2rl.env.factory import build_legacy_eval_env
-from cs2rl.spec.action import ACTION_HEAD_SIZES, AIM_DIM
+from cs2rl.spec.action import ACTION_HEAD_SIZES
+
+if TYPE_CHECKING:                      # annotations only; never at runtime
+    import torch
 
 
 def state_dict_is_split(state_dict):
@@ -26,9 +32,9 @@ def state_dict_is_split(state_dict):
     in exactly one architecture and nowhere else in the key space.
 
     WHY key inference rather than the config flag: config.json is rewritten
-    unconditionally on every launch (the try-wrapped `config.json` write inside
-    `cs2rl.train.loop.train()` — NOT the `--dump-config` early-exit write in
-    `cs2rl.train.__main__`, which is conditional), so a flag-less
+    from the launch's own flags on every launch that builds its trainer
+    (`cs2rl.train.loop._write_config_json`; the `--dump-config` write in
+    `cs2rl.train.__main__` is a separate early exit), so a flag-less
     crash-resume would stamp `tct_split_heads: false` over a split run's
     provenance. Deciding from the keys means resume, self-play snapshot
     loading and the eval/record loader all do the right thing with no flag at
@@ -50,8 +56,9 @@ def state_dict_is_trunk_split(state_dict):
     `encoder_t`/`encoder_ct` (and both LSTMs) are always written together.
 
     WHY key inference rather than the config flag: same as
-    `state_dict_is_split` — `config.json` is rewritten on every launch, so a
-    flag-less crash-resume must recover trunk-ness from the keys. The heads
+    `state_dict_is_split` — `config.json` is rewritten on every launch that
+    builds its trainer, so a flag-less crash-resume must recover trunk-ness
+    from the keys. The heads
     helper stays the heads marker; loaders consult both bits independently.
 
     PITFALL: `"encoder_ct.0.weight".endswith("encoder_t.0.weight")` is False,
@@ -82,12 +89,12 @@ def load_state_dict_arch_checked(policy, state_dict, *, source):
     PITFALL: this does NOT convert. Legacy→split conversion is a deliberate
     act with a σ-re-init → heads convert → trunk convert ordering
     constraint, so it stays at the one call site that means it (the
-    train-main warm split). Policies built before the trunk attr exists
-    compare as trunk-off via getattr(..., False).
+    train-main warm split). An object without the flag attributes (every
+    Dust2Policy has both) compares as legacy on that axis via getattr(..., False).
     """
     ckpt_heads = state_dict_is_split(state_dict)
     ckpt_trunk = state_dict_is_trunk_split(state_dict)
-    # Today's policies have no tct_split_trunk attr; treat missing as off.
+    # A missing flag attribute reads as legacy (off).
     policy_heads = bool(getattr(policy, "tct_split_heads", False))
     policy_trunk = bool(getattr(policy, "tct_split_trunk", False))
     if ckpt_heads != policy_heads or ckpt_trunk != policy_trunk:
@@ -237,9 +244,9 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
             )
         else:
             # Greedy: per-head argmax for discrete, μ directly for continuous.
-            # μ is already tanh-squashed × max_turn_speed in HybridPolicy.forward
-            # (the `torch.tanh(self.aim_mu...)` lines in build_policy's nested
-            # class), so it's already bounded — no extra clamp needed.
+            # μ is already tanh-squashed × max_turn_speed by the policy's forward
+            # (the `torch.tanh(self.aim_mu...)` lines in `Dust2Policy._project_heads`),
+            # so it's already bounded — no extra clamp needed.
             act_t = torch.stack([head.argmax(dim=-1) for head in logits], dim=-1)
             cont_t = mu_aim
 
@@ -262,7 +269,12 @@ def build_policy(vecenv,
                  tct_split_trunk=False,
                  aim_log_std_max=None,
                  pin_pitch=False):
-    """Build the Dust2 recurrent policy.
+    """Build the run's `cs2rl.policy_net.Dust2Policy` from the env and these knobs, on `device`.
+
+    Reads obs_dim (unless overridden) and max_turn_speed from the driver env,
+    validates the σ cap and resolves the fresh σ init, then constructs the
+    module on CPU and moves it to `device`. Importing `cs2rl.policy_net` here,
+    not at module scope, keeps torch out of this module's import.
 
     aim_log_std_max / pin_pitch (R0-E.3 / R0-E.2, #131): per-RUN aim-head
     properties. The cap replaces LOG_STD_MAX at every σ clamp site; pin_pitch
@@ -284,614 +296,54 @@ def build_policy(vecenv,
     tct_split_trunk (spec 2026-08-15): when True the trunk — encoder + LSTM —
     is replaced by per-team copies (`encoder_t`/`lstm_t`, `encoder_ct`/`lstm_ct`).
     Each team LSTM sees only its own encoder's activations; hidden and the
-    rollout (h,c) blend on obs[24]. Default False keeps today's
-    `self.encoder` / `self.lstm` construction verbatim (legacy RNG pin).
+    rollout (h,c) blend on obs[24]. Default False builds the shared
+    `encoder` / `lstm`.
 
     PITFALL: callers must not decide split-ness from config alone — every
     loader infers it from the checkpoint's keys (state_dict_is_split /
     state_dict_is_trunk_split), because config.json is rewritten on each
-    launch and a flag-less crash-resume would otherwise rebuild the wrong
-    architecture (spec §3.3).
+    launch that builds its trainer and a flag-less crash-resume would
+    otherwise rebuild the wrong architecture (spec §3.3).
     """
-    import pufferlib.pytorch
-    import torch
-    import torch.nn as nn
+    from cs2rl.policy_net import Dust2Policy
 
     driver_env = getattr(vecenv, "driver_env", vecenv)
     obs_dim = (obs_dim_override
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
-    hidden = 256
     _cap = validate_aim_log_std_max(aim_log_std_max)
     # Rung 1a T1: the FRESH σ init follows the cap (see resolve_aim_log_std_init)
     # — LOG_STD_INIT at the 5v5 default cap, cap − 0.2 under a tight one, never
     # AT the cap where clamp would zero the gradient forever.
     _log_std_init = resolve_aim_log_std_init(_cap)
-
-    class Dust2Policy(nn.Module):
-
-        def __init__(self):
-            super().__init__()
-            self.hidden_size = hidden  # required by PufferLib LSTM logic
-            self.obs_dim = obs_dim
-
-            # Trunk-off keeps today's encoder/lstm construction verbatim so
-            # the flag-off RNG stream (and LEGACY_PARAM_NAMES) stay pinned.
-            # Trunk-on REPLACES those modules — do not keep a shared encoder
-            # or lstm beside the copies.
-            if not tct_split_trunk:
-                self.encoder = nn.Sequential(
-                    pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
-                    nn.ReLU(),
-                    pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
-                    nn.ReLU(),
-                )
-                self.lstm = nn.LSTM(hidden, hidden, batch_first=False)
-                for name, p in self.lstm.named_parameters():
-                    if "bias" in name:
-                        nn.init.constant_(p, 0)
-                    elif "weight" in name:
-                        nn.init.orthogonal_(p, gain=1.0)
-            else:
-                self.encoder_t = nn.Sequential(
-                    pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
-                    nn.ReLU(),
-                    pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
-                    nn.ReLU(),
-                )
-                self.lstm_t = nn.LSTM(hidden, hidden, batch_first=False)
-                for name, p in self.lstm_t.named_parameters():
-                    if "bias" in name:
-                        nn.init.constant_(p, 0)
-                    elif "weight" in name:
-                        nn.init.orthogonal_(p, gain=1.0)
-                # RNG hygiene (same as heads §3.7): CT construction is forked
-                # so the subsequent heads draw stays at the same stream point
-                # as flag-off. devices=[] forks the CPU generator only.
-                with torch.random.fork_rng(devices=[]):
-                    self.encoder_ct = nn.Sequential(
-                        pufferlib.pytorch.layer_init(nn.Linear(obs_dim, hidden)),
-                        nn.ReLU(),
-                        pufferlib.pytorch.layer_init(nn.Linear(hidden, hidden)),
-                        nn.ReLU(),
-                    )
-                    self.lstm_ct = nn.LSTM(hidden, hidden, batch_first=False)
-                    for name, p in self.lstm_ct.named_parameters():
-                        if "bias" in name:
-                            nn.init.constant_(p, 0)
-                        elif "weight" in name:
-                            nn.init.orthogonal_(p, gain=1.0)
-
-            # Batch 7 (spec 2026-08-13 §3.1): plain bool, NOT a buffer — it
-            # must never enter state_dict() or every existing checkpoint would
-            # gain a key. Loaders read it to detect a policy/checkpoint
-            # architecture mismatch (load_state_dict_arch_checked).
-            # `tct_split_heads` here is build_policy's parameter, captured by
-            # closure exactly like `obs_dim` and `hidden` above — the inner
-            # class takes no new constructor argument. Same for tct_split_trunk.
-            self.tct_split_heads = bool(tct_split_heads)
-            self.tct_split_trunk = bool(tct_split_trunk)
-
-            # Separate heads for MultiDiscrete(ACTION_HEAD_SIZES)
-            #
-            # Batch 3: continuous Gaussian aim head.
-            # mu_aim → (B, AIM_DIM); tanh-squashed and scaled by max_turn_speed
-            #   in forward(). State-DEPENDENT (per-step linear projection) so
-            #   the policy can react to the current obs (visible enemies, yaw
-            #   delta to target, etc.) when picking the mean Δyaw.
-            # aim_log_std → (AIM_DIM,) — state-INDEPENDENT learnable parameter
-            #   per Fan et al. IJCAI 2019 H-PPO baseline. Clamped in forward()
-            #   to [LOG_STD_MIN, LOG_STD_MAX] so neither σ collapse (entropy
-            #   loss → −∞) nor explosion (σ floods policy) is reachable.
-            #   Rung 1a T1: the init is _log_std_init, not LOG_STD_INIT — it
-            #   must start strictly INSIDE that clamp band or the parameter
-            #   receives zero gradient for the whole run.
-            # Pitfall: keep `std=0.01` on aim_mu init so the pre-tanh mean
-            #   starts ~zero — otherwise the policy starts saturated and
-            #   learning the Gaussian head is much slower.
-            #
-            # Batch 7 note on the deliberate duplication of these three
-            # expressions across the two branches: the construction ORDER
-            # (7 discrete heads → value_head → aim_mu → aim_log_std) is what
-            # determines how many draws each layer takes from the global torch
-            # RNG. Factoring the head group into a shared helper would move
-            # value_head's draw and change every layer's init relative to the
-            # legacy baseline at the same seed. Repetition here buys exact
-            # RNG-stream parity between the flag-off and flag-on `_t` copies,
-            # which is the whole point of spec §3.7.
-            if not self.tct_split_heads:
-                self.action_heads = nn.ModuleList([
-                    pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
-                    for n in ACTION_HEAD_SIZES
-                ])
-                self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
-                self.aim_mu = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-                self.aim_log_std = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
-            else:
-                self.action_heads_t = nn.ModuleList([
-                    pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
-                    for n in ACTION_HEAD_SIZES
-                ])
-                self.value_head = pufferlib.pytorch.layer_init(nn.Linear(hidden, 1), std=1.0)
-                self.aim_mu_t = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM), std=0.01)
-                self.aim_log_std_t = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
-                # RNG hygiene (spec §3.7): the CT copy's construction is what
-                # draws from the default stream, so it is forked — post-hoc
-                # weight cloning would NOT restore stream parity. Without this
-                # the flag-on run's every subsequent sample shifts relative to
-                # the baseline at the same seed and "the split is the only
-                # changed variable" is strictly false. devices=[] forks the CPU
-                # generator only (construction is on CPU; .to(device) happens
-                # after) and skips CUDA device enumeration.
-                with torch.random.fork_rng(devices=[]):
-                    self.action_heads_ct = nn.ModuleList([
-                        pufferlib.pytorch.layer_init(nn.Linear(hidden, n), std=0.01)
-                        for n in ACTION_HEAD_SIZES
-                    ])
-                    self.aim_mu_ct = pufferlib.pytorch.layer_init(nn.Linear(hidden, AIM_DIM),
-                                                                  std=0.01)
-                self.aim_log_std_ct = nn.Parameter(torch.full((AIM_DIM, ), _log_std_init))
-
-            # max_turn_speed mirrors C sd->max_turn_speed (StaticData, π/4
-            # default). Pulled from the vecenv's static-data block so the
-            # policy stays bound to the env's actual cap even if it changes
-            # at env construction time. Stored as a buffer (no grad, not a
-            # learnable param, follows .to(device)). T5 carry-forward (I-1):
-            # reuse the `driver_env` helper resolved at the top of build_policy instead of
-            # an inline hasattr ladder — the helper already handles the
-            # vecenv-vs-driver-env duality (test path passes a bare env;
-            # production passes a Multiprocessing/Serial vecenv). One source
-            # of truth for the "what is the env?" question.
-            self.register_buffer(
-                'max_turn_speed',
-                torch.tensor(driver_env._c_env.sd.contents.max_turn_speed, dtype=torch.float32),
-            )
-            # R0-E.3/4 (#131): run properties, NOT checkpoint state
-            # (persistent=False so old checkpoints load and new ones don't
-            # carry them; SelfPlayManager re-applies them to past policies).
-            # aim_log_std_max caps σ in every forward (replaces LOG_STD_MAX at
-            # all clamp sites below); aim_dim_mask weights the per-dim
-            # Gaussian log-prob/entropy terms ([1,0] when pitch is pinned).
-            # PITFALL: sampling still draws BOTH dims (the env ignores dim 1
-            # when pinned) — only the density is masked, so the stored
-            # cont_action stays byte-identical to what the env consumed.
-            self.aim_log_std_max = _cap
-            self.register_buffer("aim_dim_mask",
-                                 torch.tensor([1.0, 0.0] if pin_pitch else [1.0, 1.0]),
-                                 persistent=False)
-
-        @staticmethod
-        def _blend(mask, out_t, out_ct):
-            """Route a per-row output to its team's head copy (spec §3.2).
-
-            mask is 0/1 with 1.0 == T, broadcastable over out_t's trailing
-            dims. Branch-free (GPU-friendly) and autograd-exact: a T row's
-            blend weight on the CT copy is literally 0, so it contributes zero
-            gradient there — that is the routing correctness proof, pinned by
-            test_pure_team_batch_leaves_other_copy_gradient_exactly_zero.
-
-            PITFALL: the cast is load-bearing. A float32 mask multiplied into
-            fp16 head outputs would silently promote them under any future
-            autocast; casting to the output dtype keeps the arithmetic in the
-            head's own precision.
-            """
-            m = mask.to(out_t.dtype)
-            return m * out_t + (1.0 - m) * out_ct
-
-        def _project_heads(self, hidden_out, mask):
-            """Project aligned features into discrete logits and bounded aim parameters.
-
-            Callers align the team mask with their flattened feature rows.
-            Reuse the registered layers and clamp each team's log std before
-            blending; the shared log std also expands to the aim batch shape.
-            Legacy action sampling keeps its interleaved projection/sampling
-            order in get_action_and_value.
-            """
-            if self.tct_split_heads:
-                logits = [
-                    self._blend(mask, ht(hidden_out), hct(hidden_out))
-                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
-                ]
-                mu_aim = self._blend(mask,
-                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
-                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
-                log_std = self._blend(
-                    mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim))
-            else:
-                logits = [head(hidden_out) for head in self.action_heads]
-                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN,
-                                      self.aim_log_std_max).expand_as(mu_aim)
-            return logits, mu_aim, log_std
-
-        def get_value(self, x, lstm_state=None, done=None):
-            hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
-            return self.value_head(hidden_out), lstm_state
-
-        def get_action_and_value(self,
-                                 x,
-                                 lstm_state=None,
-                                 done=None,
-                                 action=None,
-                                 continuous_action=None):
-            """Hybrid sampler combining 7 categorical heads + 1 Gaussian aim head.
-
-            Args:
-                x: (B, OBS_DIM) observation batch.
-                lstm_state: optional (h, c) tuple for the LSTM rollout.
-                done: optional (B,) done-mask used to reset LSTM state.
-                action: (B, ACTION_DIM=7) int64 — discrete actions; if None,
-                    sample from the categorical heads.
-                continuous_action: (B, AIM_DIM=2) float32 — (Δyaw, Δpitch) in
-                    radians, already in [-max_turn_speed, +max_turn_speed];
-                    if None, sample from the Normal head.
-
-            Returns:
-                (action, continuous_action, log_prob, entropy, value, lstm_state)
-                log_prob and entropy aggregate across all 8 factors (7
-                categorical + 1 Normal) — discrete factors are independent so
-                their log-probs sum, and the Gaussian factor adds to the
-                total. PPO loss assembly + the matching trainer side
-                (rollout buffer for continuous_action, ratio computation)
-                lands in task 5 via HybridAimVecEnv.
-            """
-            hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
-            if self.tct_split_heads:
-                # 2D input (B, obs): the team bit is a column. (The 3D
-                # timestep trap lives in forward(), not here.)
-                mask = x[:, 24:25]
-                logits = [
-                    self._blend(mask, ht(hidden_out), hct(hidden_out))
-                    for ht, hct in zip(self.action_heads_t, self.action_heads_ct, strict=True)
-                ]
-            else:
-                logits = [head(hidden_out) for head in self.action_heads]
-
-            # Discrete sample / log-prob / entropy.
-            dists = [torch.distributions.Categorical(logits=h) for h in logits]
-            if action is None:
-                action = torch.stack([d.sample() for d in dists], dim=-1)
-            log_prob_d = sum(d.log_prob(action[..., i]) for i, d in enumerate(dists))
-            entropy_d = sum(d.entropy() for d in dists)
-
-            # Continuous (Normal) sample / log-prob / entropy. tanh+scale
-            # bounds μ ∈ [-max_turn_speed, +max_turn_speed]; σ is clamped so
-            # the Normal can't collapse or explode mid-training.
-            if self.tct_split_heads:
-                mu_aim = self._blend(mask,
-                                     torch.tanh(self.aim_mu_t(hidden_out)) * self.max_turn_speed,
-                                     torch.tanh(self.aim_mu_ct(hidden_out)) * self.max_turn_speed)
-                # clamp EACH copy, then blend (spec §3.2) — identical result
-                # for a 0/1 mask, but it matches the legacy clamp-at-use
-                # semantics and keeps §3.6's per-team σ logs interpretable.
-                log_std = self._blend(
-                    mask,
-                    torch.clamp(self.aim_log_std_t, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim),
-                    torch.clamp(self.aim_log_std_ct, LOG_STD_MIN,
-                                self.aim_log_std_max).expand_as(mu_aim))
-            else:
-                mu_aim = torch.tanh(self.aim_mu(hidden_out)) * self.max_turn_speed
-                log_std = torch.clamp(self.aim_log_std, LOG_STD_MIN, self.aim_log_std_max)
-            sigma = torch.exp(log_std).expand_as(mu_aim)
-            aim_dist = torch.distributions.Normal(mu_aim, sigma)
-            if continuous_action is None:
-                # rsample preserves the reparameterised path through μ in case
-                # the trainer ever uses pathwise gradients (PPO doesn't, but
-                # cheap to keep this future-proof).
-                continuous_action = aim_dist.rsample()
-                # Re-clamp post-sample (T5 carry-forward I-2): σ exploration
-                # can land outside the tanh band. The C env (env_step, cs2_env.h)
-                # clamps |Δyaw| ≤ max_turn_speed silently with fminf/fmaxf —
-                # NOT an assert. The Python-side clamp keeps the recorded
-                # `continuous_action` byte-identical to what the env actually
-                # consumed, which matters for PPO's importance ratio: if we
-                # stored the unclamped sample and the env clipped it, the
-                # ratio re-evaluation in _hybrid_ppo_loss would be wrong by
-                # the clipping amount on every saturated step.
-                continuous_action = torch.clamp(
-                    continuous_action,
-                    -self.max_turn_speed,
-                    self.max_turn_speed,
-                )
-            # R0-E.2: per-dim weight applied BEFORE the sum so a pinned dim
-            # contributes neither log-prob nor entropy (mirrors
-            # _hybrid_sample_logits / _hybrid_ppo_loss).
-            log_prob_c = (aim_dist.log_prob(continuous_action) * self.aim_dim_mask).sum(-1)
-            # Closed-form Gaussian entropy: 0.5·log(2πe·σ²), summed across
-            # AIM_DIM. .entropy() returns per-dim, so .sum(-1) is correct
-            # for AIM_DIM=1 today and stays correct if AIM_DIM bumps to ≥2.
-            entropy_c = (aim_dist.entropy() * self.aim_dim_mask).sum(-1)
-
-            log_prob = log_prob_d + log_prob_c
-            entropy = entropy_d + entropy_c
-            value = self.value_head(hidden_out)
-            return action, continuous_action, log_prob, entropy, value, lstm_state
-
-        def forward_eval(self, x, state):
-            # Batch 3: returns 4-tuple (logits, mu_aim, log_std, value) so
-            # downstream samplers (eval loop / record / past-policy mixing)
-            # can construct the full hybrid action. Existing 2-tuple
-            # consumers break here — task 5 updates them.
-            done = state.get("done")
-            if done is None:
-                done = x.new_zeros(x.shape[0])
-
-            lstm_state = None
-            if state.get("lstm_h") is not None and state.get("lstm_c") is not None:
-                lstm_state = (state["lstm_h"], state["lstm_c"])
-
-            hidden_out, lstm_state = self._forward_core(x, lstm_state, done)
-            if lstm_state is not None:
-                state["lstm_h"], state["lstm_c"] = lstm_state
-
-            mask = x[:, 24:25] if self.tct_split_heads else None
-            logits, mu_aim, log_std = self._project_heads(hidden_out, mask)
-            value = self.value_head(hidden_out)
-            return logits, mu_aim, log_std, value
-
-        def forward(self, x, state):
-            # Training-path forward: time-batched BPTT (LSTM-BPTT fix).
-            #
-            # WHAT: same 4-tuple contract as forward_eval, but a 3D input
-            #   (B=segments, T=bptt_horizon, OBS_DIM) is now unrolled through
-            #   the LSTM along T — mirroring upstream PufferLib 3.0's
-            #   models.LSTMWrapper.forward (encode flat → reshape seq-first →
-            #   one nn.LSTM call → heads on the flat output). Pre-fix this
-            #   flattened to (B*T, OBS) and ran the LSTM stateless per tick
-            #   (seq-len 1, zero state), so the recurrent weights never saw
-            #   through-time gradients and the PPO update recomputed
-            #   logprobs/values under a DIFFERENT function than the rollout
-            #   (forward_eval carries state tick-to-tick) — importance
-            #   ratios ≠ 1 before the first gradient step.
-            #
-            # WHY zero initial state is CORRECT here (not an approximation):
-            #   evaluate() zeroes trainer.lstm_h/c at its start, and with
-            #   compute_batch_dims' segments == total_agents each agent row
-            #   fills exactly ONE bptt_horizon segment per evaluate() call —
-            #   so every stored segment really did start from zero state.
-            #   PITFALL: if batch dims ever change so a row fills >1 segment
-            #   per evaluate(), zero-init becomes wrong for the later
-            #   segments and initial states must be stored at rollout time.
-            #
-            # state keys consumed (all optional; dict is NOT mutated):
-            #   lstm_h / lstm_c — initial state override, (B, H) or (1, B, H).
-            #     The trainer passes None → zero init (see above).
-            #   terminals — (B, T) done flags from the rollout buffer;
-            #     replicates forward_eval's (1-done)*state reset mid-segment
-            #     (see _lstm_bptt). Omit for the ONNX / single-tick path.
-            #
-            # ONNX (task 6): a 2D (B, OBS_DIM) input takes T=1 through the
-            # same code — one seq-len-1 LSTM call from zero state, identical
-            # math to the pre-fix path — so the export stays single-pathway.
-            if x.ndim == 3:
-                B, TT = x.shape[0], x.shape[1]
-            else:
-                B, TT = x.shape[0], 1
-
-            lstm_h = state.get("lstm_h") if isinstance(state, dict) else None
-            lstm_c = state.get("lstm_c") if isinstance(state, dict) else None
-            terminals = state.get("terminals") if isinstance(state, dict) else None
-            H = self.hidden_size
-
-            if not self.tct_split_trunk:
-                h = self.encoder(x.reshape(B * TT, x.shape[-1]).float())
-                # (T, B, H) seq-first
-                h = h.reshape(B, TT, H).transpose(0, 1)
-                if lstm_h is not None and lstm_c is not None:
-                    hc = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
-                else:
-                    hc = (h.new_zeros(1, B, H), h.new_zeros(1, B, H))
-                h = self._lstm_bptt(self.lstm, h, hc, terminals)
-                # transpose back to (B, T, H) then flatten row-major so flat row
-                # b*T + t lines up with mb_actions.reshape(-1, ...) in
-                # _hybrid_ppo_loss — segment-major, time-minor. Changing this
-                # ordering silently misaligns every logprob/advantage pairing.
-                hidden_out = h.transpose(0, 1).reshape(B * TT, H)
-            else:
-                # Encoder is stateless: both copies see the same flat rows.
-                # LSTM is not a head: each team LSTM sees ONLY its encoder's
-                # activations. Never feed a mixed batch through one LSTM.
-                x_flat = x.reshape(B * TT, x.shape[-1]).float()
-                h_t = self.encoder_t(x_flat).reshape(B, TT, H).transpose(0, 1)
-                h_ct = self.encoder_ct(x_flat).reshape(B, TT, H).transpose(0, 1)
-                # zero-init BOTH team states when the trainer does not pass lstm_h/c
-                if lstm_h is not None and lstm_c is not None:
-                    hc_t = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
-                    hc_ct = (lstm_h.reshape(1, B, H), lstm_c.reshape(1, B, H))
-                else:
-                    hc_t = (h_t.new_zeros(1, B, H), h_t.new_zeros(1, B, H))
-                    hc_ct = (h_ct.new_zeros(1, B, H), h_ct.new_zeros(1, B, H))
-                y_t = self._lstm_bptt(self.lstm_t, h_t, hc_t, terminals)
-                y_ct = self._lstm_bptt(self.lstm_ct, h_ct, hc_ct, terminals)
-                # PITFALL (spec §3.2): mask from 3D x with x[..., 24], never
-                # x[:, 24] — that silently selects TIMESTEP 24.
-                mask = x[..., 24].reshape(B * TT, 1)
-                hidden_out = self._blend(mask,
-                                         y_t.transpose(0, 1).reshape(B * TT, H),
-                                         y_ct.transpose(0, 1).reshape(B * TT, H))
-
-            mask = None
-            if self.tct_split_heads:
-                # PITFALL (spec §3.2 — the bug class this comment exists to
-                # prevent): build the mask from the 3D x with x[..., 24].
-                # Writing x[:, 24] on a (B, T, obs) input silently selects
-                # TIMESTEP 24 instead of the team column. The reshape to
-                # (B*TT, 1) is aligned with hidden_out's
-                # h.transpose(0,1).reshape(B*TT, H) — both segment-major,
-                # time-minor. Works unchanged for the 2D/ONNX path, where
-                # TT == 1 and x[..., 24] is already the team column.
-                mask = x[..., 24].reshape(B * TT, 1)
-            logits, mu_aim, log_std = self._project_heads(hidden_out, mask)
-            value = self.value_head(hidden_out)
-            return logits, mu_aim, log_std, value
-
-        def _lstm_bptt(self, lstm, h_seq, hc, terminals):
-            """Run one LSTM over a full (T, B, H) segment with done-masking.
-
-            WHAT: one `lstm(...)` call when the segment contains no episode
-            boundaries (the common case — native PufferLib BPTT); otherwise
-            the sequence is split at every tick where ANY row has a done and
-            h/c are zero-masked per-row at those ticks before continuing.
-            `lstm` is the module to run — flag-off forward passes
-            `self.lstm`; trunk-on passes `self.lstm_t` / `self.lstm_ct`
-            separately so each copy sees only its encoder's activations.
-
-            WHY: the rollout (forward_eval → _forward_core) multiplies the
-            carried state by (1 - done) BEFORE processing each tick, so a
-            new episode starts memory-free. Training must replicate that
-            reset or the recomputed logprobs at post-done ticks come from a
-            different function than the rollout stored (biased PPO ratios)
-            and gradients leak across episode boundaries. Upstream
-            LSTMWrapper skips this (it never resets on done, rollout OR
-            train, so it is self-consistent); we reset in rollout, hence we
-            must also reset here. Passing the module in avoids copy-pasting
-            this done-chunk loop per team.
-
-            PITFALLS:
-              * terminals[:, t] == 1 means "the obs at tick t is the FIRST
-                obs of a new episode" (PufferLib autoreset delivers the done
-                flag alongside the reset obs) — mask BEFORE consuming tick t,
-                not after. Off-by-one here shifts every episode boundary.
-              * The chunked split is exact, not an approximation: an LSTM
-                over [t0, t1) then [t1, t2) with state carried equals one
-                call over [t0, t2). Splits only cost extra kernel launches;
-                a no-done minibatch stays a single cuDNN/oneDNN call.
-              * .tolist() forces one device→host sync per minibatch —
-                acceptable (the train loop already syncs via .item()s).
-              * LSTM must not see the other team's rows via a shared module:
-                the caller encodes per team, then calls this twice. Do not
-                blend encoder outputs and run one LSTM.
-            """
-            if terminals is None:
-                out, _ = lstm(h_seq, hc)
-                return out
-            TT, B, _H = h_seq.shape
-            term = terminals.reshape(B, TT) > 0.5
-            reset_ticks = torch.nonzero(term.any(dim=0)).flatten().tolist()
-            if not reset_ticks:
-                out, _ = lstm(h_seq, hc)
-                return out
-            outs = []
-            h0, c0 = hc
-            t0 = 0
-            for t in reset_ticks:
-                if t > t0:
-                    out, (h0, c0) = lstm(h_seq[t0:t], (h0, c0))
-                    outs.append(out)
-                keep = (~term[:, t]).float().view(1, B, 1)
-                h0 = h0 * keep
-                c0 = c0 * keep
-                t0 = t
-            out, _ = lstm(h_seq[t0:], (h0, c0))
-            outs.append(out)
-            return torch.cat(outs, dim=0)
-
-        def _forward_core(self, x, lstm_state, done):
-            """Single-tick encode + LSTM for rollout / eval.
-
-            WHAT: one seq-len-1 LSTM step. Trunk-off is today's
-            `self.encoder` then `self.lstm(h.unsqueeze(0), ...)`. Trunk-on
-            runs both team encoders+lstms the same way, blends hidden, and
-            blends the returned `(h,c)` with `mask.view(1, B, 1)` so the
-            trainer still stores one pair.
-
-            WHY: `forward_eval` / `get_action_and_value` inherit routing
-            from here. The trainer LSTM buffers stay one `(h,c)` per agent
-            (do not change PufferLib's rollout state).
-
-            PITFALLS:
-              * Do not route this through `_lstm_bptt` — that helper is the
-                training-path T-unroll. This must stay the per-tick
-                `lstm(h.unsqueeze(0))` call.
-              * LSTM must not see the other team's encoder activations:
-                each copy is fed only its encoder's h. The incoming blended
-                state is `(1-done)`-reset once, then fed to BOTH team LSTMs
-                (unused output dropped by the 0/1 blend; used path is exact).
-              * 2D mask is `x[:, 24:25]`. The 3D timestep-24 trap lives in
-                `forward()`, not here.
-            """
-            if not self.tct_split_trunk:
-                h = self.encoder(x.float())
-                # lstm expects (seq, batch, features)
-                if lstm_state is not None:
-                    done = done.float()
-                    h, lstm_state = self.lstm(
-                        h.unsqueeze(0),
-                        (
-                            (1.0 - done).view(1, -1, 1) * lstm_state[0],
-                            (1.0 - done).view(1, -1, 1) * lstm_state[1],
-                        ),
-                    )
-                    h = h.squeeze(0)
-                else:
-                    h, lstm_state = self.lstm(h.unsqueeze(0))
-                    h = h.squeeze(0)
-                return h, lstm_state
-
-            # 2D path: team bit is a column.
-            mask = x[:, 24:25]
-            h_t = self.encoder_t(x.float())
-            h_ct = self.encoder_ct(x.float())
-            if lstm_state is not None:
-                done = done.float()
-                reset_state = (
-                    (1.0 - done).view(1, -1, 1) * lstm_state[0],
-                    (1.0 - done).view(1, -1, 1) * lstm_state[1],
-                )
-                y_t, state_t = self.lstm_t(h_t.unsqueeze(0), reset_state)
-                y_ct, state_ct = self.lstm_ct(h_ct.unsqueeze(0), reset_state)
-            else:
-                y_t, state_t = self.lstm_t(h_t.unsqueeze(0))
-                y_ct, state_ct = self.lstm_ct(h_ct.unsqueeze(0))
-            hidden_out = self._blend(mask, y_t.squeeze(0), y_ct.squeeze(0))
-            m_state = mask.view(1, x.shape[0], 1)
-            lstm_state = (
-                self._blend(m_state, state_t[0], state_ct[0]),
-                self._blend(m_state, state_t[1], state_ct[1]),
-            )
-            return hidden_out, lstm_state
-
-    return Dust2Policy().to(device)
+    return Dust2Policy(obs_dim,
+                       driver_env._c_env.sd.contents.max_turn_speed,
+                       aim_log_std_min=LOG_STD_MIN,
+                       aim_log_std_max=_cap,
+                       aim_log_std_init=_log_std_init,
+                       pin_pitch=pin_pitch,
+                       tct_split_heads=tct_split_heads,
+                       tct_split_trunk=tct_split_trunk).to(device)
 
 
-# ── SECTION: Batch 3 hybrid PPO helpers ────────────────────────────────────
+# ── SECTION: Hybrid-aim sampling ───────────────────────────────────────────
 #
-# These three functions are the trainer-side complement of T4's HybridPolicy
-# (mu_aim + log_std_aim Gaussian head bolted onto 7 categorical heads).
-#
-#   _hybrid_sample_logits  — the rollout-time replacement for
-#                            pufferlib.pytorch.sample_logits(logits[, action]).
-#                            Pure function; takes the 4-tuple emitted by
-#                            HybridPolicy.forward / forward_eval and produces
-#                            (action, continuous_action, log_prob, entropy).
-#                            Joint factorised log-prob = sum of categorical
-#                            log-probs + Normal log-prob (independence
-#                            assumption per spec L8).
-#
-#   _hybrid_ppo_loss       — the PPO-update-time replacement, doing the
-#                            forward pass + per-factor clipped policy loss
-#                            (Fan et al. IJCAI 2019 H-PPO baseline). Returns
-#                            split discrete/continuous ratios so the caller
-#                            can keep KL/clipfrac diagnostics on the discrete
-#                            half (back-compat with the existing log surface).
-#
-#   HybridAimVecEnv — wraps the backend send and Serial per-env step to
-#                         forward continuous aim. Cs2PuffeRL._init_hybrid_aim
-#                         owns the parallel rollout buffers used by train and
-#                         evaluate. Both are ready before the first rollout.
+# `_hybrid_sample_logits` samples the 4-tuple Dust2Policy's forward and
+# forward_eval emit (7 categorical heads + the Gaussian aim head) in place of
+# pufferlib.pytorch.sample_logits. Joint factorised log-prob = sum of the
+# categorical log-probs + the Normal log-prob (independence assumption per
+# spec L8). Its update-time counterpart is `cs2rl.train.update._hybrid_ppo_loss`,
+# and `cs2rl.train.trainer.HybridAimVecEnv` carries the continuous aim to the envs.
 
 
-def _hybrid_sample_logits(policy_out,
-                          action=None,
-                          continuous_action=None,
-                          max_turn_speed=None,
-                          mask=None,
-                          aim_dim_mask=None):
-    """Hybrid sampler for the 4-tuple HybridPolicy output (Batch 3 task 5).
+def _hybrid_sample_logits(
+    policy_out,
+    action=None,
+    continuous_action=None,
+    max_turn_speed=None,
+    mask=None,
+    aim_dim_mask=None
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]":
+    """Hybrid sampler for the 4-tuple Dust2Policy output.
 
     Replaces the four in-tree usages of
     ``pufferlib.pytorch.sample_logits(logits[, action=...])`` that previously
@@ -901,8 +353,8 @@ def _hybrid_sample_logits(policy_out,
     Inputs
     ------
     policy_out : 4-tuple
-        (logits_list[7], mu_aim, log_std_aim, value) — the canonical T4
-        output of HybridPolicy.forward / forward_eval. The value slot is
+        (logits_list[7], mu_aim, log_std_aim, value) — the output of
+        Dust2Policy.forward / forward_eval. The value slot is
         ignored here; the caller already has it from the original call.
     action : (B, ACTION_DIM=7) int64 tensor, or None
         If None, sample fresh from the categorical heads. If supplied
@@ -949,12 +401,10 @@ def _hybrid_sample_logits(policy_out,
             anywhere downstream. Callers that don't need entropy can ignore
             with `*_entropies` unpacking.
 
-    Pre-Fix#1 (Batch 3 T5) this returned the SUMMED log_prob and SUMMED
-    entropy as a 4-tuple, forcing the rollout caller to reconstruct
-    distributions to recover the per-factor halves for self.logprobs_d /
-    self.logprobs_c. That double-construction was measured at +437 ms/epoch
-    on the i7-9750H smoke (16.0 ms/step actual vs 9.1 ms/step minimal).
-    Surfacing the halves directly drops that cost to ~9.1 ms/step.
+    WHY the halves rather than the joint sums: the rollout stores them
+    separately (the trainer's logprobs_d / logprobs_c), and recovering them
+    from sums meant building the 7 Categorical + 1 Normal a second time, which
+    measured +437 ms/epoch on the i7-9750H smoke (16.0 vs 9.1 ms/step).
     """
     import torch
     import torch.nn.functional as F
@@ -984,14 +434,20 @@ def _hybrid_sample_logits(policy_out,
             [torch.multinomial(lp.exp(), 1).squeeze(-1) for lp in log_probs_per_head],
             dim=-1,
         )
-    log_prob_d = sum(
-        lp.gather(-1, action[..., i:i + 1]).squeeze(-1) for i, lp in enumerate(log_probs_per_head))
+    # builtin sum starts from int 0, so a type checker reads it as int | Tensor;
+    # summed over the 7 heads it is a Tensor. The casts keep that out of callers.
+    log_prob_d = cast(
+        torch.Tensor,
+        sum(
+            lp.gather(-1, action[..., i:i + 1]).squeeze(-1)
+            for i, lp in enumerate(log_probs_per_head)))
     # Entropy: H = -Σ p log p. log_softmax already gives log p; multiply by
     # exp(log_softmax) = p. Single pass per head, no extra softmax call.
-    entropy_d = sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head)
+    entropy_d = cast(torch.Tensor, sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head))
 
     # ── Continuous: 1D Gaussian aim head — hand-rolled (Fix #2) ──
-    # σ comes pre-clamped from forward()/forward_eval() (LOG_STD_MIN/MAX), so
+    # σ comes pre-clamped from forward()/forward_eval() (to the policy's
+    # aim_log_std_min/aim_log_std_max), so
     # we don't re-clamp here — would silently mask a regression in the policy
     # if the clamp were removed upstream.
     # Analytic forms (replace torch.distributions.Normal):
@@ -1004,7 +460,7 @@ def _hybrid_sample_logits(policy_out,
     if continuous_action is None:
         continuous_action = mu_aim + sigma * torch.randn_like(mu_aim)
         if max_turn_speed is not None:
-            # Same clamp logic as HybridPolicy.get_action_and_value (T4).
+            # Same clamp logic as Dust2Policy.get_action_and_value.
             # The C env (env_step, cs2_env.h) clamps silently with fminf/fmaxf;
             # storing the post-clamp value keeps the PPO ratio honest.
             continuous_action = torch.clamp(continuous_action, -max_turn_speed, max_turn_speed)
@@ -1027,9 +483,9 @@ def _hybrid_sample_logits(policy_out,
 # floors entropy without flooding the policy with noise; tanh+max_turn_speed
 # clamp dominates the per-tick range regardless of σ. σ_max = 0.5 rad ≈ 28.6°
 # — symmetric bound prevents explosion that would mask μ.
-# Module-level so tests can `from cs2rl.policy import LOG_STD_MIN` without poking
-# at the inner Dust2Policy class. Used in build_policy() forward paths and
-# in the max_entropy calc that drives the SAC-α dual loop.
+# Module-level and torch-free, so the CLI's cap check, the σ logs and the trainer's
+# max_entropy calc (the SAC-α dual loop) read them without building a policy.
+# build_policy hands LOG_STD_MIN to Dust2Policy as the floor of every σ clamp.
 LOG_STD_INIT = math.log(0.1)
 LOG_STD_MIN = math.log(0.01)
 LOG_STD_MAX = math.log(0.5)
@@ -1130,10 +586,12 @@ def validate_aim_log_std_max(aim_log_std_max) -> float:
     Returns the float cap (LOG_STD_MAX when None). Raises ValueError unless
     LOG_STD_MIN + 0.4 < cap <= LOG_STD_MAX, i.e. σ in (0.0149, 0.5].
 
-    WHY a separate torch-free helper: build_policy() only runs after the env
-    and torch are up, so a bad --aim-log-std-max used to surface ~30 s into a
-    launch AND slip past `--dump-config` (the Modal/run_rung1 fingerprint
-    step). main() now calls this right after parse_args(), above the
+    WHY a separate torch-free helper: build_policy() runs only once the env
+    and torch are up, after `--dump-config` (the Modal runner's fingerprint
+    step) has already exited, so a cap checked only there would let a bad
+    --aim-log-std-max through the fingerprint. The CLI
+    (`cs2rl.train.__main__`'s module-level `if __name__ == "__main__"` block)
+    calls this after `parser.parse_args()` and the --seed check, above the
     --dump-config exit, so the fingerprint catches it.
     PITFALL (2026-08-30, rung1 sweep): the bound is INCLUSIVE at LOG_STD_MAX =
     log 0.5 = -0.693147..., so a hand-rounded "-0.6931" is > the cap by 5e-5

@@ -600,22 +600,23 @@ def _kwarg_diff(got, expected):
     return "\n".join(parts)
 
 
-def _real_harness_env_factory(monkeypatch, tmp_path, shared_ts, **harness_kwargs):
-    """Extract the REAL `env_factory` closure `_build_trainer_for_test` builds.
+def _real_harness_env_factory(monkeypatch, shared_ts, **harness_kwargs):
+    """Extract the REAL `env_factory` closure `_build_trainer_for_test` gets built.
 
-    Taken from `pufferlib.vector.make`'s first argument, at which point the
-    harness build is aborted: everything AFTER that call (build_policy, PuffeRL,
-    the self-play patches) costs seconds and constructs nothing this file looks
-    at, while everything before it — the team-spirit Value, the mask shm, the
-    EnvConfig mapping and the closure itself — is the wiring under test. The
-    abort is an exception rather than a stub return value so the harness cannot
-    run on against a fake vecenv and fail somewhere confusing.
+    Since #92 part 2 that is `cs2rl.train.envs.build_env_factory(..., role="harness")`,
+    called by `cs2rl.train.compose.build_trainer`. Taken from `pufferlib.vector.make`'s
+    first argument, at which point the harness build is aborted: everything AFTER that
+    call (build_policy, PuffeRL, the self-play patches) costs seconds and constructs
+    nothing this file looks at, while everything before it — the team-spirit Value,
+    the mask shm, the EnvConfig mapping and the closure itself — is the wiring under
+    test. The abort is an exception rather than a stub return value so the harness
+    cannot run on against a fake vecenv and fail somewhere confusing; the harness
+    removes its scratch dir on the way out.
 
-    `mp` and `tempfile` are replaced on the HARNESS MODULE, not on the stdlib
-    modules themselves: `shared_ts` is built inside the function and cannot be
-    passed in, so it needs a stub to become an observable sentinel, and the
-    scratch dir must not leak from a build that never reaches its own
-    `cleanup()`. Module-scoped patches keep both out of every other test.
+    `mp` is replaced on the HARNESS MODULE, not on the stdlib module itself:
+    `shared_ts` is built inside the function and cannot be passed in, so it needs a
+    stub to become an observable sentinel. A module-scoped patch keeps it out of
+    every other test.
     """
     import types
 
@@ -635,8 +636,6 @@ def _real_harness_env_factory(monkeypatch, tmp_path, shared_ts, **harness_kwargs
     monkeypatch.setattr(pufferlib.vector, "make", _fake_make)
     monkeypatch.setattr(trainer_harness, "mp",
                         types.SimpleNamespace(Value=lambda *_a, **_kw: shared_ts))
-    monkeypatch.setattr(trainer_harness, "tempfile",
-                        types.SimpleNamespace(mkdtemp=lambda **_kw: str(tmp_path)))
     with pytest.raises(_Captured):
         trainer_harness._build_trainer_for_test(**harness_kwargs)
     assert len(captured) == 1, "pufferlib.vector.make was not reached exactly once"
@@ -690,7 +689,7 @@ def test_train_call_site_forwards_the_captured_kwargs(monkeypatch, capture):
 @pytest.mark.parametrize("capture",
                          FIXTURE_DATA["roles"]["harness"],
                          ids=[c["scenario"] for c in FIXTURE_DATA["roles"]["harness"]])
-def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, tmp_path, capture):
+def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, capture):
     """`_build_trainer_for_test`'s closure, run for real, still produces the capture.
 
     This is the site with no other oracle at all: the §3 gate cannot see the
@@ -726,7 +725,6 @@ def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, tmp_path, c
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
     factory = _real_harness_env_factory(monkeypatch,
-                                        tmp_path,
                                         rt["team_spirit"],
                                         num_envs=1,
                                         map_data=b["map_data"],
@@ -750,7 +748,7 @@ def test_harness_call_site_forwards_the_captured_kwargs(monkeypatch, tmp_path, c
         f"  pre-migration call was: {capture['call_source']}")
 
 
-def test_harness_config_carries_the_knobs_no_fixture_row_varies(monkeypatch, tmp_path):
+def test_harness_config_carries_the_knobs_no_fixture_row_varies(monkeypatch):
     """Drive the harness closure OFF-FIXTURE for the two knobs it cannot see.
 
     Both harness captures hold the field default for pin_pitch and for
@@ -774,7 +772,6 @@ def test_harness_config_carries_the_knobs_no_fixture_row_varies(monkeypatch, tmp
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
     factory = _real_harness_env_factory(monkeypatch,
-                                        tmp_path,
                                         "<shared_ts>",
                                         num_envs=1,
                                         crouch_enabled=0,
@@ -947,27 +944,27 @@ def test_smoke_test_call_site_asks_for_the_smoke_role(monkeypatch):
 
 
 def test_make_env_delegates_to_the_external_role(monkeypatch):
-    """The public wrapper forwards both of its parameters, unswapped.
+    """The test-helper wrapper forwards both of its parameters, unswapped.
 
     Distinct sentinels: `make_env(team_spirit, map_data)` takes two positional
     parameters of the same shape, so crossing them is a one-character edit that
     every value-based comparison in this file would accept.
     """
     from cs2rl.env.c import cs2_env
-    from cs2rl.train import envs as train_envs
+    from tests._helpers import envs as helper_envs
 
     rec = _Recorder()
     monkeypatch.setattr(cs2_env, "make_env", rec)
-    assert train_envs.make_env("<team_spirit>", "<map_data>") == "<env>"
+    assert helper_envs.make_env("<team_spirit>", "<map_data>") == "<env>"
     assert rec.calls == [{
         "config": EnvConfig(),
         "team_spirit": "<team_spirit>",
         "map_data": "<map_data>"
     }]
 
-    # Published optional defaults still belong to the public wrapper.
+    # The optional defaults belong to the wrapper.
     rec.calls.clear()
-    assert train_envs.make_env() == "<env>"
+    assert helper_envs.make_env() == "<env>"
     assert rec.calls == [{"config": EnvConfig(), "team_spirit": None, "map_data": None}]
 
 
@@ -982,7 +979,7 @@ def test_external_role_returns_under_a_stub(monkeypatch):
     `env.c.cs2_env.make_env`, the lower-layer constructor, and this test is the
     behavioural statement of that: with the stub installed the call RETURNS.
 
-    A pure-AST guard (test_env_factory_never_names_train_make_env below) states
+    A pure-AST guard (test_env_factory_never_names_the_make_env_wrapper below) states
     the same thing statically; this one would still fail if a future indirection
     reintroduced the cycle by some spelling the AST check does not enumerate.
     """
@@ -1158,27 +1155,14 @@ def test_eval_env_agreement_two_directions(simple_map, field_name):
         base.close()
 
 
-def test_train_calls_assert_eval_env_agreement():
-    """Pin train()'s call site — the one line no test can execute.
-
-    Same mechanism and same reason as test_train_uses_build_train_env_factory:
-    everything else in train() needs a real run to reach, and this check's
-    failure mode is silent (the policy is scored on a different sim than it
-    trains on, and the numbers just look worse).
-    """
-    import inspect
-
-    from cs2rl.train import loop as train_loop
-
-    assert "assert_eval_env_agreement(" in inspect.getsource(train_loop.train)
-
-
 # ── AST: every migrated site still reads what the old site read ─────────────
 #
-# The layer that reaches `train()`'s eval site, which no test can drive. Each
+# The source layer: what each construction site SPELLS, for every role. Each
 # check is derived from `capture["call_source"]` — the pre-migration call,
 # recorded verbatim one commit before the builders were typed — so it compares
 # the migrated site to the OLD site rather than to the builder it now calls.
+# (What train() hands the eval and training envs at run time is driven in
+# tests/train/test_driver_cleanup.py.)
 
 # The ONLY change PR B2 is allowed to make to what a site READS. Everything
 # else about the call — the role literal, the per-kwarg expressions, the
@@ -1256,24 +1240,52 @@ def _call_in(path, qualname, func_name):
 
 # Enclosing qualnames that MOVED after the capture, old -> current. The fixture is
 # frozen, so its `enclosing` locator stays as captured and the move is recorded
-# here. gh#168 W1 factored the harness's env_factory closure (and everything else
-# built before the trainer constructor) out of `_build_trainer_for_test` into
-# `_harness_parts`; the call itself is unchanged, which the test below still
-# proves by comparing its source against the captured one.
+# here. #92 part 2 gave production and the test harness one composition root
+# (cs2rl.train.compose.build_trainer): the harness's env_factory closure became
+# the "harness" role of `build_env_factory`'s closure, and train()'s eval-env
+# construction moved into `_build_eval_hook`. The calls are unchanged apart from
+# INLINED_ALIASES below, which the test proves by comparing their source against
+# the captured one.
 MOVED_ENCLOSING = {
-    "_build_trainer_for_test.env_factory": "_harness_parts.env_factory",
+    "_build_trainer_for_test.env_factory": "build_env_factory.env_factory",
+    "train": "_build_eval_hook",
 }
 
-# (fixture site path, top-level function) -> the file it lives in now (#205 part 3).
+# Per (role, current enclosing): a local alias the old site read and the moved site
+# spells out, old name -> the expression it was bound to. train() bound
+# `_map_data = args.map_data` once for both env constructions; `_build_eval_hook`
+# reads `args.map_data` itself. The captured call is rewritten through this map
+# before any comparison, so the site must read exactly what the alias held.
+INLINED_ALIASES = {
+    ("eval", "_build_eval_hook"): {
+        "_map_data": "args.map_data"
+    },
+}
+
+# (fixture site path, top-level function) -> the file it lives in now (#205 part 3,
+# #92 part 2, and #321, which moved the `make_env` wrapper into tests/_helpers/).
 MOVED_SITE_FILE = {
-    ("src/train.py", "train"): "src/cs2rl/train/loop.py",
+    ("src/train.py", "_build_eval_hook"): "src/cs2rl/train/loop.py",
     ("src/train.py", "evaluate_checkpoint"): "src/cs2rl/train/evaluate.py",
     ("src/train.py", "load_policy_from_checkpoint"): "src/cs2rl/policy.py",
-    ("src/train.py", "make_env"): "src/cs2rl/train/envs.py",
+    ("src/train.py", "make_env"): "tests/_helpers/envs.py",
     ("src/train.py", "smoke_test"): "src/cs2rl/train/envs.py",
     ("src/train.py", "build_env_factory"): "src/cs2rl/train/envs.py",
-    ("src/train_test_harness.py", "_harness_parts"): "tests/_helpers/trainer_harness.py",
+    ("src/train_test_harness.py", "build_env_factory"): "src/cs2rl/train/envs.py",
 }
+
+
+def _inline_aliases(call_source, aliases):
+    """``call_source`` with every bare Name in ``aliases`` replaced by its expression."""
+
+    class Inline(ast.NodeTransformer):
+
+        def visit_Name(self, node):
+            if node.id in aliases:
+                return ast.parse(aliases[node.id], mode="eval").body
+            return node
+
+    return ast.unparse(Inline().visit(ast.parse(call_source, mode="eval")))
 
 
 def _migrated_sites():
@@ -1292,11 +1304,20 @@ def _migrated_sites():
     assert not stale, (f"MOVED_ENCLOSING keys {stale} match no captured `enclosing`; a key the "
                        "fixture never names is a dead map entry that watches nothing")
     sites = {}
+    inlined = set()
     for role, caps in FIXTURE_DATA["roles"].items():
         for cap in caps:
             enclosing = MOVED_ENCLOSING.get(cap["enclosing"], cap["enclosing"])
             key = (role, enclosing, cap["site"].split(":")[0])
-            sites.setdefault(key, set()).add(cap["call_source"])
+            aliases = INLINED_ALIASES.get((role, enclosing), {})
+            for name in aliases:
+                assert name in _free_names(cap["call_source"]), (
+                    f"INLINED_ALIASES names {name!r} for {role}/{enclosing}, which its captured "
+                    f"call never reads: {cap['call_source']}")
+                inlined.add((role, enclosing))
+            sites.setdefault(key, set()).add(_inline_aliases(cap["call_source"], aliases))
+    assert inlined == set(INLINED_ALIASES), (
+        f"INLINED_ALIASES keys {sorted(set(INLINED_ALIASES) - inlined)} match no captured site")
     out = []
     for (role, enclosing, relpath), sources in sorted(sites.items()):
         assert len(sources) == 1, (f"{role}/{enclosing} was captured with {len(sources)} different "
@@ -1457,43 +1478,52 @@ def test_mask_view_attach_stays_out_of_the_factory():
                           "caller's job; see this test's docstring")
 
 
-def test_env_factory_never_names_train_make_env():
-    """`env.factory` must not reach `cs2rl.train.envs.make_env` — statically, by any spelling.
+def test_env_factory_never_names_the_make_env_wrapper():
+    """`env.factory` must not reach the `make_env` wrapper — statically, by any spelling.
 
     Since PR B2 `build_env_for` imports the LOWER-layer `env.c.cs2_env.make_env`.
-    Re-pointing that at the train package's public wrapper (`cs2rl.train.envs.make_env`)
-    would make the `external` role call itself forever, and would put the whole training
-    stack back on `--dump-config`'s import path. Three shapes are refused:
-    a `make_env` imported from `cs2rl.train` or any `cs2rl.train.*` module, at ANY scope
-    (`from cs2rl.train.envs import make_env`); a `make_env` attribute of the wrapper's
-    module (`envs.make_env`, `train.make_env`, `train.envs.make_env`,
-    `cs2rl.train.envs.make_env`); and any module-LEVEL import of `cs2rl.train` or of a
-    `cs2rl.train.*` module at all, in every spelling (`import cs2rl.train.envs`,
-    `from cs2rl.train import ...`, `from cs2rl import train`). Names are compared in FULL:
-    every first-party module is top-level `cs2rl`, so a first-component check could no
-    longer tell `train` from `env.config`. An import spelled `as` some other local name,
-    then read as an attribute, is beyond the attribute shape: `lint-imports` rejects every
-    `cs2rl.train` import from `env` at any scope (`cs2rl layers`).
+    Re-pointing that at the wrapper the `external` role serves
+    (`tests._helpers.envs.make_env`; `cs2rl.train.envs.make_env` until #321 moved it)
+    would make the role call itself forever, and an import of the train package would
+    put the whole training stack back on `--dump-config`'s import path. Four shapes are
+    refused: a `make_env` imported from `cs2rl.train`, any `cs2rl.train.*` module or the
+    helper module, at ANY scope (`from tests._helpers.envs import make_env`); a
+    `make_env` attribute of a module that held the wrapper (`envs.make_env`,
+    `train.make_env`, `train.envs.make_env`, `cs2rl.train.envs.make_env`,
+    `_helpers.envs.make_env`, `tests._helpers.envs.make_env`); any import of `tests` or a
+    `tests.*` module, at ANY scope (src/ never imports test code); and any module-LEVEL
+    import of `cs2rl.train` or of a `cs2rl.train.*` module at all, in every spelling
+    (`import cs2rl.train.envs`, `from cs2rl.train import ...`, `from cs2rl import
+    train`). Names are compared in FULL: every first-party module is top-level `cs2rl`,
+    so a first-component check could no longer tell `train` from `env.config`. An import
+    spelled `as` some other local name, then read as an attribute, is beyond the
+    attribute shape: `lint-imports` rejects every `cs2rl.train` import from `env` at any
+    scope (`cs2rl layers`).
 
     Scoped to module-level imports plus the name `make_env`, deliberately: this module
     no longer has a function-local `cs2rl.train` import to leave alone (#205 part 3 moved
     `build_selfplay_manager`, which carried the last one, to `cs2rl.train.selfplay`), and
     `lint-imports` rejects an upward import at ANY scope now that `cs2rl layers` has no
     `ignore_imports` entry, so function bodies need no scan for it here. Only the name
-    `make_env` is searched everywhere in the file.
+    `make_env` and imports of test code are searched everywhere in the file.
     """
     from cs2rl.env import factory as env_factory
 
     def is_train_module(name: str) -> bool:
         return name == "cs2rl.train" or name.startswith("cs2rl.train.")
 
-    # The ways a `make_env` attribute can name the wrapper's module: its local names and
-    # its dotted spellings.
-    wrapper_modules = {"train", "envs", "train.envs", "cs2rl.train.envs"}
+    def is_test_module(name: str) -> bool:
+        return name == "tests" or name.startswith("tests.")
+
+    # The ways a `make_env` attribute can name a module that held the wrapper: its local
+    # names and its dotted spellings.
+    wrapper_modules = {
+        "train", "envs", "train.envs", "cs2rl.train.envs", "_helpers.envs", "tests._helpers.envs"
+    }
 
     tree = ast.parse(Path(env_factory.__file__).read_text())
     offenders = []
-    for node in tree.body:                                                                   # module level ONLY
+    for node in tree.body:                                                                           # module level ONLY
         if isinstance(node, ast.Import):
             offenders += [
                 f"line {node.lineno}: import {a.name}" for a in node.names
@@ -1504,15 +1534,21 @@ def test_env_factory_never_names_train_make_env():
             if (is_train_module(module)
                     or (module == "cs2rl" and any(a.name == "train" for a in node.names))):
                 offenders.append(f"line {node.lineno}: from {module} import ...")
-    for node in ast.walk(tree):                                                              # every scope
+    for node in ast.walk(tree):                                                                      # every scope
         if (isinstance(node, ast.ImportFrom) and is_train_module(node.module or "")
                 and any(a.name == "make_env" for a in node.names)):
             offenders.append(f"line {node.lineno}: from {node.module} import make_env")
+        if isinstance(node, ast.ImportFrom) and is_test_module(node.module or ""):
+            offenders.append(f"line {node.lineno}: from {node.module} import ...")
+        if isinstance(node, ast.Import):
+            offenders += [
+                f"line {node.lineno}: import {a.name}" for a in node.names if is_test_module(a.name)
+            ]
         if (isinstance(node, ast.Attribute) and node.attr == "make_env"
                 and ast.unparse(node.value) in wrapper_modules):
             offenders.append(f"line {node.lineno}: {ast.unparse(node)}")
-    assert not offenders, ("env_factory reaches the train package's env wrapper or imports "
-                           f"cs2rl.train at module scope: {offenders}")
+    assert not offenders, ("env_factory reaches the make_env wrapper, imports test code or "
+                           f"imports cs2rl.train at module scope: {offenders}")
 
 
 # ── reward wiring, relocated from tests/test_reward_weight_wiring.py ────────
@@ -1647,19 +1683,3 @@ def test_build_train_env_factory_carries_args_config():
         f"build_env_factory(config=None) captured {bare_cells['config']!r}; the "
         f"`config=None ⇒ EnvConfig()` resolution must run ABOVE the closure, so that no forked "
         f"worker is ever handed a None to guard against")
-
-
-def test_train_uses_build_train_env_factory():
-    """Pin train()'s call site itself — the one line no test can execute.
-
-    PITFALL: this is a source-text assertion, deliberately. Everything else in
-    train() needs a real run to reach, and the failure this guards (dropping
-    the run's config) is invisible at runtime: the arm just trains the baseline.
-    If you legitimately rename the helper, update this string.
-    """
-    import inspect
-
-    from cs2rl.train import loop as train_loop
-
-    src = inspect.getsource(train_loop.train)
-    assert "build_train_env_factory(" in src, "train() no longer builds envs through the seam"

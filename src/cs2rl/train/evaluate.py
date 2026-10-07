@@ -65,7 +65,7 @@ def evaluate_checkpoint(checkpoint_path=None,
         # W3 (#154): the SECOND eval_legacy site, and the only one that passes a
         # seed. That difference is the whole reason the role's builder takes an
         # UNSET sentinel rather than seed=None — env.c.cs2_env.make_env's own
-        # default is 0 (not cs2rl.train.envs.make_env, which takes no seed), so spelling the other site's absent seed as None would have changed
+        # default is 0 (not tests._helpers.envs.make_env, which takes no seed), so spelling the other site's absent seed as None would have changed
         # the env it builds, invisibly to static_data_scalars().
         env = build_legacy_eval_env(seed=seed)
         obs, _ = env.reset(seed=seed)

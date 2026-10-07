@@ -53,7 +53,7 @@ def test_c_rng_mixing_zero_fallback_only_at_the_one_wrapping_seed(simple_map):
 
 
 def test_env_seed_ranges_of_adjacent_seeds_disjoint():
-    """Env i of --seed s gets env_seed_base(s) + i (train()'s _per_env_kwargs)
+    """Env i of --seed s gets env_seed_base(s) + i (compose._per_env_kwargs)
     — no pufferlib composition is involved. This only pins the 100_000 spacing:
     the (s, i) -> seed map stays injective for any num_envs below it."""
     from cs2rl.train.envs import env_seed_base
@@ -116,27 +116,10 @@ def test_seed_everything_is_deterministic():
     assert a[0] != c[0] and a[1] != c[1] and a[2] != c[2]
 
 
-def test_train_routes_seed_via_per_env_kwargs():
-    """Source-text pin (same style as test_train_uses_build_train_env_factory):
-    train() must call seed_everything and hand each env `_seed` through
-    _per_env_kwargs — NOT via pufferlib.vector.make(seed=), which is a silent
-    no-op (vector.make never forwards its own `seed` parameter)."""
-    import inspect
-
-    from cs2rl.train import loop as train_loop
-    src = inspect.getsource(train_loop.train)
-    assert "seed_everything(args.seed)" in src, \
-        "train() no longer seeds python/numpy/torch via seed_everything"
-    assert '"_seed": env_seed_base(args.seed) + i' in src, \
-        "train() no longer routes --seed to the envs via _per_env_kwargs"
-    # pufferlib.vector.make swallows `seed=` (its own named parameter, never
-    # forwarded to the backend) — a reintroduced kwarg there is a silent no-op.
-    assert "seed=env_seed_base" not in src
-
-
 def test_serial_vecenv_envs_get_distinct_rng_streams(simple_map):
-    """Build a Serial vecenv the way train() does (build_env_factory +
-    pufferlib.vector.make with per-env `_seed` kwargs) and check every env's
+    """Build a Serial vecenv the way cs2rl.train.compose.build_trainer does
+    (build_env_factory + pufferlib.vector.make with per-env `_seed` kwargs;
+    tests/train/test_driver_cleanup.py checks train() passes those) and check every env's
     C rng is the mixed env_seed_base(3) + i — distinct and nonzero. Would
     catch the seed falling back to pufferlib's default base (env i -> i)."""
     import pufferlib.vector

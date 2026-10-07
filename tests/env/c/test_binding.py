@@ -234,31 +234,24 @@ def test_binding_default_continuous_actions_zero(make_map):
 
 # ── Batch 3 Task 5: NaN guard test ─────────────────────────────────────────
 #
-# This test exercises the inline NaN guard that lives in the trainer's
-# train() method (Cs2PuffeRL.train, src/cs2rl/trainer.py). Rebuilding the full
-# PufferLib trainer just to test this would be expensive and fragile against
-# unrelated PufferLib API drift; instead we replicate the guard's structure
-# locally — same control flow, same warning string, same zero-grad call —
-# and verify that:
-#   (a) when loss is non-finite, no parameter update happens,
-#   (b) the throttled warning print happens.
-#
-# If the guard's structure changes (new warning string, different zero_grad
-# signature), update BOTH this test and the real guard in the same PR. The real
-# guard is the `if not torch.isfinite(loss).all():` block inside
-# `Cs2PuffeRL.train`, which moved out of train.py with its patcher on
-# 2026-08-31 (src/cs2rl/train_update.py) and into src/cs2rl/trainer.py as a method on
-# gh#168 W2a; search the "Batch 3 (T5) NaN guard" banner rather than trusting
-# a line number.
+# The guard is two pieces in src/cs2rl/train/trainer.py: Cs2PuffeRL.train skips a
+# minibatch whose loss is non-finite, before its TAG measurement and policy step,
+# and Cs2PuffeRL._skip_nonfinite_step does the skipping. This test calls the real
+# _skip_nonfinite_step on a stub trainer (no PufferLib trainer build) with a loss
+# made non-finite by the aim head, and checks that:
+#   (a) the gradients are dropped, so a later optimizer step changes nothing,
+#   (b) the warning prints once and the next one within a minute is throttled.
+# The branch in train() is pinned by tests/train/test_autocast_lifetime.py's
+# `nonfinite` path: two non-finite minibatches leave the policy optimizer unstepped.
 
 
 def test_continuous_aim_nan_guard():
-    """T5: NaN guard in Cs2PuffeRL.train skips optimizer.step() and
-    prints a throttled warning when the loss is non-finite, without
-    poisoning subsequent gradients."""
+    """T5: the NaN guard's skip drops the gradients of a non-finite loss and
+    prints a throttled warning, without poisoning subsequent gradients."""
+    import contextlib
     import io
-    import sys as _sys
-    import time as _t
+    from types import SimpleNamespace
+    from typing import Any
 
     import torch
 
@@ -266,14 +259,13 @@ def test_continuous_aim_nan_guard():
     from cs2rl.env.c.cs2_env import make_env
     from cs2rl.spec import action as spec_action
     from cs2rl.spec import obs as spec_obs
+    from cs2rl.train.trainer import Cs2PuffeRL
 
     env = make_env(seed=0)
     try:
         policy = policy_mod.build_policy(env, device='cpu')
 
         # Force the aim head to emit NaN so the loss path goes non-finite.
-        # We don't need to run a full PPO update — replicating the guard's
-        # control flow inline is enough to verify it does the right thing.
         # Batch 3.5: output AIM_DIM columns so expand_as(mu_aim) in forward
         # doesn't raise a size mismatch when AIM_DIM > 1.
         _aim_dim = spec_action.AIM_DIM
@@ -293,44 +285,32 @@ def test_continuous_aim_nan_guard():
         # Sanity: setup must yield a non-finite loss.
         assert not torch.isfinite(loss).all(), \
             "test setup wrong: loss should be NaN"
+        # A finite gradient already on the parameters, as an earlier backward
+        # would leave it: the skip must drop it, not just add nothing.
+        value.sum().backward(retain_graph=True)
+        assert any(p.grad is not None for p in policy.parameters())
 
+        # Any: a stub stands in for the Cs2PuffeRL `self` the method reads; 0.0 is the
+        # warning time Cs2PuffeRL's constructor declares.
+        trainer: Any = SimpleNamespace(optimizer=optimizer, _last_nan_warn_t=0.0)
         captured = io.StringIO()
-        old_stdout = _sys.stdout
-        _sys.stdout = captured
+        with contextlib.redirect_stdout(captured):
+            Cs2PuffeRL._skip_nonfinite_step(trainer, loss)
+            Cs2PuffeRL._skip_nonfinite_step(trainer, loss)
+        optimizer.step()
 
-        # Mirror the guard control flow inside Cs2PuffeRL.train
-        # (src/cs2rl/trainer.py). Throttle field name MUST match the
-        # production attribute (`_last_nan_warn_t`) so a future regression
-        # touching the attribute name fails this test.
-        class _Self:
-            pass
-
-        _self = _Self()
-        _self.optimizer = optimizer
-        try:
-            if not torch.isfinite(loss).all():
-                _now = _t.time()
-                _last = getattr(_self, '_last_nan_warn_t', 0.0)
-                if _now - _last > 60.0:
-                    print(f"[hybrid_aim NaN guard] non-finite loss "
-                          f"({float(loss.detach())}); skipping optimizer step")
-                    _self._last_nan_warn_t = _now
-                _self.optimizer.zero_grad(set_to_none=True)
-            else:
-                loss.backward()
-                _self.optimizer.step()
-        finally:
-            _sys.stdout = old_stdout
-
-        # Parameters must be byte-identical: no gradient flowed through.
+        kept = [name for name, p in policy.named_parameters() if p.grad is not None]
+        assert not kept, f"T5 NaN guard: gradients survived the skip on {kept}"
+        # Parameters must be byte-identical: no gradient reached the step.
         for old, new in zip(old_params, policy.parameters(), strict=True):
             assert torch.equal(old,
                                new), ("T5 NaN guard: parameter changed despite non-finite loss; "
                                       f"max delta {(old - new).abs().max().item()}")
         # Warning string is the production format; substring match is robust
-        # against future float-formatting tweaks.
-        assert "NaN guard" in captured.getvalue(), \
-            f"guard warning not printed: {captured.getvalue()!r}"
+        # against future float-formatting tweaks. The second call is throttled.
+        assert captured.getvalue().count("NaN guard") == 1, \
+            f"guard warning not printed exactly once: {captured.getvalue()!r}"
+        assert trainer._last_nan_warn_t > 0.0
     finally:
         env.close()
 

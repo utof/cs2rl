@@ -8,33 +8,35 @@ refactor; the flat ``train.py`` re-exported every name below (see its ``__all__`
 until #205 part 3 removed the re-exports: ``cs2rl.train`` exports nothing now, so
 import from this module.
 
-HISTORY (gh#168 W2a, 2026-09-25): this module also held the 911-line
-return-norm patcher whose inner 713-line ``train()`` replacement closed over 15
-freevars. That body is now ``cs2rl.train.trainer.Cs2PuffeRL.train`` (its
-construction-time state is ``Cs2PuffeRL._init_return_norm``, the closure
-locals are ``self._*`` attributes), and cs2rl.train.trainer imports the helpers below
-at module scope. Nothing here touches a trainer instance any more.
+The update itself is ``Cs2PuffeRL.train`` in ``cs2rl.train.trainer``, whose module
+imports the helpers below at module scope; its phase methods call them. Nothing here
+touches a trainer instance.
 
 PITFALL (runtime rebinding): a test that wants to intercept ``tag_grad_cossim``
-at its call site must patch it on ``cs2rl.train.trainer``, NOT on this module —
-the call site inside ``Cs2PuffeRL.train`` resolves the name through
-cs2rl.train.trainer's globals, so a patch here is silently unreachable
-and the assertion becomes vacuous. See tests/train/test_tag_trainer.py, whose
-positive control pins the reachable module.
+or ``_hybrid_ppo_loss`` at its call site must patch it on ``cs2rl.train.trainer``,
+NOT on this module — the call sites (``Cs2PuffeRL._record_tag``,
+``Cs2PuffeRL._loss_terms``) resolve the names through cs2rl.train.trainer's
+globals, so a patch here is silently unreachable and the assertion becomes
+vacuous. See tests/train/test_tag_trainer.py, whose positive control pins the
+reachable module.
 
 IMPORT-LIGHTNESS INVARIANT: module scope stays torch/nav/env.c-free, for the
 reason spelled out in tests/train/test_w1_modules.py's docstring (WHY property 3 is
-load-bearing). Every torch, pufferlib and cs2rl.train.entropy import below is
-function-local ON PURPOSE.
+load-bearing). Every runtime torch, pufferlib and cs2rl.train.entropy import below is
+function-local ON PURPOSE; the module-scope torch import sits under
+``if TYPE_CHECKING:``, for annotations only.
 """
+
+from typing import TYPE_CHECKING, Literal, overload
 
 from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
 
+if TYPE_CHECKING:                      # annotations only; never at runtime
+    import torch
+
 # ── Masked reductions over participating rows (Rung 0, spec 2026-08-29 §2.2) ──
-# WHY these are free functions and not methods on the trainer: the trainer is a
-# monkey-patched PuffeRL instance (pufferl.py is a site-package and is never
-# edited), so every reduction the update path needs has to live here where a
-# unit test can call it without building a trainer.
+# WHY these are free functions and not methods on the trainer: a unit test can
+# call them without building a trainer (a PuffeRL subclass that needs envs).
 # DTYPE CONTRACT used by every caller below: the *bool* [S,T] mask is for
 # INDEXING (`sel[mb_part]`); the *float* copy (`mb_part.to(torch.float32)`) is
 # the weight `w` these helpers take. `sel[mb_part_f]` is an IndexError and
@@ -49,9 +51,11 @@ from cs2rl.policy import _LOG_2PI, _aim_dim_weight, _apply_action_masks
 def masked_mean(x, w):
     """Mean of x over rows where w == 1. w broadcasts to x; w.sum() == 0 ⇒ 0.
 
-    Rung 0 §2.2: parked agent rows (noop-masked, entropy exactly 0, zero
-    reward) must not enter any trainer statistic, or every all-row mean at
-    n_active=1 is diluted 5×. Masked mean = (x·w).sum() / max(w.sum(), 1).
+    Rung 0 §2.2: non-participating rows (parked agents, and the statue team
+    under ``--opponent noop``) must not enter any trainer statistic. At
+    n_active=1 they are four of every five rows (nine of ten under noop), and
+    their entropy and reward are not 0 in general. Masked mean =
+    (x·w).sum() / max(w.sum(), 1).
     """
     w = w.to(x.dtype)
     return (x * w).sum() / w.sum().clamp(min=1.0)
@@ -84,6 +88,24 @@ def masked_normalize_adv(flat_adv, w):
     return (flat_adv - m) / (s + 1e-8) * w
 
 
+def masked_value_loss(newvalue, returns, old_values, vf_clip, part):
+    """0.5 * masked mean of the squared value error, PPO-clipped when ``vf_clip`` is set.
+
+    ``returns`` and ``old_values`` are in the value head's (normalised) scale. With
+    ``vf_clip`` the prediction may move at most ``vf_clip`` from ``old_values`` and the
+    larger of the clipped and unclipped errors counts; None disables clipping.
+    ``part`` is the FLOAT [S, T] participation weight.
+    """
+    import torch
+
+    v_loss_unclipped = (newvalue - returns)**2
+    if vf_clip is None:
+        return 0.5 * masked_mean(v_loss_unclipped, part)
+    v_clipped = old_values + torch.clamp(newvalue - old_values, -vf_clip, vf_clip)
+    v_loss_clipped = (v_clipped - returns)**2
+    return 0.5 * masked_mean(torch.max(v_loss_unclipped, v_loss_clipped), part)
+
+
 def masked_explained_variance(y_pred, y_true, part):
     """explained_variance over part == True rows (whole-buffer, Rung 0 §2.2).
 
@@ -109,12 +131,10 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
     """Config-driven entropy target for the SAC-style α controller.
 
     Single source for both the construction-time seed (Cs2PuffeRL._init_return_norm)
-    and the per-call recompute in cs2rl.train.trainer.Cs2PuffeRL.train — keeping them identical
-    means a checkpoint-resumed trainer seeds at its true scheduled value
-    instead of a hardcoded warmup constant. `config` is anything with
-    .get() (PuffeRL config or a plain dict); missing keys fall back to the
-    build_train_config defaults so harness/older-checkpoint configs keep
-    working.
+    and the per-update recompute (Cs2PuffeRL._prepare_entropy_update).
+    `config` is anything with .get() (PuffeRL config or a plain dict); missing
+    keys fall back to the build_train_config defaults so harness/older-checkpoint
+    configs keep working.
     """
     from cs2rl.train.entropy import target_entropy_schedule
     return target_entropy_schedule(
@@ -124,6 +144,53 @@ def _scheduled_target_entropy(config, global_step: int, max_entropy: float) -> f
         warmup_high_frac=config.get("entropy_target_warmup_frac", 0.5),
         base_frac=config.get("entropy_target_base_frac", 0.35),
     )
+
+
+# The return length follows return_pg_rows, so a type checker needs one overload per
+# value to check the callers' 7- and 8-name unpacks. return_pg_rows is keyword-only
+# in the True overload (a non-default parameter cannot follow defaulted ones); no
+# caller passes it positionally. Typing only: the def below is the one that runs.
+@overload
+def _hybrid_ppo_loss(
+    policy,
+    mb_obs,
+    mb_actions,
+    mb_cont_actions,
+    mb_old_logp_d,
+    mb_old_logp_c,
+    mb_advantages,
+    clip_coef,
+    state,
+    mb_prio=...,
+    mb_masks=...,
+    return_pg_rows: Literal[False] = ...,
+    mb_part=...,
+    aim_dim_mask=...,
+    aim_entropy_bonus=...
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor]]":
+    ...
+
+
+@overload
+def _hybrid_ppo_loss(
+    policy,
+    mb_obs,
+    mb_actions,
+    mb_cont_actions,
+    mb_old_logp_d,
+    mb_old_logp_c,
+    mb_advantages,
+    clip_coef,
+    state,
+    mb_prio=...,
+    mb_masks=...,
+    *,
+    return_pg_rows: Literal[True],
+    mb_part=...,
+    aim_dim_mask=...,
+    aim_entropy_bonus=...
+) -> "tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, list[torch.Tensor], torch.Tensor]":
+    ...
 
 
 def _hybrid_ppo_loss(policy,
@@ -223,7 +290,7 @@ def _hybrid_ppo_loss(policy,
 
     # ── Shape harmonisation ──
     # PufferLib's PPO update path passes mb_obs with shape (segments,
-    # bptt_horizon, OBS_DIM); HybridPolicy.forward flattens to (B*T, ...)
+    # bptt_horizon, OBS_DIM); Dust2Policy.forward flattens to (B*T, ...)
     # before the heads, so logits/mu_aim/log_std/new_value come back at the
     # FLAT batch dim while mb_actions / mb_cont_actions / mb_advantages /
     # mb_old_logp_{d,c} retain their original (segments, bptt_horizon, …)

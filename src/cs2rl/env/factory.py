@@ -33,12 +33,14 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
                training knobs. #143 tracks that; this module is not the fix, it
                just reduces the future fix to one role's config source.
   smoke        `smoke_test`, fixed seed 42.
-  harness      `tests._helpers.trainer_harness._build_trainer_for_test`, whose contract is
-               "shaped exactly like production" — hence its own role rather
-               than a reuse of `train`, since it adds
-               `include_step_stats_in_info=True` and builds its config from
-               plain function arguments rather than from a CLI args namespace.
-  external     the public `make_env(team_spirit, map_data)` wrapper.
+  harness      test trainers: `tests._helpers.trainer_harness._build_trainer_for_test`,
+               through `cs2rl.train.compose.build_trainer(env_role="harness")`.
+               Its own role rather than a reuse of `train`, since it adds
+               `include_step_stats_in_info=True` and takes pufferlib's seed
+               rather than the train role's per-env `_seed`.
+  external     `tests._helpers.envs.make_env(team_spirit, map_data)`, a default-knob
+               env for env-level tests. It lives in tests/ because nothing in src/
+               or scripts/ calls it (#321).
 
 There is deliberately NO `record` role, and the reason is NOT that `--record`
 reuses one of the roles above — it does not. `cs2rl.train.record.record_episode` builds its
@@ -104,9 +106,9 @@ tests/env/test_env_factory.py's `_construct` is built on exactly that.
 
 `cs2rl.train.selfplay.build_selfplay_manager` (moved there from this module) covers
 the three pre-migration `SelfPlayManager` sites (`train()` plus two in
-`_build_trainer_for_test`); they are two calls now, `cs2rl.train.loop.train()` and
-the one in tests/_helpers/trainer_harness.py's `_harness_parts`. Its own pre-migration
-capture is `tests/fixtures/selfplay_kwargs_pre_w3.json`, recorded one commit before
+`_build_trainer_for_test`); they are one call now, in
+`cs2rl.train.compose._selfplay_manager`, for train() and the test harness alike. Its
+own pre-migration capture is `tests/fixtures/selfplay_kwargs_pre_w3.json`, recorded one commit before
 the builder was written for the same reason the env capture was — a builder
 transcribed from the sites it is meant to check asserts nothing.
 
@@ -299,7 +301,7 @@ def build_smoke_env():
 
 
 def build_harness_env(*, shared_ts, buf, seed: int | None, map_data, config: EnvConfig):
-    """`tests._helpers.trainer_harness._build_trainer_for_test`'s per-env construction.
+    """A test trainer's per-env construction: `build_env_factory`'s "harness" role.
 
     ``0 if seed is None else seed`` — an explicit None check, NOT ``seed or 0``:
     pufferlib forwards seed=None for the first reset, and a falsy-remap would
@@ -312,10 +314,10 @@ def build_harness_env(*, shared_ts, buf, seed: int | None, map_data, config: Env
 
     ``config`` is REQUIRED and passed straight through. The four knobs it
     carries used to be four separate parameters here; since #165 PR B2 the
-    mapping from `_build_trainer_for_test`'s plain arguments into an EnvConfig
-    lives at the CALL SITE, and that is where the coverage question moved with
-    it — see the closure comment in `tests/_helpers/trainer_harness.py` for which knob
-    each test can and cannot see going missing.
+    caller builds the EnvConfig (`cs2rl.train.envs.build_train_env_factory`,
+    from the harness's args namespace through `env_config_from_args`) — see the
+    comment above that namespace in `tests/_helpers/trainer_harness.py` for which
+    knob each test can and cannot see going missing.
 
     NOTE the mask view is NOT attached here. `env._attach_mask_view(mask_shm,
     _mask_idx)` is post-construction wiring that needs the caller's shm handle
@@ -332,14 +334,13 @@ def build_harness_env(*, shared_ts, buf, seed: int | None, map_data, config: Env
 
 
 def build_external_env(*, team_spirit, map_data):
-    """The public `make_env(team_spirit, map_data)` wrapper's env.
+    """`tests._helpers.envs.make_env(team_spirit, map_data)`'s env.
 
-    Both parameters are REQUIRED even though the PUBLIC WRAPPER `cs2rl.train.envs.make_env`
-    declares its own two as optional. (Qualified deliberately: since #165 PR B2
-    this module names two different `make_env`s — the wrapper, and the lower-layer
-    `env.c.cs2_env.make_env` that `_env_constructor` imports — and both default
-    those parameters, so an unqualified sentence would say nothing.) The
-    defaulting belongs to the wrapper, because that is its published signature,
+    Both parameters are REQUIRED even though the wrapper `tests._helpers.envs.make_env`
+    declares its own two as optional. (Qualified deliberately: this module names two
+    different `make_env`s — the wrapper, and the lower-layer `env.c.cs2_env.make_env`
+    that `_env_constructor` imports — and both default those parameters, so an
+    unqualified sentence would say nothing.) The defaulting belongs to the wrapper,
     and repeating it here would mean a caller that forgot to forward `map_data`
     got a dust2 env instead of a TypeError, which is the silent-default failure
     every other builder in this module is spelled to avoid.

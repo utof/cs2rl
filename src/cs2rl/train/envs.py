@@ -8,7 +8,7 @@ import time
 import numpy as np
 
 from cs2rl.env.config import EnvConfig
-from cs2rl.env.factory import build_external_env, build_smoke_env, build_train_env
+from cs2rl.env.factory import build_harness_env, build_smoke_env, build_train_env
 from cs2rl.spec.action import ACTION_HEAD_SIZES
 from cs2rl.spec.obs import OBS_DIM
 from cs2rl.train.config import env_config_from_args
@@ -117,17 +117,7 @@ def smoke_test():
 # finding 21f of docs/2026-07-06-adversarial-review-verification.md)
 
 
-def make_env(team_spirit=None, map_data=None):
-    """Public env wrapper. W3 (#154): a thin delegate to the `external` role.
-
-    The optional defaults stay HERE, on the published signature, rather than
-    moving into `build_external_env` — that builder requires both arguments so a
-    caller that forgets to forward one gets a TypeError instead of a dust2 env.
-    """
-    return build_external_env(team_spirit=team_spirit, map_data=map_data)
-
-
-def build_env_factory(*, shared_ts, map_data, config=None):
+def build_env_factory(*, shared_ts, map_data, config=None, role="train"):
     """Return the per-env factory callable handed to pufferlib.vector.make.
 
     WHAT: a closure over the shared team-spirit Value, the preloaded map data
@@ -149,9 +139,10 @@ def build_env_factory(*, shared_ts, map_data, config=None):
     unreachable without launching a run.
 
     `config=None` ⇒ `EnvConfig()`, resolved ONCE above the closure so the
-    closure captures a config and never a None. Same shape as `make_env`'s own
-    default; the one production caller (build_train_env_factory) always passes a
-    config. test_build_train_env_factory_carries_args_config pins BOTH halves and
+    closure captures a config and never a None. Same shape as
+    `env.c.cs2_env.make_env`'s own `config=None` default; the one production
+    caller (build_train_env_factory) always passes a config.
+    test_build_train_env_factory_carries_args_config pins BOTH halves and
     needs two calls to do it: the args-built factory for "the caller passes a
     config", and a BARE `build_env_factory(...)` for the resolution itself, which
     no call that always passes a config can reach. Until that second call was
@@ -174,15 +165,22 @@ def build_env_factory(*, shared_ts, map_data, config=None):
     deliberately diverges on — `build_eval_env` forces it off so eval reports raw,
     cross-run-comparable rewards. Known limitation, #143's neighbourhood; do not
     fix in this branch.
+    ROLE (#92): "train" builds through `build_train_env`; "harness" builds the test
+    trainer's envs (`cs2rl.train.compose.build_trainer` with env_role="harness")
+    through `build_harness_env`, which takes pufferlib's seed only, so a `_seed` there
+    is a TypeError. Both roles attach the same shared-memory views.
     PITFALL: `seed or 0` is intentional — pufferlib passes seed=None for some
     backends. Keep it.
-    R0-D (#135) `_seed`: train() routes the per-env seed through env_kwargs
-    (`_seed = env_seed_base(--seed) + i`) because pufferlib.vector.make takes
+    R0-D (#135) `_seed`: build_trainer routes the train role's per-env seed
+    through env_kwargs (`_seed = env_seed_base(--seed) + i`) because
+    pufferlib.vector.make takes
     `seed` as ITS OWN named parameter and never forwards it to the backend —
     `make(..., seed=X)` is a silent no-op and every env lands on pufferlib's
     default base (env i -> seed i) regardless of --seed. When `_seed` is given
     it wins over pufferlib's `seed`; the legacy path is unchanged otherwise.
     """
+    if role not in ("train", "harness"):
+        raise ValueError(f"role={role!r} must be 'train' or 'harness'")
     config = EnvConfig() if config is None else config
 
     def env_factory(*_args,
@@ -214,12 +212,22 @@ def build_env_factory(*, shared_ts, map_data, config=None):
         # (test_train_call_site_forwards_the_captured_kwargs) as well as
         # pinning its spelling against the recorded call source
         # (test_migrated_site_still_reads_what_the_old_site_read).
-        env = build_train_env(shared_ts=shared_ts,
-                              buf=buf,
-                              seed=seed,
-                              _seed=_seed,
-                              map_data=map_data,
-                              config=config)
+        if role == "harness":
+            if _seed is not None:
+                raise TypeError("the harness role takes pufferlib's seed only; _seed is the "
+                                "train role's per-env seed")
+            env = build_harness_env(shared_ts=shared_ts,
+                                    buf=buf,
+                                    seed=seed,
+                                    map_data=map_data,
+                                    config=config)
+        else:
+            env = build_train_env(shared_ts=shared_ts,
+                                  buf=buf,
+                                  seed=seed,
+                                  _seed=_seed,
+                                  map_data=map_data,
+                                  config=config)
         # Attach the shared-memory views so the env (whether running in the
         # main process under Serial, or a forked worker under
         # Multiprocessing) can pull cont_actions written by the trainer and
@@ -235,28 +243,29 @@ def build_env_factory(*, shared_ts, map_data, config=None):
     return env_factory
 
 
-def build_train_env_factory(args, *, shared_ts, map_data):
-    """The training path's env factory: the run's EnvConfig, derived from args.
+def build_train_env_factory(args, *, shared_ts, map_data, role="train"):
+    """A trainer vecenv's env factory: the run's EnvConfig, derived from args.
 
     WHY this exists as its own function (review fix 2): it is the seam between
-    the CLI and the envs. Inlined in train() it was untestable without
-    launching a run, so nothing caught a regression that dropped the run's
-    weights — exactly the silent-baseline failure this whole change is guarding
-    against. test_train_uses_build_train_env_factory pins train() to it, and
-    test_build_train_env_factory_carries_args_config reads the config back out
-    of the closure it returns.
+    args and the envs. Inlined in train() it was untestable without launching a
+    run, so nothing caught a regression that dropped the run's weights — exactly
+    the silent-baseline failure this whole change is guarding against.
+    test_build_train_env_factory_carries_args_config reads the config back out of
+    the closure it returns. Its caller is `cs2rl.train.compose.build_trainer`, for
+    the CLI run (role "train") and for test trainers (role "harness").
 
     Derives ONE config from the SAME resolver build_train_config uses
     (`env_config_from_args`), so config.json provenance and the envs that
     actually ran cannot disagree — about a weight, about symmetrization or about
     a sim knob. Before #165 PR B2 that was three separate derivations here, each
-    with its own way to fall out of step; train() also asserts the built
+    with its own way to fall out of step; build_trainer also asserts the built
     driver_env agrees with the participation vector it derives from the same
     args.
     """
     return build_env_factory(shared_ts=shared_ts,
                              map_data=map_data,
-                             config=env_config_from_args(args))
+                             config=env_config_from_args(args),
+                             role=role)
 
 
 # ── SECTION: Dead Run Detector ─────────────────────────────────────────────

@@ -1,52 +1,36 @@
 """The training run driver: `train(args)` and the helpers only it reads.
 
-`train()` builds the vec env, the policy and the `Cs2PuffeRL` trainer, then runs the
-epoch loop (checkpoints, dead-run detection, the fixed-baseline eval hook).
-`cs2rl.train.trainer` and `cs2rl.eval.baselines` are imported inside `train()`: both
-load torch at module scope, and `python -m cs2rl.train --dump-config` must not.
+`train()` prepares the run, builds the trainer with `cs2rl.train.compose.build_trainer`,
+then runs the epoch loop (checkpoints, dead-run detection, the fixed-baseline eval
+hook). torch and `cs2rl.eval.baselines` are imported inside the functions that use
+them: `python -m cs2rl.train --dump-config` imports this module and must not load torch.
 """
 
 import json
 import multiprocessing as mp
 import os
 import time
-from collections.abc import Callable
 from contextlib import ExitStack
+from dataclasses import dataclass
 from functools import partial
 from pathlib import Path
-from types import TracebackType
+from typing import Any
 
 import numpy as np
 
 from cs2rl.env.factory import build_eval_env
-from cs2rl.policy import (
-    AGENT_IDS,
-    build_policy,
-    load_state_dict_arch_checked,
-    state_dict_is_split,
-    state_dict_is_trunk_split,
-)
-from cs2rl.spec.action import ACTION_MASK_DIM, AIM_DIM
+from cs2rl.policy import state_dict_is_split, state_dict_is_trunk_split
 from cs2rl.spec.paths import CHECKPOINTS_DIR
+from cs2rl.train.compose import PolicyInit, _close_on_exit, build_trainer
 from cs2rl.train.config import (
     TEAM_SIZE,
     assert_opponent_self_play_compatible,
-    build_participating_rows,
     build_train_config,
     compute_batch_dims,
     env_config_from_args,
     resolve_opponent_mode,
 )
-from cs2rl.train.envs import (
-    assert_eval_env_agreement,
-    assert_max_turn_speed_agreement,
-    assert_pin_pitch_agreement,
-    auto_vec_workers,
-    build_train_env_factory,
-    check_spawn_counts,
-    env_seed_base,
-    resolve_pin_pitch,
-)
+from cs2rl.train.envs import assert_eval_env_agreement, env_seed_base, resolve_pin_pitch
 from cs2rl.train.metrics import (
     ScheduledEval,
     _inject_tag_metrics,
@@ -72,7 +56,7 @@ from cs2rl.train.resume import (
     resolve_run_name,
     seed_everything,
 )
-from cs2rl.train.selfplay import SelfPlayManager, build_selfplay_manager, self_play_used_past_metric
+from cs2rl.train.selfplay import self_play_used_past_metric
 
 
 def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
@@ -102,7 +86,8 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
         silently never anneals. Handled here; ``restore_train_state`` zips the
         same two lists with strict=True, so a mismatch would also fail loudly
         on resume.
-      * Call AFTER the weight_decay=1e-4 line and BEFORE load_full_resume.
+      * Call BEFORE load_full_resume. (Its order against the weight_decay=1e-4
+        line does not matter: the new group's decay is set explicitly.)
         Resuming a PRE-branch checkpoint (whose optimizer state has one group)
         into the two-group optimizer raises in torch's own load_state_dict —
         loud, and accepted: every pre-branch run is complete (spec §2 T3).
@@ -269,711 +254,550 @@ class DeadRunDetector:
 # ── SECTION: PufferLib training ────────────────────────────────────────────
 
 
-def _close_on_exit(close: Callable[[], object], _exc_type: type[BaseException] | None,
-                   error: BaseException | None, _traceback: TracebackType | None) -> bool:
-    """Adapt a close callback to ExitStack without replacing an active failure.
+@dataclass(frozen=True)
+class _RunPlan:
+    """What `_prepare_run` resolved before any output is opened or env is built."""
+    config: dict                       # build_train_config's dict, built once
+    opponent_mode: str
+    resume_paths: dict | None          # resolve_resume_run's paths on --resume-run
 
-    ExitStack still unwinds every registered owner. Its default policy would
-    replace a training failure with a later close failure; keep the first error
-    instead and attach subsequent failures as traceback notes. On a successful
-    run the first cleanup failure propagates normally, including BaseException.
+
+@dataclass(frozen=True)
+class _RunOutputs:
+    """The run's sinks; train()'s outermost ExitStack closes them."""
+    run_id: str
+    metrics_path: Path
+    metrics_file: Any
+    wandb_run: Any
+
+
+@dataclass
+class _EpochLoop:
+    """The state the epoch loop reads and updates."""
+    args: Any
+    trainer: Any
+    outputs: _RunOutputs
+    shared_ts: Any
+    eval_hook: Any
+    dead_run_detector: DeadRunDetector
+    self_play_enabled: bool
+    resumed_from_step: int | None      # stamped on the first new row, then None
+    save_path: Path
+    last_save: float
+
+
+def _load_dotenv():
+    """Load <repo>/.env into os.environ, never overriding a set variable (WANDB_* for --wandb).
+
+    PITFALL: this file is <repo>/src/cs2rl/train/loop.py, so the repo root is
+    parents[3]. parents[2] is src/: a wrong index silently reads <repo>/src/.env
+    and a local --wandb run loses every WANDB_* setting.
     """
-    try:
-        close()
-    except BaseException as cleanup_error:
-        if error is None:
-            raise
-        error.add_note(f"Training cleanup also failed: {cleanup_error!r}")
-    return False
+    env_file = Path(__file__).parents[3] / ".env"
+    if env_file.exists():
+        for line in env_file.read_text().splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, value = line.split("=", 1)
+                os.environ.setdefault(key.strip(), value.strip())
 
 
-def train(args):
-    """Run PPO training via PufferLib 3.0."""
-    import pufferlib.vector
-    import torch
+def _resolve_resume_run(args) -> dict | None:
+    """R0-C (#134): --resume-run's checkpoint paths; None without the flag.
 
-    # Fix #2 (perf): disable torch.distributions argument validation globally.
-    # Most of our hot paths replaced torch.distributions with hand-rolled
-    # log_softmax+gather + analytic Normal already, but a few diagnostic /
-    # legacy paths (e.g. NaN-guard sanity prints, exploratory test paths) still
-    # construct distributions. validate_args=False removes the per-call
-    # constraint check overhead for those residual sites at zero risk —
-    # validation is purely a sanity check and any production code passes
-    # validated inputs by construction. Per the perf research subagent:
-    # PyTorch issue #11747 / #30968 confirmed Categorical's structural
-    # overhead is the logits.logsumexp allocation in __init__, NOT the
-    # validation; this toggle gives the residual ~few-percent gain on
-    # whatever still routes through torch.distributions.
-    torch.distributions.Distribution.set_default_validate_args(False)
+    Sets ``args.checkpoint_dir`` to the run dir, ``args.resume`` to its newest model
+    (the weights then go through resolve_resume_split like --resume's) and
+    ``args.run_id`` to the id saved with it, so resumed metrics rows share the id.
+    """
+    resume_run = getattr(args, "resume_run", None)
+    if not resume_run:
+        return None
+    if getattr(args, "resume", None):
+        raise SystemExit("[Resume] --resume and --resume-run are mutually exclusive")
+    run_dir = Path(resume_run).resolve()
+    # --checkpoint-dir has default=None in the CLI precisely so this check can tell
+    # "given" from "omitted"; _prepare_run resolves None to CHECKPOINTS_DIR afterwards.
+    if args.checkpoint_dir is not None and Path(args.checkpoint_dir).resolve() != run_dir:
+        raise SystemExit(f"[Resume] --checkpoint-dir {args.checkpoint_dir} disagrees with "
+                         f"--resume-run {run_dir}")
+    args.checkpoint_dir = str(run_dir)
+    paths = resolve_resume_run(run_dir, getattr(args, "run_id", None))
+    args.resume = str(paths["model_path"])
+    args.run_id = paths["run_id"]
+    return paths
 
-    # Load .env from repo root if present (sets WANDB_* vars picked up by wandb)
-    # This file is <repo>/src/cs2rl/train/loop.py, so the repo root is parents[3].
-    # PITFALL: parents[2] is src/. It was the repo root in the flat src/cs2rl/train.py,
-    # and moving this code one directory deeper without this index would silently make
-    # a local --wandb run read <repo>/src/.env and lose every WANDB_* setting.
-    _env_file = Path(__file__).parents[3] / ".env"
-    if _env_file.exists():
-        for _line in _env_file.read_text().splitlines():
-            _line = _line.strip()
-            if _line and not _line.startswith("#") and "=" in _line:
-                _k, _v = _line.split("=", 1)
-                os.environ.setdefault(_k.strip(), _v.strip())
 
-    device = args.device
+def _prepare_run(args) -> _RunPlan:
+    """Resolve and validate everything that needs no env, before any output is opened.
 
+    Every refusal here (a bad --seed, --opponent noop with self-play, a --resume-run
+    whose config.json disagrees) happens before W&B or metrics.jsonl exist and in
+    milliseconds rather than after the env spawns.
+
+    ORDER: pin_pitch is resolved (R0-E.2, #131) before the config is built, because
+    env_config_from_args bakes args.pin_pitch into config.json and into every env, and
+    so before the --resume-run config guard: the CLI default pin_pitch=None normalises
+    to the un-pinned flag while a pinned run's config.json holds 1, and resolving after
+    the guard refused every flag-less resume of a flat-map run (Task 12 ruling). The
+    CLI already resolved it above --dump-config; here it is a cache-safe cross-check
+    for programmatic callers, and it loads the real map when args.map_data is None
+    (the dust2 path). The config is built once, after --resume-run has set the run
+    dir, and the guard and the run share it.
+    """
     if getattr(args, "name", None):
         resolved_name = resolve_run_name(args.name)
         args.checkpoint_dir = str(CHECKPOINTS_DIR / resolved_name)
         print(f"[Train] Run name resolved to: {resolved_name}")
-
-    # ── R0-E.2 (#131): pin_pitch resolution ────────────────────────────────
-    # resolve_pin_pitch loads the REAL map when args.map_data is None (the
-    # `--dust2` CLI path) and decides from geometry; see pin_pitch_for_map for
-    # why the sentinel itself must never decide. MUST run (a) before
-    # build_train_env_factory (env_config_from_args bakes args.pin_pitch into
-    # the EnvConfig every worker env is built with) and (b) BEFORE the
-    # --resume-run config guard below: the CLI default is pin_pitch=None, which
-    # EnvConfig normalises to the un-pinned flag value, while a
-    # pinned run's config.json holds 1 — resolving after the guard refused
-    # every flag-less resume of a flat-map run (Task 12 ruling). The CLI
-    # already resolved it above --dump-config; here it is a cache-safe
-    # cross-check for programmatic callers.
     resolve_pin_pitch(args, verbose=False)
-    # R0-D: refuse an out-of-range --seed BEFORE W&B init / metrics.jsonl open
-    # (the real call is in _per_env_kwargs below).
+    # R0-D: refuses an out-of-range --seed.
     env_seed_base(args.seed)
-    # Rung 1a T3: same fail-early rationale for --opponent noop + self-play.
-    # main() already refused it above the --dump-config exit; repeated here so
-    # a programmatic train(args) cannot start a run whose statue team would be
-    # swapped out from under the participation vector at epoch 50.
-    _opponent_mode = resolve_opponent_mode(args)
-    assert_opponent_self_play_compatible(_opponent_mode, bool(getattr(args, "self_play", True)))
-
-    # ── R0-C (#134): --resume-run resolution (before run_label / metrics / config) ──
-    resume_run = getattr(args, "resume_run", None)
-    _resume_paths = None
-    if resume_run:
-        if getattr(args, "resume", None):
-            raise SystemExit("[Resume] --resume and --resume-run are mutually exclusive")
-        _run_dir = Path(resume_run).resolve()
-        # --checkpoint-dir has default=None in the CLI precisely so this check
-        # can tell "given" from "omitted"; None → CHECKPOINTS_DIR is resolved
-        # AFTER this block.
-        if args.checkpoint_dir is not None and Path(args.checkpoint_dir).resolve() != _run_dir:
-            raise SystemExit(f"[Resume] --checkpoint-dir {args.checkpoint_dir} disagrees with "
-                             f"--resume-run {_run_dir}")
-        args.checkpoint_dir = str(_run_dir)
-        _resume_paths = resolve_resume_run(_run_dir, getattr(args, "run_id", None))
-        args.resume = str(_resume_paths["model_path"])                 # weights go through resolve_resume_split
-        args.run_id = _resume_paths["run_id"]
-                                                                       # Config guard runs HERE, before the vecenv is built, so a knob
-                                                                       # mismatch fails in milliseconds instead of after 256 env spawns.
-                                                                       # build_train_config is pure in (args, batch dims), so this is the
-                                                                       # same dict train_config below is built from.
-        _, _g_bptt, _g_bs = compute_batch_dims(args.num_envs)
-        check_resume_config(_run_dir,
-                            build_train_config(args, batch_size=_g_bs, bptt_horizon=_g_bptt))
-    if args.checkpoint_dir is None:                                    # was the argparse default; now resolved here
+    # Rung 1a T3: the CLI refused this above --dump-config; repeated so a programmatic
+    # train(args) cannot start a run whose statue team self-play would swap out.
+    opponent_mode = resolve_opponent_mode(args)
+    assert_opponent_self_play_compatible(opponent_mode, bool(getattr(args, "self_play", True)))
+    resume_paths = _resolve_resume_run(args)
+    if args.checkpoint_dir is None:    # the CLI default
         args.checkpoint_dir = str(CHECKPOINTS_DIR)
+    _, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
+    config = build_train_config(args, batch_size=batch_size, bptt_horizon=bptt_horizon)
+    if resume_paths is not None:
+        check_resume_config(Path(args.checkpoint_dir), config)
+    return _RunPlan(config=config, opponent_mode=opponent_mode, resume_paths=resume_paths)
 
+
+def _open_run_outputs(args, cleanup: ExitStack) -> _RunOutputs:
+    """W&B (with --wandb) and metrics.jsonl, each registered on ``cleanup`` once acquired."""
     run_label = Path(args.checkpoint_dir).name
+    wandb_run = None
+    if getattr(args, "wandb", False):
+        import wandb
 
-    with ExitStack() as run_cleanup:
-        # ── W&B init ────────────────────────────────────────────────────────────
-        wandb_run = None
-        if getattr(args, "wandb", False):
-            import wandb
+        wandb_run = wandb.init(
+            project=getattr(args, "wandb_project", "cs2rl"),
+            entity=getattr(args, "wandb_entity", None) or None,
+            name=run_label,
+        )
 
-            wandb_run = wandb.init(
-                project=getattr(args, "wandb_project", "cs2rl"),
-                entity=getattr(args, "wandb_entity", None) or None,
-                name=run_label,
-            )
+        def finish_wandb(exc_type, error, traceback):
+            """Finalize once, using the failure the caller will actually receive."""
+            exit_code = 0 if error is None else 1
+            if isinstance(error, SystemExit):
+                exit_code = error.code if isinstance(error.code, int) else int(
+                    error.code is not None)
+            return _close_on_exit(partial(wandb_run.finish, exit_code=exit_code), exc_type, error,
+                                  traceback)
 
-            def finish_wandb(exc_type, error, traceback):
-                """Finalize once, using the failure the caller will actually receive."""
-                exit_code = 0 if error is None else 1
-                if isinstance(error, SystemExit):
-                    exit_code = error.code if isinstance(error.code, int) else int(
-                        error.code is not None)
-                return _close_on_exit(partial(wandb_run.finish, exit_code=exit_code), exc_type,
-                                      error, traceback)
+        cleanup.push(finish_wandb)
+        print(f"[Train] W&B run: {wandb_run.url}")
 
-            run_cleanup.push(finish_wandb)
-            print(f"[Train] W&B run: {wandb_run.url}")
+    metrics_path = Path(args.checkpoint_dir) / "metrics.jsonl"
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    metrics_file = metrics_path.open("a")
 
-        # ── JSONL metrics file ───────────────────────────────────────────────────
-        metrics_path = Path(args.checkpoint_dir) / "metrics.jsonl"
-        metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        _metrics_file = metrics_path.open("a")
+    def close_metrics():
+        """Close the buffered file before declaring metrics persisted."""
+        metrics_file.close()
+        print(f"[Train] Metrics saved to {metrics_path}")
 
-        def close_metrics():
-            """Close the buffered file before declaring metrics persisted."""
-            _metrics_file.close()
-            print(f"[Train] Metrics saved to {metrics_path}")
+    cleanup.push(partial(_close_on_exit, close_metrics))
+    # N2: the file is opened in APPEND mode, so runs into one checkpoint dir share it.
+    # Every row carries a per-process run id (label + launch timestamp; the label alone
+    # is shared by re-runs into the same dir). R0-C: --run-id, or the id --resume-run
+    # read back from the checkpoint, overrides the timestamped default so resumed rows
+    # share the id. Old rows lack the key.
+    run_id = getattr(args, "run_id", None) or f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
+    return _RunOutputs(run_id=run_id,
+                       metrics_path=metrics_path,
+                       metrics_file=metrics_file,
+                       wandb_run=wandb_run)
 
-        run_cleanup.push(partial(_close_on_exit, close_metrics))
-        # N2 (2026-07-06 adversarial review): the file is opened in APPEND mode,
-        # so back-to-back runs concatenate silently — 15 runs shared one file with
-        # no separator and every analysis had to re-segment by agent_steps resets.
-        # Stamp every row with a per-process run id (label + launch timestamp;
-        # the label alone is NOT unique because re-runs into the same checkpoint
-        # dir share it). Old rows lack the key — segment those the legacy way.
-        # R0-C: --run-id (or the id read back from trainer_state.pt on --resume-run)
-        # overrides the timestamped default so resumed rows share the id.
-        run_id = getattr(args, "run_id", None) or f"{run_label}-{time.strftime('%Y%m%d-%H%M%S')}"
 
-        # Shared team spirit value — all envs read it at episode start
-        shared_ts = mp.Value("f", 0.3)
+def _resume_policy_init(args, *, full_state: bool) -> PolicyInit:
+    """The policy's architecture, and the --resume / --resume-run weights converted to it.
 
-        _map_data = args.map_data
+    WHY here, before build_trainer (Batch 7, spec §3.3): the split bits must be known
+    when build_policy runs, so the checkpoint is read once, its keys decide the
+    architecture (omitted flags never narrow a split checkpoint), and the same dict
+    is loaded after construction. A missing checkpoint fails here, before any env.
 
-        # ── R0-D (#135): deterministic seeding ──────────────────────────────────
-        # pufferl.py has its seeding commented out. Seed BEFORE build_policy
-        # (weight init), before the vecenv (env seeds via env_seed_base below) and
-        # before any random.* consumer (SelfPlayManager draws from module-level
-        # random). This runs BEFORE load_full_resume, so on --resume-run the
-        # python/numpy/torch states saved in train_state.pt (_rng_state_dict)
-        # override this fresh seed — the same RNG set, one path. Env xorshift32
-        # state is NOT restored on resume (C side; see load_full_resume's WARN).
-        # Eval env seed 10_000_003 (Task 13) cannot collide with worker env seeds
-        # env_seed_base(--seed) + i for --seed<=4 (any num_envs) — see env_seed_base.
-        # CAVEAT: this makes CPU runs bit-exact; CUDA runs are seeded but NOT
-        # bit-exact (no torch.use_deterministic_algorithms / cudnn flags are set).
-        seed_everything(args.seed)
+    ORDER is load-bearing (spec 2026-08-15 §3.3): σ re-init on the LEGACY dict, then
+    the heads convert (it needs the bare aim_log_std), then the trunk convert.
+    gh#91: a BC warm-start checkpoint carries aim_log_std frozen at LOG_STD_INIT, and
+    without the re-init the KL early stop throttles the run. A full-state resume
+    (``full_state``) restores the exact pre-crash σ and is never widened.
+    """
+    heads, trunk, state_dict, resume_path = resolve_resume_split(
+        getattr(args, "resume", None),
+        heads_flag=bool(getattr(args, "tct_split_heads", False)),
+        trunk_flag=bool(getattr(args, "tct_split_trunk", False)))
+    if resume_path is None:
+        return PolicyInit(tct_split_heads=heads, tct_split_trunk=trunk)
+    if not full_state and reinit_frozen_aim_log_std(state_dict,
+                                                    cap=getattr(args, "aim_log_std_max", None)):
+        print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
+              f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
+    if heads and not state_dict_is_split(state_dict):
+        state_dict = convert_legacy_state_dict_to_split(state_dict)
+        print("[Train] Warm split: duplicated the legacy policy heads into per-team "
+              "T/CT copies (spec 2026-08-13 §3.3) — both teams start identical.")
+    if trunk and not state_dict_is_trunk_split(state_dict):
+        state_dict = convert_shared_trunk_to_split(state_dict)
+        print("[Train] Warm split: duplicated the shared encoder+LSTM into per-team "
+              "T/CT copies (spec 2026-08-15 §3.3) — both teams start identical.")
+    return PolicyInit(tct_split_heads=heads,
+                      tct_split_trunk=trunk,
+                      state_dict=state_dict,
+                      source=str(resume_path))
 
-        # ── Batch 3 (T5b): cont-action shared memory across the fork boundary ──
-        # PufferLib's Multiprocessing backend forks workers AFTER allocating its
-        # own shm dict, so any Python attribute set on the main vecenv after
-        # fork is invisible to workers. Mirror the pattern with our own
-        # RawArray('f', num_envs * N_AGENTS * AIM_DIM) allocated BEFORE
-        # pufferlib.vector.make runs. HybridAimVecEnv.send writes the policy's
-        # Δyaw sample into `_cont_action_view_main` every send(); each worker's Cs2Env receives a
-        # numpy view onto the same physical bytes via _attach_cont_action_view
-        # (called inside env_factory below). For the Serial backend the view is
-        # also attached, but the per-env step wrapper installed by HybridAimVecEnv
-        # takes precedence — see HybridAimVecEnv for the dual-path contract.
-        from multiprocessing import RawArray
 
-        # 10 (5 T + 5 CT) — N_AGENTS not exported via spec.action; use AGENT_IDS.
-        _agents_per_env = len(AGENT_IDS)
-        _per_env_floats = _agents_per_env * AIM_DIM
-        _cont_action_shm = RawArray("f", args.num_envs * _per_env_floats)
-        _cont_action_view_main = np.frombuffer(_cont_action_shm, dtype=np.float32).reshape(
-            args.num_envs * _agents_per_env, AIM_DIM)
+def _write_config_json(args, config: dict):
+    """Provenance dump: <checkpoint_dir>/config.json, sorted so two runs diff by HP only.
 
-        # ── F8: action-mask shared memory, the REVERSE direction (env→trainer) ──
-        # Same fork-inheritance pattern as the cont-action RawArray above, but the
-        # envs write (Cs2Env copies its C-computed masks into its slice at the end
-        # of every step/reset) and the trainer reads right after vecenv.recv().
-        # recv() is the synchronisation point: the worker finished its step before
-        # the batch is handed over, so the bytes always match the obs in hand.
-        _mask_shm = RawArray("b", args.num_envs * _agents_per_env * ACTION_MASK_DIM)
-        _mask_view_main = np.frombuffer(_mask_shm,
-                                        dtype=np.int8).reshape(args.num_envs * _agents_per_env,
-                                                               ACTION_MASK_DIM)
+    The fingerprint hash is taken at --dump-config time; this copy is for later
+    inspection, so a serialization failure is a warning, never a dead run.
+    """
+    try:
+        (Path(args.checkpoint_dir) / "config.json").write_text(
+            json.dumps(config, sort_keys=True, indent=2, default=str))
+    except Exception as e:
+        print(f"[Train] WARN: failed to write config.json: {e}")
 
-        # Reward-weight overrides (spec 2026-08-01) ride in as closure state, NOT
-        # per-env kwargs. NOTE: train_config is built AFTER the vecenv exists
-        # (below), which is why this reads args directly rather than the config
-        # dict. Keep this call — it is what the seam test pins.
-        env_factory = build_train_env_factory(args, shared_ts=shared_ts, map_data=_map_data)
 
-        # Per-env kwargs list — pufferlib.vector.make accepts a list of dicts
-        # (one per env). All args propagate verbatim through fork because
-        # they're stored on env_kwargs[i] BEFORE Process.start() (see
-        # .venv/lib/.../pufferlib/vector.py:333-346).
-        # R0-D (#135): the env seed rides here too — pufferlib.vector.make would
-        # silently drop a `seed=` kwarg (see build_env_factory's docstring).
-        _per_env_kwargs = [{
-            "_cont_shm": _cont_action_shm,
-            "_cont_idx": i,
-            "_mask_shm": _mask_shm,
-            "_seed": env_seed_base(args.seed) + i,
-        } for i in range(args.num_envs)]
+def _preseed_selfplay_pool(args, trainer, resume_path: Path):
+    """Copy the warm-start checkpoint into the run dir and put it in the self-play pool.
 
-        backend_name = args.vec_backend.lower()
-        if backend_name == "multiprocessing":
-            import psutil
+    The pool is read only inside evaluate(), so seeding after construction is the same
+    as before it. Not on --resume-run: there the pool comes back from train_state.pt.
+    """
+    import shutil
 
-            backend = pufferlib.vector.Multiprocessing
-            physical_cores = psutil.cpu_count(logical=False) or os.cpu_count() or 1
-            num_workers = args.vec_num_workers or auto_vec_workers(args.num_envs, physical_cores)
-            vec_kwargs = {
-                "num_workers": num_workers,
-                "batch_size": args.num_envs,
-                "zero_copy": True,
-                "overwork": args.vec_overwork,
-            }
-        elif backend_name == "serial":
-            backend = pufferlib.vector.Serial
-            num_workers = 1
-            vec_kwargs = {}
+    seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
+    shutil.copy2(resume_path, seed_path)
+    trainer._self_play_mgr._add_to_pool(seed_path)
+    print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
+
+
+def _configure_run_trainer(trainer, run_id: str, config: dict):
+    """What a CLI run sets on the built trainer: the run id, weight decay, the σ group.
+
+    ORDER: before load_full_resume, whose optimizer state has the σ group. The decay
+    line and the split commute: the σ group's weight_decay is set to 0 explicitly.
+    """
+    # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
+    # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
+    trainer.logger.run_id = run_id
+    trainer.optimizer.param_groups[0]["weight_decay"] = config["weight_decay"]
+    # Rung 1a T1: …but NOT on the aim σ. Decay adds wd·θ to the gradient and
+    # aim_log_std is always negative, so it would drift σ upward at exactly
+    # zero true gradient — faking the gate's learning signal and eating the
+    # init's clamp margin (see the helper's PITFALLS).
+    n_sigma = isolate_aim_log_std_param_group(trainer)
+    print(f"[Train] aim_log_std: {n_sigma} parameter(s) moved to a weight_decay=0 param group "
+          f"(fresh init {config['aim_log_std_init']:.4f}, "
+          f"cap {config['aim_log_std_max']:.4f})")
+
+
+def _print_opponent_setup(trainer, plan: _RunPlan, self_play_enabled: bool):
+    """The run log's statement of who plays whom (T4's pre-flight reads the noop line)."""
+    if not self_play_enabled:
+        # Mode-aware: "both teams use the current policy" is FALSE under --opponent
+        # noop, and the run log must not print two contradictory claims.
+        if plan.opponent_mode == "noop":
+            print("[Train] Self-play mixing disabled (--no-self-play): the hero team "
+                  "uses the current policy every epoch; the opponent team is a statue "
+                  "(--opponent noop), not the current policy.")
         else:
-            raise ValueError(f"Unsupported vec backend: {args.vec_backend}")
+            print("[Train] Self-play mixing disabled (--no-self-play): "
+                  "both teams use the current policy every epoch.")
+    if plan.opponent_mode == "noop":
+        # Rung 1a T3: which team is frozen, how many rows train, and on what horizon —
+        # the three things a short or mis-masked run would get wrong silently.
+        rows = trainer._participating_rows_np
+        print(f"[Train] Opponent mode 'noop': team "
+              f"{trainer._self_play_mgr.opponent_team.upper()} is a stationary statue; "
+              f"{int(rows.sum()):,} of {rows.size:,} agent rows "
+              f"participate (raw horizon {plan.config['total_timesteps']:,} rows = "
+              f"{plan.config['participating_timesteps']:,} hero steps).")
 
-        print(f"[Train] Creating {args.num_envs} vectorised envs "
-              f"(backend={backend_name}, workers={num_workers})...")
-        # pufferlib.vector.make quirk: if env_creator is a single callable AND
-        # env_kwargs is a per-env list, the broadcast logic at vector.py:672-684
-        # overwrites the per-env list. Pass env_creators as an explicit list of
-        # N copies of the same factory to make per-env kwargs survive. The
-        # env_args list is required to match length.
-        # Training closes before evaluation, then the final policy save. Separate
-        # stacks retain that order even though the eval environment is acquired last.
-        with ExitStack() as eval_cleanup, ExitStack() as train_cleanup:
-            vecenv = pufferlib.vector.make(
-                [env_factory] * args.num_envs,
-                env_args=[[] for _ in range(args.num_envs)],
-                env_kwargs=_per_env_kwargs,
-                num_envs=args.num_envs,
-                backend=backend,
-                **vec_kwargs,
-            )
-            train_cleanup.push(partial(_close_on_exit, vecenv.close))
-            # R0-H: spawn lists within StaticData capacity, and 4 + 4 on the arena.
-            # `map` is absent on harness/legacy args objects ⇒ generic bounds only.
-            check_spawn_counts(vecenv, getattr(args, "map", None) or "")
 
-            # Batch 7 (spec §3.3): sniff the resume checkpoint BEFORE build_policy —
-            # the architecture decision has to exist at construction time, and neither
-            # train_config (built below) nor the checkpoint read (further below) is
-            # available yet. The sniffed dict is reused at the load site.
-            # getattr on the flag keeps harness/older args objects working.
-            resume_path = getattr(args, "resume", None)
-            # Both bits are resolved here so a flag-less crash-resume never narrows
-            # either axis, then passed into build_policy (omitted flags never drop a
-            # split checkpoint back to the shared vintage).
-            tct_split_heads, tct_split_trunk, _resume_state_dict, resume_path = resolve_resume_split(
-                resume_path,
-                heads_flag=bool(getattr(args, "tct_split_heads", False)),
-                trunk_flag=bool(getattr(args, "tct_split_trunk", False)))
-
-            print(f"[Train] Building policy on device={device} "
-                  f"(tct_split_heads={tct_split_heads}, tct_split_trunk={tct_split_trunk})...")
-            policy = build_policy(vecenv,
-                                  device,
-                                  tct_split_heads=tct_split_heads,
-                                  tct_split_trunk=tct_split_trunk,
-                                  aim_log_std_max=getattr(args, "aim_log_std_max", None),
-                                  pin_pitch=bool(args.pin_pitch))
-
-            agents_per_env, bptt_horizon, batch_size = compute_batch_dims(args.num_envs)
-            # batch_size = 128 * 10 * 64 = 81920 → 81920 / 8192 = 10 minibatches per epoch
-
-            train_config = build_train_config(args,
-                                              batch_size=batch_size,
-                                              bptt_horizon=bptt_horizon)
-
-            # Provenance dump — the fingerprint hash is captured at --dump-config time,
-            # this write is just for later inspection. Wrapped safely so a serialization
-            # hiccup never kills training. sort_keys=True makes the file byte-stable so
-            # diffing two runs' config.json shows only real HP changes.
+def _last_metrics_step(metrics_path: Path, run_id: str) -> int | None:
+    """The ``step`` of this run id's last metrics.jsonl row, skipping unparsable lines."""
+    last = None
+    if metrics_path.exists():
+        for line in metrics_path.read_text().splitlines():
             try:
-                (Path(args.checkpoint_dir) / "config.json").write_text(
-                    json.dumps(train_config, sort_keys=True, indent=2, default=str))
-            except Exception as _e:
-                print(f"[Train] WARN: failed to write config.json: {_e}")
+                row = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if row.get("run_id") == run_id:
+                last = row.get("step", last)
+    return last
 
-            # ── Resume from checkpoint ───────────────────────────────────────────────
-            # resume_path / _resume_state_dict come from the pre-build_policy sniff
-            # above; nothing is re-read from disk here.
-            if resume_path:
-                state_dict = _resume_state_dict
-                # gh#91: BC warm-start checkpoints carry aim_log_std frozen at
-                # LOG_STD_INIT — widen to AIM_LOG_STD_RESUME_INIT before loading or
-                # the KL early-stop throttles the whole run (see the helper's doc).
-                # ORDER is load-bearing (spec 2026-08-15 §3.3): σ re-init on the
-                # LEGACY dict, then heads convert (needs bare aim_log_std), then
-                # trunk convert. Duplicating heads first would hide the σ key.
-                # R0-C: a full-state resume restores the exact pre-crash σ — never widen.
-                if not resume_run and reinit_frozen_aim_log_std(
-                        state_dict, cap=getattr(args, "aim_log_std_max", None)):
-                    print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "
-                          f"re-initialized to log(0.3) ≈ {AIM_LOG_STD_RESUME_INIT:.3f} (gh#91)")
-                if tct_split_heads and not state_dict_is_split(state_dict):
-                    state_dict = convert_legacy_state_dict_to_split(state_dict)
-                    print("[Train] Warm split: duplicated the legacy policy heads into per-team "
-                          "T/CT copies (spec 2026-08-13 §3.3) — both teams start identical.")
-                if tct_split_trunk and not state_dict_is_trunk_split(state_dict):
-                    state_dict = convert_shared_trunk_to_split(state_dict)
-                    print("[Train] Warm split: duplicated the shared encoder+LSTM into per-team "
-                          "T/CT copies (spec 2026-08-15 §3.3) — both teams start identical.")
-                load_state_dict_arch_checked(policy, state_dict, source=str(resume_path))
-                print(f"[Train] Resumed from checkpoint: {resume_path}")
-            # ────────────────────────────────────────────────────────────────────────
 
-            if train_config.get("warmstart_entropy") and not resume_path:
-                print("[Train] WARN: --warmstart-entropy without --resume — the grace window "
-                      "will suppress entropy pressure on a from-scratch policy (legal, but "
-                      "probably not what you want).")
+def _resume_full_state(trainer, plan: _RunPlan, outputs: _RunOutputs) -> int:
+    """R0-C: restore the trainer from --resume-run and bound it by the last metrics row.
 
-            # Rung 0 §2.2 + Rung 1a T3: static per-run participation vector, env-row
-            # major (10 rows per env: T at 0-4, CT at 5-9). Under --opponent self it
-            # selects slots 0..n-1 of BOTH teams — the exact slots the C env spawns
-            # (cs2_env.py, n_active_per_team); under --opponent noop, the hero team's
-            # slots only. THE SAME helper backs `tests._helpers.trainer_harness._harness_parts`,
-            # so a harness test can never be green against a formula production does not run.
-            # The assert is the agreement check: the vector is derived from args while
-            # the envs were built from build_train_env_factory, and a disagreement
-            # would mask the wrong rows silently rather than crash.
-            _n_active = env_config_from_args(args).n_active_per_team
-            _participating_rows = build_participating_rows(
-                args.num_envs,
-                _n_active,
-                opponent_mode=_opponent_mode,
-                hero_team=SelfPlayManager.initial_hero_team())
-            assert vecenv.driver_env.n_active_per_team == _n_active, "driver env / args disagree"
+    Returns the resumed global step. The bound (check_resume_metrics_bound) is
+    checkpoint_interval epochs wide on both sides, in participating units. Rung 1a T3:
+    it assumes BOTH teams participate, so under --opponent noop it is 2× too wide —
+    only ever too permissive, never a false alarm; halve it before a noop run resumes.
+    """
+    info = load_full_resume(trainer, trainer._self_play_mgr, plan.resume_paths)
+    resumed = info["resumed_from_step"]
+    config = plan.config
+    bound = config["batch_size"] * config["n_active_per_team"] // TEAM_SIZE
+    last = _last_metrics_step(outputs.metrics_path, outputs.run_id)
+    if last is not None:
+        check_resume_metrics_bound(resumed, last, config["checkpoint_interval"], bound)
+        print(f"[Resume] global_step {resumed:,} (last metrics row {last:,}, "
+              f"gap {resumed - last:+,}) epoch {trainer.epoch}")
+    return resumed
 
-            # ── Self-play setup ──────────────────────────────────────────────────────
-            # F11 (2026-07-06 adversarial review): the selfplay replacement evaluate()
-            # is the ONLY rollout path that understands the hybrid 4-tuple policy
-            # contract — stock PuffeRL.evaluate crashes on the forward_eval tuple
-            # unpack at its first call, so --no-self-play was broken in production.
-            # The patch is now applied UNCONDITIONALLY (mirroring
-            # tests._helpers.trainer_harness._build_trainer_for_test, which adopted this shape at
-            # T5); --no-self-play means "no past-policy
-            # mixing": p_past=0.0 with an empty, never-seeded pool ⇒ should_use_past()
-            # is always False, and the pool save / team-switch bookkeeping in the
-            # main loop is skipped via self_play_enabled below.
-            self_play_enabled = bool(getattr(args, "self_play", True))
-            # W3 (#154): the pool constants (15 / 25 / 0.6 / 50) and the
-            # `0.3 if <on> else 0.0` p_past rule now live in
-            # cs2rl.train.selfplay.build_selfplay_manager, which is also what the test
-            # harness calls (once) — its two constructions used to spell the same thing out twice more.
-            # `self_play_enabled` is passed as the FLAG, not a p_past value, so no caller
-            # can set a different mixing probability at one site than another.
-            self_play_mgr = build_selfplay_manager(
-                self_play_enabled=self_play_enabled,
-                aim_log_std_max=getattr(args, "aim_log_std_max", None),
-                pin_pitch=args.pin_pitch,
-                opponent_mode=_opponent_mode,
-            )
-            # R0-C: on --resume-run the pool comes back from train_state.pt — no re-seed.
-            if self_play_enabled and resume_path and resume_path.exists() and not resume_run:
-                import shutil as _shutil
 
-                seed_path = Path(args.checkpoint_dir) / "sp_seed.pt"
-                _shutil.copy2(resume_path, seed_path)
-                self_play_mgr._add_to_pool(seed_path)
-                print(f"[SelfPlay] Pool pre-seeded with resume checkpoint ({seed_path.name})")
+def _build_eval_hook(args, trainer, cleanup: ExitStack):
+    """R0-I (Task 13): the fixed-baseline eval hook for --eval-interval N > 0, else None.
 
-            # gh#168 W1 (ADR 0002): the trainer is a SUBCLASS, not a PuffeRL mutated in
-            # place. Everything the four patch functions read at patch time —
-            # participating_rows, the shm views, the (possibly pre-seeded) self-play
-            # manager — is built ABOVE this line, exactly as before; everything that
-            # used to be set on the instance after construction (run_id, weight_decay,
-            # the aim-σ param group, the GC pins) stays below it, because no patch
-            # reads it at patch time (spec §W1 table; both byte gates pin this order).
-            # Function-local import ON PURPOSE: cs2rl.train.trainer subclasses PuffeRL and so
-            # imports torch at module scope, and cs2rl.train.__main__ imports THIS module at its
-            # module level: a module-scope import here would put torch on the CLI's module scope, which
-            # must stay torch-free (tests/train/test_w1_modules.py::test_cli_module_scope_stays_light).
-            from cs2rl.train.trainer import Cs2PuffeRL, HybridAimVecEnv
-            vecenv = HybridAimVecEnv(vecenv, _cont_action_view_main)
-            # Transfer only after construction returns; a failed constructor still
-            # leaves the preceding owner responsible for the acquired backend.
-            train_cleanup.pop_all()
-            train_cleanup.push(partial(_close_on_exit, vecenv.close))
-            trainer = Cs2PuffeRL(train_config,
-                                 vecenv,
-                                 policy,
-                                 cont_action_view_main=_cont_action_view_main,
-                                 mask_view_main=_mask_view_main,
-                                 participating_rows=_participating_rows,
-                                 self_play_mgr=self_play_mgr)
-            train_cleanup.pop_all()
-            # Rejected or partial resumes must release resources without letting
-            # PuffeRL.close overwrite the input checkpoint with incomplete state.
+    The eval env is a parent-process Serial env with the run's EnvConfig, from
+    env_config_from_args, the resolver the training envs' factory also reads, so a
+    --laser-range / --round-time-ticks run evaluates on what it trains on;
+    build_eval_env owns its seed 10_000_003, auto_reset=False and raw rewards.
+    ``cleanup`` owns the env from construction, so a failed agreement check or
+    evaluator still closes it, and then the hook, which closes the env.
+    """
+    interval = int(getattr(args, "eval_interval", 0) or 0)
+    if interval <= 0:
+        return None
+    from cs2rl.eval.baselines import BaselineEvaluator
+
+    eval_env = build_eval_env(map_data=args.map_data, config=env_config_from_args(args))
+    cleanup.push(partial(_close_on_exit, eval_env.close))
+    assert_eval_env_agreement(eval_env, trainer.vecenv.driver_env)
+    hook = ScheduledEval(BaselineEvaluator(eval_env, episodes=40, seed=args.seed), interval,
+                         trainer.uncompiled_policy, args.device)
+    cleanup.pop_all()
+    cleanup.push(partial(_close_on_exit, hook.close))
+    print(f"[Eval] fixed-baseline eval every {interval} epochs "
+          f"(40 episodes vs random + oracle, round_time={eval_env.round_time})")
+    return hook
+
+
+def _dead_run_detector(trainer) -> DeadRunDetector:
+    """gh#93: the zero-kills rule is armed only when the env rewards kills."""
+    kills_expected = _kill_reward_is_active(trainer.vecenv)
+    if not kills_expected:
+        print("[Train] Kill reward is 0 — dead-run zero-kills alert disabled (gh#93).")
+    return DeadRunDetector(kills_expected=kills_expected)
+
+
+def _save_policy(trainer, path: Path):
+    """dust2_policy.pt: the policy weights alone, written atomically."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    _atomic_save_state_dict(trainer.uncompiled_policy.state_dict(), path)
+
+
+def _abort_dead_run(run: _EpochLoop):
+    """F14: save an autopsy checkpoint and exit 3, so wrappers see the failure.
+
+    The detector's verdict used to be discarded: the 30M degenerate run printed its
+    banner and kept training for ~150 epochs. Opt out with --no-dead-run-abort.
+    """
+    import torch
+
+    trainer = run.trainer
+    autopsy_path = Path(run.args.checkpoint_dir) / "dust2_policy_dead.pt"
+    autopsy_path.parent.mkdir(parents=True, exist_ok=True)
+    torch.save(trainer.uncompiled_policy.state_dict(), autopsy_path)
+    run.outputs.metrics_file.flush()
+    print(f"[Train] DEAD RUN — aborting at step {trainer.global_step:,}. "
+          f"Autopsy checkpoint: {autopsy_path}")
+    raise SystemExit(3)
+
+
+def _log_selfplay(run: _EpochLoop, logs: dict):
+    """Self-play bookkeeping: team switch, pool save, and the self_play/* keys.
+
+    F11: called only with self-play on (the FLAG; the manager always exists, because
+    evaluate() needs it), so --no-self-play makes no pool saves or team switches.
+    """
+    trainer = run.trainer
+    mgr = trainer._self_play_mgr
+    mgr.maybe_switch_teams(trainer.epoch)
+    # R0-I: elimination-only — winner_ct counts timeouts, which would pool-save a
+    # passive CT as "dominant".
+    win_rate_t, win_rate_ct = elimination_only_win_rates(logs)
+    mgr.maybe_save(trainer.uncompiled_policy, Path(run.args.checkpoint_dir), trainer.epoch,
+                   win_rate_t, win_rate_ct)
+    logs["self_play/pool_size"] = float(len(mgr.pool))
+    # Observe-only (spec 2026-08-15 §3.4): a 0.0/1.0 float on the OUTER logs dict, set
+    # by evaluate(), not train(). self_play/opponent_id is a string the persist filter
+    # would drop.
+    logs["self_play/used_past"] = self_play_used_past_metric(trainer)
+    logs["self_play/opponent_team"] = float(mgr.opponent_team == "ct") # 1.0 = CT opponent
+
+
+def _persist_row(run: _EpochLoop, logs: dict, ts_val: float):
+    """Append one metrics.jsonl row (numeric logs only) and send it to W&B."""
+    trainer = run.trainer
+    log_entry = {
+        "run_id": run.outputs.run_id,                                  # N2: segment runs by this, not by agent_steps resets
+        "step": trainer.global_step,
+        "epoch": trainer.epoch,
+        "team_spirit": ts_val,
+        **{
+            k: v
+            for k, v in logs.items() if isinstance(v, (int, float))
+        },
+    }
+    if run.resumed_from_step is not None:                              # R0-C: the analysis seam marker
+        log_entry["resumed_from_step"] = run.resumed_from_step
+        run.resumed_from_step = None
+    run.outputs.metrics_file.write(json.dumps(log_entry) + "\n")
+    run.outputs.metrics_file.flush()
+    if run.outputs.wandb_run is not None:
+        run.outputs.wandb_run.log(log_entry, step=trainer.global_step)
+
+
+def _log_epoch(run: _EpochLoop, logs: dict, ts_val: float):
+    """Enrich one epoch's logs dict, check it for a dead run, and persist it.
+
+    ORDER: the dead-run check reads the game metrics, so they are added first; the
+    TAG injection comes after the check, because TAG cells carry deliberate NaNs
+    (see _inject_tag_metrics).
+    """
+    trainer, policy = run.trainer, run.trainer.uncompiled_policy
+    logs.update(compute_game_metrics(logs))
+    # NaN/Inf raises inside check(); a True verdict aborts unless --no-dead-run-abort.
+    if (run.dead_run_detector.check(trainer.global_step, logs)
+            and getattr(run.args, "dead_run_abort", True)):
+        _abort_dead_run(run)
+    # Network health is too expensive for every epoch.
+    if trainer.epoch % 5 == 0:
+        logs.update(compute_network_health(policy, run.args.device))
+    if run.self_play_enabled:
+        _log_selfplay(run, logs)
+    # Batch 3.5 (#24): per-axis aim log_std, the CLAMPED values the policy used (T7
+    # gate 2 reads aim_log_std_pitch; format_train_status keeps it greppable). The
+    # helper branches on architecture: a split policy has no `aim_log_std`.
+    log_aim_log_std(policy, logs)
+    # Batch 7 (spec §3.4) and its trunk twin (spec 2026-08-15 §3.4): the analyzer's
+    # split labels, derived from the POLICY OBJECT, never from config.json (which a
+    # flag-less crash-resume of a split run rewrites as false). Written on EVERY row,
+    # not behind --tag-diagnostic / --tag-every: an unlabeled row reads as a legacy run.
+    logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
+    logs["split/trunk_active"] = float(hasattr(policy, "encoder_t"))
+    logs.update(compute_head_divergence(policy))
+    logs.update(compute_trunk_divergence(policy))
+    _inject_tag_metrics(trainer, logs)
+    _persist_row(run, logs, ts_val)
+
+
+def _run_epochs(run: _EpochLoop):
+    """evaluate() and train() until the epoch budget is spent; log, evaluate and save."""
+    trainer = run.trainer
+    while trainer.epoch < trainer.total_epochs:
+        # TAG: drop any un-injected measurement.
+        trainer._tag_metrics = None
+        t0 = time.perf_counter()
+        trainer.evaluate()
+        trainer._timing["collect_ms"] = (time.perf_counter() - t0) * 1000.0
+        # Rung 0 §2.2: the participating buffer is zero-initialised, so all-False means
+        # evaluate() never ran its scatter and every masked reduction would divide by
+        # the clamp floor and train on nothing.
+        assert trainer.participating.any(), "participating buffer never written this epoch"
+        t0 = time.perf_counter()
+        logs = trainer.train()
+        trainer._timing["update_ms"] = (time.perf_counter() - t0) * 1000.0
+        # Before the eval hook, which is handed this dict with the timing keys in it.
+        if isinstance(logs, dict):
+            logs["timing/collect_ms"] = trainer._timing["collect_ms"]
+            logs["timing/update_ms"] = trainer._timing["update_ms"]
+        # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps.
+        ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
+        run.shared_ts.value = ts_val
+        # R0-I: OUTSIDE the isinstance(logs, dict) guard on purpose — see ScheduledEval
+        # (the 0.25 s log throttle must not skip an eval epoch).
+        if run.eval_hook is not None:
+            run.eval_hook.after_train(trainer, logs)
+        if isinstance(logs, dict):
+            _log_epoch(run, logs, ts_val)
+        if time.time() - run.last_save > run.args.save_every_sec:
+            _save_policy(trainer, run.save_path)
+            run.last_save = time.time()
+            print(f"Saved checkpoint to {run.save_path}")
+        if isinstance(logs, dict):
+            if trainer.epoch % 10 == 0:
+                print(format_train_status(trainer.epoch, ts_val, logs))
+            print(f"[Timing] collect={trainer._timing['collect_ms']:.0f}ms  "
+                  f"update={trainer._timing['update_ms']:.0f}ms  "
+                  f"SPS={logs.get('SPS', 0):.0f}")
+
+
+def train(args):
+    """Run PPO training via PufferLib 3.0 (`python -m cs2rl.train --train`).
+
+    WHAT: resolves the run (`_prepare_run`), opens its outputs, builds the trainer
+    with `cs2rl.train.compose.build_trainer`, sets what only a CLI run has (run id,
+    weight decay, aim-σ group, full-state resume, eval hook, dead-run detector), runs
+    the epochs and saves dust2_policy.pt.
+
+    OWNERSHIP: run_cleanup owns W&B and metrics.jsonl for the whole run.
+    train_cleanup owns the trainer: `close_resources` until every setup and resume
+    check has passed, then `close`, which also writes PufferLib's checkpoint, so a
+    refused or partial resume never overwrites the checkpoint it resumed from.
+    eval_cleanup owns the eval env, then the eval hook. Training closes before
+    evaluation, then the final policy save runs, then the outputs close.
+    """
+    import torch
+
+    # The few paths that still build torch.distributions objects skip the per-call
+    # argument validation; their inputs are valid by construction.
+    torch.distributions.Distribution.set_default_validate_args(False)
+    _load_dotenv()
+    plan = _prepare_run(args)
+    full_state = plan.resume_paths is not None
+    with ExitStack() as run_cleanup:
+        outputs = _open_run_outputs(args, run_cleanup)
+        # Team spirit; every env reads it at episode start.
+        shared_ts = mp.Value("f", 0.3)
+        # R0-D (#135): pufferl.py has its seeding commented out. Seed before the policy
+        # and the vecenv are built (weight init; env seeds come from env_seed_base) and
+        # before any random.* consumer. On --resume-run, load_full_resume then restores
+        # the saved python/numpy/torch states over this seed; the env xorshift32 state
+        # is not restored (see its WARN). CPU runs are bit-exact; CUDA runs are seeded
+        # but not bit-exact (no deterministic-algorithm flags are set).
+        seed_everything(args.seed)
+        policy_init = _resume_policy_init(args, full_state=full_state)
+        if plan.config.get("warmstart_entropy") and policy_init.state_dict is None:
+            print("[Train] WARN: --warmstart-entropy without --resume — the grace window "
+                  "will suppress entropy pressure on a from-scratch policy (legal, but "
+                  "probably not what you want).")
+        with ExitStack() as eval_cleanup, ExitStack() as train_cleanup:
+            trainer = build_trainer(args, plan.config, shared_ts=shared_ts, policy_init=policy_init)
             train_cleanup.push(partial(_close_on_exit, trainer.close_resources))
-            # R0-C: PuffeRL's NoLogger invents a timestamp run_id; pin ours so
-            # <data_dir>/<run_id>/ matches the metrics rows and --resume-run can find it.
-            trainer.logger.run_id = run_id
-            trainer.optimizer.param_groups[0]["weight_decay"] = 1e-4
-            # Rung 1a T1: …but NOT on the aim σ. Decay adds wd·θ to the gradient and
-            # aim_log_std is always negative, so it would drift σ upward at exactly
-            # zero true gradient — faking the gate's learning signal and eating the
-            # init's clamp margin. Must run after the line above (it clones group 0's
-            # hypers) and before load_full_resume (see the helper's PITFALLS).
-            _n_sigma = isolate_aim_log_std_param_group(trainer)
-            print(
-                f"[Train] aim_log_std: {_n_sigma} parameter(s) moved to a weight_decay=0 param group "
-                f"(fresh init {train_config['aim_log_std_init']:.4f}, "
-                f"cap {train_config['aim_log_std_max']:.4f})")
-            # The constructor allocates hybrid rollout buffers before the first
-            # evaluate()/train() call; the vecenv wrapper was installed above.
-            # Pin the shm + view on the trainer so neither is GC'd mid-run. Without
-            # holding _cont_action_shm here, Python could free the RawArray once
-            # this function returns (Python doesn't know workers/numpy views are
-            # using it via the OS-level mapping).
-            trainer._cont_action_shm = _cont_action_shm
-            trainer._action_mask_shm = _mask_shm       # F8: same GC-pinning rationale
-
-            # R0-E.2: env flag ⇔ policy mask, or stop before the first rollout.
-            assert_pin_pitch_agreement(vecenv, policy)
-            # R0-G: env aim clamp ⇔ policy tanh scale (a resumed checkpoint may carry
-            # a different buffer than the env it is now paired with).
-            assert_max_turn_speed_agreement(vecenv, policy)
-            if not self_play_enabled:
-                # Mode-aware on purpose: "both teams use the current policy" is FALSE
-                # under --opponent noop (the statue team is driven by the evaluate()
-                # override, not by the policy), and it printed one line above the noop
-                # provenance line that T4's pre-flight reads — two adjacent, mutually
-                # contradictory claims about the same run in the same log.
-                if _opponent_mode == "noop":
-                    print("[Train] Self-play mixing disabled (--no-self-play): the hero team "
-                          "uses the current policy every epoch; the opponent team is a statue "
-                          "(--opponent noop), not the current policy.")
-                else:
-                    print("[Train] Self-play mixing disabled (--no-self-play): "
-                          "both teams use the current policy every epoch.")
-            if _opponent_mode == "noop":
-                # Rung 1a T3: the run log is what T4's pre-flight reads, so state which
-                # team is frozen, how many rows actually train, and on what horizon —
-                # the three things a short/mis-masked run would get wrong silently.
-                print(
-                    f"[Train] Opponent mode 'noop': team "
-                    f"{self_play_mgr.opponent_team.upper()} is a stationary statue; "
-                    f"{int(_participating_rows.sum()):,} of {_participating_rows.size:,} agent rows "
-                    f"participate (raw horizon {train_config['total_timesteps']:,} rows = "
-                    f"{train_config['participating_timesteps']:,} hero steps).")
-            _resumed_from_step = None
-            if resume_run:
-                _info = load_full_resume(trainer, self_play_mgr, _resume_paths)
-                _resumed_from_step = _info["resumed_from_step"]
-                # Spec §R0-C bound vs the last metrics row (participating units); see
-                # check_resume_metrics_bound for why both sides are checkpoint_interval
-                # epochs wide.
-                # Rung 1a T3 (spec, "Rung 1b note"): this bound assumes BOTH teams
-                # participate, so under --opponent noop it is 2× too WIDE — i.e. only
-                # ever too permissive, never a false alarm. Harmless for T4 (which does
-                # not resume); halve it here before Rung 1b resumes a noop run.
-                _B = batch_size * train_config["n_active_per_team"] // TEAM_SIZE
-                _last = None
-                if metrics_path.exists():
-                    for _line in metrics_path.read_text().splitlines():
-                        try:
-                            _row = json.loads(_line)
-                        except json.JSONDecodeError:
-                            continue
-                        if _row.get("run_id") == run_id:
-                            _last = _row.get("step", _last)
-                if _last is not None:
-                    check_resume_metrics_bound(_resumed_from_step, _last,
-                                               train_config["checkpoint_interval"], _B)
-                    print(
-                        f"[Resume] global_step {_resumed_from_step:,} (last metrics row {_last:,}, "
-                        f"gap {_resumed_from_step - _last:+,}) epoch {trainer.epoch}")
-            # ────────────────────────────────────────────────────────────────────────
-
-            # ── R0-I (Task 13): fixed-baseline eval env — parent-process, serial, the
-            # SAME config as the workers: it comes from env_config_from_args, the one
-            # resolver build_train_env_factory also uses, so a --laser-range /
-            # --round-time-ticks run evaluates on what it trains on. Seed 10_000_003:
-            # worker env seeds are env_seed_base(--seed) + i, so the only collision is
-            # --seed 100 with >= 4 envs (env 3) — see env_seed_base. team_spirit=None →
-            # raw rewards (eval never feeds training).
-            _eval_hook = None
-            _eval_interval = int(getattr(args, "eval_interval", 0) or 0)
-            if _eval_interval > 0:
-                from cs2rl.eval.baselines import BaselineEvaluator
-                # W3 (#154), retyped by #165 PR B2: role eval. `team_spirit=None`, the
-                # 10_000_003 seed, the load-bearing `auto_reset=False` AND the
-                # raw-reward rule all live in env.factory.build_eval_env; this site passes
-                # only what comes from THIS run's args, which is now one EnvConfig from
-                # the same resolver the workers' factory reads. Requiring that config
-                # (the builder has no default) is what stops a caller handing the eval
-                # env a bare config while the driver env has the run's knobs — a
-                # disagreement assert_eval_env_agreement right below would then have
-                # something to catch.
-                _eval_env = build_eval_env(map_data=_map_data, config=env_config_from_args(args))
-                eval_cleanup.push(partial(_close_on_exit, _eval_env.close))
-                assert_eval_env_agreement(_eval_env, trainer.vecenv.driver_env)
-                _eval_hook = ScheduledEval(
-                    BaselineEvaluator(_eval_env, episodes=40, seed=args.seed), _eval_interval,
-                    policy, device)
-                eval_cleanup.pop_all()
-                eval_cleanup.push(partial(_close_on_exit, _eval_hook.close))
-                print(f"[Eval] fixed-baseline eval every {_eval_interval} epochs "
-                      f"(40 episodes vs random + oracle, round_time={_eval_env.round_time})")
-
-            save_path = Path(args.checkpoint_dir) / "dust2_policy.pt"
-            last_save = time.time()
-
-            # gh#93: arm the zero-kills rule only when the env actually rewards kills.
-            _kills_expected = _kill_reward_is_active(trainer.vecenv)
-            if not _kills_expected:
-                print("[Train] Kill reward is 0 — dead-run zero-kills alert disabled (gh#93).")
-            dead_run_detector = DeadRunDetector(kills_expected=_kills_expected)
-
+            # After the build, so a run whose envs, policy or trainer fail to build never
+            # writes config.json. --resume-run's guard read the old one in _prepare_run.
+            _write_config_json(args, plan.config)
+            self_play_enabled = bool(getattr(args, "self_play", True))
+            if self_play_enabled and policy_init.source is not None and not full_state:
+                _preseed_selfplay_pool(args, trainer, Path(policy_init.source))
+            _configure_run_trainer(trainer, outputs.run_id, plan.config)
+            _print_opponent_setup(trainer, plan, self_play_enabled)
+            resumed_from_step = _resume_full_state(trainer, plan, outputs) if full_state else None
+            eval_hook = _build_eval_hook(args, trainer, eval_cleanup)
+            run = _EpochLoop(args=args,
+                             trainer=trainer,
+                             outputs=outputs,
+                             shared_ts=shared_ts,
+                             eval_hook=eval_hook,
+                             dead_run_detector=_dead_run_detector(trainer),
+                             self_play_enabled=self_play_enabled,
+                             resumed_from_step=resumed_from_step,
+                             save_path=Path(args.checkpoint_dir) / "dust2_policy.pt",
+                             last_save=time.time())
             print(f"[Train] Starting PufferLib PPO for {args.timesteps:,} env steps...")
-            # All setup and resume checks succeeded. Normal completion and
-            # training/dead-run failures retain PuffeRL's checkpoint-on-close.
             train_cleanup.pop_all()
             train_cleanup.push(partial(_close_on_exit, trainer.close))
-            while trainer.epoch < trainer.total_epochs:
-                trainer._tag_metrics = None            # TAG: drop any un-injected measurement
-                t0 = time.perf_counter()
-                trainer.evaluate()
-                trainer._timing["collect_ms"] = (time.perf_counter() - t0) * 1000.0
-
-                # Rung 0 §2.2: the participating buffer is zero-initialised, so an
-                # all-False buffer means evaluate() never ran its scatter — every
-                # masked reduction below would then divide by the clamp floor and
-                # train on nothing. Fail loudly instead.
-                assert trainer.participating.any(), "participating buffer never written this epoch"
-                t0 = time.perf_counter()
-                logs = trainer.train()
-                trainer._timing["update_ms"] = (time.perf_counter() - t0) * 1000.0
-                # Injected HERE, not in the isinstance(logs, dict) block further down:
-                # _timed_train used to inject before returning, so _eval_hook.after_train
-                # already sees these keys. Folding this into the later block would change
-                # what the hook is handed.
-                if isinstance(logs, dict):
-                    logs["timing/collect_ms"] = trainer._timing["collect_ms"]
-                    logs["timing/update_ms"] = trainer._timing["update_ms"]
-
-                # Team spirit annealing: 0.3→0.7 over 5M participating-agent steps
-                ts_val = min(0.7, 0.3 + trainer.global_step / 5_000_000)
-                shared_ts.value = ts_val
-
-                # R0-I: OUTSIDE the isinstance(logs, dict) guard on purpose — see
-                # ScheduledEval (the 0.25 s log throttle must not skip an eval epoch).
-                if _eval_hook is not None:
-                    _eval_hook.after_train(trainer, logs)
-
-                if isinstance(logs, dict):
-                    game_metrics = compute_game_metrics(logs)
-                    logs.update(game_metrics)
-                    # F14 (2026-07-06 adversarial review): the detector's return was
-                    # previously discarded — the 30M degenerate run printed its banner
-                    # and kept burning compute for another ~150 epochs. Now: save an
-                    # autopsy checkpoint and abort with a NONZERO exit code so shell
-                    # wrappers / experiment runners see the failure. Opt out with
-                    # --no-dead-run-abort (e.g. when deliberately probing degenerate
-                    # regimes). NaN/Inf still raises inside check() as before.
-                    if (dead_run_detector.check(trainer.global_step, logs)
-                            and getattr(args, "dead_run_abort", True)):
-                        autopsy_path = Path(args.checkpoint_dir) / "dust2_policy_dead.pt"
-                        autopsy_path.parent.mkdir(parents=True, exist_ok=True)
-                        torch.save(policy.state_dict(), autopsy_path)
-                        _metrics_file.flush()
-                        print(f"[Train] DEAD RUN — aborting at step {trainer.global_step:,}. "
-                              f"Autopsy checkpoint: {autopsy_path}")
-                        raise SystemExit(3)
-
-                    # Network health monitoring every 5 epochs (too expensive every epoch)
-                    if trainer.epoch % 5 == 0:
-                        health_metrics = compute_network_health(policy, device)
-                        logs.update(health_metrics)
-
-                    # ── Self-play bookkeeping ────────────────────────────────────────
-                    # F11: gated on the FLAG, not the manager (the manager now always
-                    # exists for the evaluate patch) — no pool saves / team switches
-                    # under --no-self-play.
-                    if self_play_enabled:
-                        self_play_mgr.maybe_switch_teams(trainer.epoch)
-                        # R0-I: elimination-only — winner_ct counts timeouts, which
-                        # would pool-save a passive CT as "dominant".
-                        win_rate_t, win_rate_ct = elimination_only_win_rates(logs)
-                        self_play_mgr.maybe_save(
-                            policy,
-                            Path(args.checkpoint_dir),
-                            trainer.epoch,
-                            win_rate_t,
-                            win_rate_ct,
-                        )
-                        logs["self_play/pool_size"] = float(len(self_play_mgr.pool))
-                        # Observe-only (spec 2026-08-15 §3.4): 0.0/1.0 float on the
-                        # OUTER logs dict, next to pool_size. Not trainer.losses —
-                        # `_selfplay_used_past` is set during evaluate(), not train().
-                        # Do not log self_play/opponent_id (string, persist-dropped).
-                        logs["self_play/used_past"] = self_play_used_past_metric(trainer)
-                        # opponent_team flag: 1.0 = CT opponent, 0.0 = T opponent.
-                        logs["self_play/opponent_team"] = float(self_play_mgr.opponent_team == "ct")
-                        # ────────────────────────────────────────────────────────────
-
-                    # Batch 3.5 (#24): per-axis aim log_std metrics. Read CLAMPED values
-                    # (the values the policy actually used at this iteration), not the raw
-                    # nn.Parameter. Load-bearing for T7 acceptance gate 2:
-                    # aim_log_std_pitch > -3.5 at 30M steps, and format_train_status must
-                    # keep the 'aim_log_std_pitch=' substring greppable.
-                    # Batch 7: the reader branches on architecture inside the helper —
-                    # a split policy has no `aim_log_std` attribute at all (spec §3.6).
-                    log_aim_log_std(policy, logs)
-
-                    # Batch 7 (spec §3.4): split/active is the analyzer's labeling
-                    # signal for the structurally-zero policy_heads TAG cells. It is
-                    # derived from the POLICY OBJECT, never from config.json — the
-                    # config is rewritten unconditionally at every launch, so a
-                    # flag-less crash-resume of a split run (which key inference
-                    # deliberately supports) would stamp tct_split_heads:false and
-                    # silently disarm the labeling. A metrics key travels with the rows
-                    # the analyzer already reads and survives resume seams.
-                    #
-                    # PLACEMENT IS PART OF THE CONTRACT: this belongs HERE, in the
-                    # unconditional outer-loop logging block, NOT inside the TAG hook
-                    # and NOT behind `tag_diagnostic` / `epoch % tag_every`. Every
-                    # logged epoch's row must carry it. Gating it on the TAG throttle
-                    # would leave ~80% of rows unlabeled at the default --tag-every 5,
-                    # and any future analyzer that inspects a non-measurement row (a
-                    # dead-window scan, a σ trajectory, a divergence plot) would read
-                    # the missing key as "legacy run" — the exact misidentification the
-                    # key exists to prevent. It is also independent of the TAG flag
-                    # entirely: a split run launched WITHOUT --tag-diagnostic still
-                    # labels every row.
-                    logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
-                    # Trunk-split twin (spec 2026-08-15 §3.4): same unconditional
-                    # placement as split/active. 1.0 iff the live policy has
-                    # encoder_t — derived from the object, never config.json.
-                    # Analyzer keys the trunk-structural verdict and the "no actor
-                    # TAG cell is a decision metric" footer on this key. Do not
-                    # gate on --tag-every / --tag-diagnostic.
-                    logs["split/trunk_active"] = float(hasattr(policy, "encoder_t"))
-                    logs.update(compute_head_divergence(policy))
-                    logs.update(compute_trunk_divergence(policy))
-
-                    # TAG injection — MUST stay after dead_run_detector.check above
-                    # (deliberate NaNs; see _inject_tag_metrics docstring).
-                    _inject_tag_metrics(trainer, logs)
-
-                    # ── Persist metrics ──────────────────────────────────────────────
-                    log_entry = {
-                        "run_id":
-                        run_id,                                                     # N2: string key — segment runs by this, not by agent_steps resets
-                        "step": trainer.global_step,
-                        "epoch": trainer.epoch,
-                        "team_spirit": ts_val,
-                        **{
-                            k: v
-                            for k, v in logs.items() if isinstance(v, (int, float))
-                        },
-                    }
-                                                                                    # R0-C: stamp the FIRST row after a --resume-run (analysis seam marker).
-                    if _resumed_from_step is not None:
-                        log_entry["resumed_from_step"] = _resumed_from_step
-                        _resumed_from_step = None
-                    _metrics_file.write(json.dumps(log_entry) + "\n")
-                    _metrics_file.flush()
-                    if wandb_run is not None:
-                        wandb_run.log(log_entry, step=trainer.global_step)
-
-                if time.time() - last_save > args.save_every_sec:
-                    save_path.parent.mkdir(parents=True, exist_ok=True)
-                    _atomic_save_state_dict(policy.state_dict(), save_path)
-                    last_save = time.time()
-                    print(f"Saved checkpoint to {save_path}")
-
-                if isinstance(logs, dict):
-                    if trainer.epoch % 10 == 0:
-                        print(format_train_status(trainer.epoch, ts_val, logs))
-                    print(f"[Timing] collect={trainer._timing['collect_ms']:.0f}ms  "
-                          f"update={trainer._timing['update_ms']:.0f}ms  "
-                          f"SPS={logs.get('SPS', 0):.0f}")
-
-        # Final checkpoint save
-        save_path.parent.mkdir(parents=True, exist_ok=True)
-        _atomic_save_state_dict(policy.state_dict(), save_path)
-        print(f"[Train] Final checkpoint saved to {save_path}")
-
+            _run_epochs(run)
+        _save_policy(trainer, run.save_path)
+        print(f"[Train] Final checkpoint saved to {run.save_path}")
     print("[Train] Done.")

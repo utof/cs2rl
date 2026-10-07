@@ -5,7 +5,8 @@ WHAT is enforced, and why each half exists:
   * AGGREGATION (the headline assert). Every registered `emitted`/`family` entry's
     declared aggregation must equal the one implied by the SHAPE of its write, as
     extracted by `metrics_census`. Declaring `environment/episodes` a window mean,
-    or moving a `losses/*` write across the gh#90 divisor loop, fails BY KEY NAME.
+    or moving a `losses/*` write between the gh#90 minibatch sums and the per-update
+    absolutes, fails BY KEY NAME.
   * COMPLETENESS, BOTH DIRECTIONS. A key an emitter writes but the registry does
     not carry fails; a key the registry carries but nothing writes fails too. A
     one-directional check would let the registry rot by accumulation.
@@ -109,11 +110,17 @@ def test_declared_aggregation_matches_the_emission_shape():
     """Every emitted key's declared aggregation == the one its write SHAPE implies.
 
     This is the T1/I1 bug class: a comment says a key is a per-epoch absolute
-    while the write sits before the gh#90 divisor loop and is silently scaled by
+    while the write goes into the gh#90 minibatch sums and is silently scaled by
     1/minibatches. Structure decides, not prose.
+
+    Every emission is checked, not one per key: a key written at two sites (summed
+    into the gh#90 minibatch sums in one method AND written after the division in
+    another) must agree at both. EMITTED_BY_KEY keeps only the last site's record,
+    which hid exactly that case (gh#92 knock-out K1a).
     """
     bad = []
-    for key, ek in sorted(EMITTED_BY_KEY.items()):
+    for ek in sorted(EMITTED, key=lambda e: (e.key, e.site)):
+        key = ek.key
         s = ms.REGISTRY.get(key)
         if s is None:
             continue                                                                        # completeness test reports this
@@ -129,10 +136,12 @@ def test_declared_aggregation_matches_the_emission_shape_for_families():
 
     Members matter separately: a closed family's members carry their own entries
     (so a reader can be attached to `environment/action_move_0`), and nothing
-    else would notice a member declared differently from its template.
+    else would notice a member declared differently from its template. Every
+    site's family is checked, for the reason the key test gives.
     """
     bad = []
-    for template, fam in sorted(FAMILY_BY_TEMPLATE.items()):
+    for fam in sorted(FAMILIES, key=lambda f: (f.template, f.site)):
+        template = fam.template
         expected = census.SHAPES[fam.shape]
         s = ms.REGISTRY.get(template)
         if s is not None and s.aggregation != expected:
@@ -158,7 +167,7 @@ def test_environment_episodes_is_the_one_element_list_identity():
     """
     ek = EMITTED_BY_KEY.get("environment/episodes")
     assert ek is not None, ("environment/episodes is no longer censused — it moved out of "
-                            "trainer.Cs2PuffeRL.train; update EMITTER_SITES")
+                            "trainer.Cs2PuffeRL._log_and_checkpoint; update EMITTER_SITES")
     assert ek.shape == "stats-one-element-list", (
         f"environment/episodes is written as {ek.shape!r} at {ek.site}:{ek.lineno}, not as a "
         "one-element list. PufferLib would now MEAN it over the collection window and every "
@@ -169,28 +178,34 @@ def test_environment_episodes_is_the_one_element_list_identity():
 def test_environment_star_window_means_still_rest_on_an_append_shaped_collector():
     """Every `window-mean-pufferlib` environment/* claim needs the collector to append.
 
-    train.py accumulates each episode's terminal info into `self.stats[k]` as a
+    Cs2PuffeRL._collect_infos accumulates each episode's terminal info into `self.stats[k]` as a
     LIST that mean_and_log later np.means. Rewritten to `self.stats[k] = v`, all
-    ~70 of those declarations become wrong at once and nothing else in the suite
-    would notice — the values would still be numbers of a plausible size.
+    ~70 of those declarations become wrong at once and no other default-tier test
+    would notice — the values would still be numbers of a plausible size. The
+    rollout check that evaluate() feeds the collector needs a real trainer, so it is
+    a training test (test_trainer_composition.py::test_evaluate_collects_every_info_into_stats).
     """
     assert census.stats_collection_is_append_shaped(), (
-        "train.py's info-collection loop no longer appends/extends into self.stats — every "
+        "Cs2PuffeRL._collect_infos no longer appends scalars into self.stats, or it assigns "
+        "into self.stats — every "
         "environment/* `window-mean-pufferlib` declaration in eval/metrics_schema.py is now a "
         "claim about a pipeline that does not exist")
 
 
-def test_the_gh90_divisor_loop_still_separates_mean_from_last():
-    """`losses/*` splits into `mean` (before the divisor) and `last` (after) — both sides
-    must be non-empty, or the classification has quietly collapsed to one class."""
+def test_the_gh90_accumulator_still_separates_mean_from_last():
+    """`losses/*` splits into `mean` (summed per minibatch, then divided) and `last`
+    (written after the division). The accumulator must keep the shape the split is
+    read from, and both sides must be non-empty, or the classification has quietly
+    collapsed to one class."""
+    assert census.gh90_accumulator_violations() == []
     means = {k for k, e in EMITTED_BY_KEY.items() if e.shape == "losses-accumulated"}
     lasts = {k for k, e in EMITTED_BY_KEY.items() if e.shape == "losses-absolute"}
     assert means and lasts, (
-        f"losses/* no longer splits across the gh#90 divisor loop "
+        f"losses/* no longer splits into minibatch sums and per-update absolutes "
         f"(accumulated={len(means)}, absolute={len(lasts)}) — the shape that makes this "
         "distinction enforceable is gone, so every losses/* aggregation is unchecked")
     assert "losses/minibatches_run" in lasts, (
-        "losses/minibatches_run must be inserted AFTER the divisor loop: it IS the divisor")
+        "losses/minibatches_run must be written AFTER the division: it IS the divisor")
     assert "losses/entropy" in means
 
 
