@@ -3,8 +3,9 @@
 
 WHY THIS EXISTS INSTEAD OF `pyrefly check --baseline`
 -----------------------------------------------------
-pyrefly 1.2.0 ships a `--baseline` flag that looks like exactly this tool. It is
-not usable as a gate here. Its suppression key is `(path, kind, start-column)` --
+pyrefly ships a `--baseline` flag that looks like exactly this tool. It is not
+usable as a gate here (measured on 1.2.0; the test named below still passes on
+1.3.2). Its suppression key is `(path, kind, start-column)` --
 line-insensitive, message-insensitive, and with UNLIMITED MULTIPLICITY. One
 baselined entry is a standing licence for that (file, kind, column), not a
 budget: five distinct new `missing-attribute` errors planted at src/cs2rl/train.py
@@ -322,18 +323,22 @@ def main() -> int:
         die("the index has unmerged paths; resolve them first:\n  " + "\n  ".join(unmerged))
 
     tmp = Path(tempfile.mkdtemp(prefix="pyrefly-gate-"))
-    # pyrefly silently skips any project-includes pattern whose absolute path has
-    # a HIDDEN ANCESTOR. Measured on this repo: the same materialised tree yields
-    # 136 covered files under /tmp/x and 26 under /tmp/.x, with only a WARN on
-    # stderr. mkdtemp honours TMPDIR, so this is reachable by configuration.
-    # Exact-equality polarity would red it as ~700 removals, but blaming the
-    # user's code for a tempdir setting is a bad hour; say so instead.
+    # pyrefly 1.2.0 silently skipped any project-includes pattern whose absolute
+    # path has a HIDDEN ANCESTOR. Measured on this repo then: the same materialised
+    # tree yielded 136 covered files under /tmp/x and 26 under /tmp/.x, with only a
+    # WARN on stderr. mkdtemp honours TMPDIR, so this is reachable by configuration.
+    # 1.3.2 does not skip (#358: 487 errors under both a plain and a dot directory,
+    # where 1.2.0 gave 499 and 137 on the same tree). The refusal stays for a later
+    # version that skips again: 1.2.0 skipped every include pattern but src/, and
+    # with the snapshot down to one src/ row, exact equality would not see that
+    # partial check.
     hidden = [part for part in tmp.parts if part.startswith(".") and part != "."]
     if hidden:
         shutil.rmtree(tmp, ignore_errors=True)
         die(f"refusing to work under a hidden directory ({'/'.join(hidden)} in {tmp}): "
-            "pyrefly skips include patterns there and would check only part of the "
-            "tree. Set TMPDIR to a path with no dot-component.")
+            "pyrefly 1.2.0 skipped include patterns there and checked only part of the "
+            "tree, and a later version could again. Set TMPDIR to a path with no "
+            "dot-component.")
     try:
         # --- step 4: materialise the index ----------------------------------
         git(project, "checkout-index", "-a", f"--prefix={tmp}/")

@@ -61,7 +61,11 @@ def _snapshot(trainer, mgr):
                                                                                    # RNG STATES (not fresh draws — a draw-based compare is one stray
                                                                                    # torch.randn away from flaky).
         "py_random": random.getstate(),
-        "np_random": np.random.get_state(legacy=False)["state"]["key"].tobytes(),
+                                                                                   # The WHOLE state (#359). The key alone is blind to a wrong draw position:
+                                                                                   # a draw that stays inside the current 624-word block leaves the key
+                                                                                   # unchanged, so a restore with the right key but the wrong `pos` used to
+                                                                                   # pass. get_state returns copies, so later draws do not change this snapshot.
+        "np_random": np.random.get_state(legacy=False),
         "torch_random": torch.get_rng_state().numpy().tobytes(),
         "warmstart": {
             k: getattr(trainer, k)
@@ -127,8 +131,12 @@ def test_round_trip_restores_everything():
         assert info["resumed_from_step"] == before["global_step"]
         after = _snapshot(trainer2, mgr2)
         for k in ("global_step", "epoch", "lr", "target_entropy", "ws_phase", "opponent_team",
-                  "py_random", "np_random", "torch_random"):
+                  "py_random", "torch_random"):
             assert after[k] == before[k], k
+                                                                                               # A dict holding an ndarray cannot go through `==`: the array makes its
+                                                                                               # truth value ambiguous. assert_equal recurses into the dict and compares
+                                                                                               # bit_generator, key, pos, has_gauss and gauss.
+        np.testing.assert_equal(after["np_random"], before["np_random"], err_msg="np_random")
         assert after["pool"] == [sp_path], after["pool"]                                       # missing path dropped
         for k in ("ret_mean", "ret_var", "ret_count", "log_alpha"):
             assert torch.equal(after[k], before[k]), k

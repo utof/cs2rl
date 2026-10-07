@@ -770,7 +770,6 @@ def launch_run(
     # own Function CLI uses spawn when --detach is set. spawn() returns a
     # FunctionCall handle and does not wait, so the local entrypoint can exit
     # without owning the GPU input.
-    # KNOWN LIMIT: pyrefly 1.2.0 rejects the ParamSpec in modal's spawn stub; 1.3.2 accepts it.
     handle = train_remote.with_options(**options).spawn(payload)
     function_call_id = getattr(handle, "object_id", None)
     print(f"function_call_id={function_call_id}", file=sink)

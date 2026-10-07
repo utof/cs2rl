@@ -47,8 +47,10 @@ agreement test fires.
 
 Each `# ──` section header but the last names the helpers defined under it;
 they once named runner-half test cycles that travelled here with those helpers.
-The last, "Shared since W4", holds the 6 names W4's split made shared, which do
-not fit one header line, so it states the rule they meet instead.
+The last, "Shared since W4", holds the names W4's split made shared, which do
+not fit one header line, so it states the rule they meet instead. W4 made 6;
+5 remain, since 8055fdb moved `FakeRegistry` to tests/modal/test_modal_state.py.
+`_advance_to` (#234) has its own header above that section.
 """
 import dataclasses
 import io
@@ -74,9 +76,9 @@ ROOT = REPO_ROOT
 # and the floor goes red on that test (the other imports carry reach the same
 # way for the tests whose helpers use them). The floor's remedy says to check
 # this route before moving the test: moving it would misplace a core test.
-import scripts.modal_runner as mrl                                     # noqa: E402, I001
-from scripts.modal_runner import checkpoint, request, training         # noqa: E402, I001
-from tests.modal.modal_patch_binding_campaign import binding_target    # noqa: E402, I001
+import scripts.modal_runner as mrl                                          # noqa: E402, I001
+from scripts.modal_runner import checkpoint, core, request, state, training # noqa: E402, I001
+from tests.modal.modal_patch_binding_campaign import binding_target         # noqa: E402, I001
 
 # ── _git / _init_source_repo: a real tiny repo for HEAD and diff checks ────
 
@@ -191,6 +193,30 @@ class FakeChild:
         if returncode is not None:
             self.returncode = returncode
         self._done.set()
+
+
+# ── _advance_to: walk one attempt up the run lifecycle ─────────────────────
+
+
+def _advance_to(run_root, target, *, attempt_id, lock):
+    """Write PREPARING, then each later status up to and including `target`.
+
+    Returns the last `state.transition_status` result: the RunStatus written,
+    or None when another attempt owns STATUS. `target` is BUILDING or TRAINING.
+    One helper since #234; before it, tests/modal/test_modal_state.py had
+    `_advance_to_training` and tests/modal/test_modal_training.py had
+    `_advance_to_building`, with different default attempt ids ("a1" and
+    "attempt-a"). So `attempt_id` has no default: each caller names its own.
+    """
+    lifecycle = (core.Status.PREPARING, core.Status.BUILDING, core.Status.TRAINING)
+    written = None
+    for status in lifecycle[:lifecycle.index(target) + 1]:
+        written = state.transition_status(run_root,
+                                          status,
+                                          now=_aware(),
+                                          attempt_id=attempt_id,
+                                          lock=lock)
+    return written
 
 
 # ── Shared since W4: reached by tests in two or more runner files ──────────
