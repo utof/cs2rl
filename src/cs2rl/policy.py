@@ -307,6 +307,7 @@ def build_policy(vecenv,
     """
     from cs2rl.policy_net import Dust2Policy
 
+    # KNOWN LIMIT: pyrefly 1.2.0 types this getattr (untyped default) as Any | None; 1.3.2 does not.
     driver_env = getattr(vecenv, "driver_env", vecenv)
     obs_dim = (obs_dim_override
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])

@@ -128,6 +128,7 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
     opt.add_param_group(new_group)
     sch = getattr(trainer, "scheduler", None)
     if sch is not None and hasattr(sch, "base_lrs"):
+        # KNOWN LIMIT: pyrefly 1.2.0 types dict.get with an untyped default as Any | None; 1.3.2 does not.
         sch.base_lrs.append(float(new_group.get("initial_lr", new_group["lr"])))
         sch._last_lr = [g["lr"] for g in opt.param_groups]
     return len(sigma_params)
@@ -149,6 +150,7 @@ def _kill_reward_is_active(vecenv):
     yet is handled by the non-accumulating alert inside check().
     """
     try:
+        # KNOWN LIMIT: pyrefly 1.2.0 types this getattr (untyped default) as Any | None; 1.3.2 does not.
         driver_env = getattr(vecenv, "driver_env", vecenv)
         return float(driver_env._c_env.sd.contents.reward_kill) != 0.0
     except Exception:
