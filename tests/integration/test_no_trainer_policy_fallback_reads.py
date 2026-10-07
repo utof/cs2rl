@@ -258,8 +258,11 @@ PLANT = textwrap.dedent('''\
         def inner(past_policy):
             return getattr(past_policy, "nested", None)  # hit: nested def, policy receiver
 
-        def odd(tr):
-            return getattr(tr, "aim_dim_mask", None)    # hit: key net, unrecognised spelling
+        def odd(tr):  # hits: key net, unrecognised spelling, one key per owner source
+            return (getattr(tr, "aim_dim_mask", None),    # a Dust2Policy registered buffer
+                    getattr(tr, "tct_split_heads", None),  # a Dust2Policy self store
+                    getattr(tr, "_tag_metrics", None),     # a Cs2PuffeRL self store
+                    getattr(tr, "scheduler", None))        # a stock PuffeRL self store
 
         g = getattr(run.env, "unowned", None)           # unrelated object, unowned key
         tr2, _ = run.trainer, None
@@ -277,16 +280,18 @@ PLANT = textwrap.dedent('''\
             return hasattr(self, "late")                # self of another class
     ''')
 PLANT_HITS = {("isolate", "undeclared"), ("isolate", "via_alias"), ("isolate", "via_policy"),
-              ("isolate", "via_run"), ("isolate.inner", "nested"), ("isolate.odd", "aim_dim_mask"),
-              ("isolate", "via_tuple"), ("Cs2PuffeRL.m", "late")}
+              ("isolate", "via_run"), ("isolate.inner", "nested"), ("isolate", "via_tuple"),
+              ("isolate.odd", "aim_dim_mask"), ("isolate.odd", "tct_split_heads"),
+              ("isolate.odd", "_tag_metrics"), ("isolate.odd", "scheduler"),
+              ("Cs2PuffeRL.m", "late")}
 
 
 def test_the_scan_flags_each_spelling_under_each_root(tmp_path):
     """Positive and negative controls for both nets, the walk and every root.
 
     One plant under each SCAN_ROOTS entry, scanned through fallback_sites itself, so the walk
-    of every root is exercised end to end; a broken net loses its rows (the odd() row needs
-    the key net's owned-name set, read from the real STATE_CLASSES sources). A root dropped
+    of every root is exercised end to end; a broken net loses its rows (the odd() rows need
+    the key net's owned-name set, one key from each source it reads). A root dropped
     from SCAN_ROOTS is test_every_tracked_python_file_is_scanned_or_named's case.
     """
     for r in SCAN_ROOTS:
