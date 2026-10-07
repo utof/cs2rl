@@ -1317,10 +1317,11 @@ def test_hybrid_sample_logits_returns_per_factor_halves():
     """Fix #1: _hybrid_sample_logits returns 6-tuple
     (action, cont_action, log_prob_d, log_prob_c, entropy_d, entropy_c).
 
-    The per-factor halves it returns must equal what the old rebuild
+    The per-factor halves it returns must match what the old rebuild
     pattern (constructing Categorical + Normal a second time at the
-    rollout site) would produce — bit-equivalent because the math is
-    identical and the inputs are deterministic given (logits, action).
+    rollout site) would produce, up to float32 rounding: the formulas and
+    the inputs (deterministic given logits and action) are the same, the
+    op order is not.
 
     This test pins the new contract so a future change that re-summed the
     halves at return time (or worse, dropped an entropy slot) would go red.
@@ -1353,9 +1354,11 @@ def test_hybrid_sample_logits_returns_per_factor_halves():
     assert ent_d.shape == (B, ) and ent_c.shape == (B, )
     assert torch.isfinite(lp_d).all() and torch.isfinite(lp_c).all()
 
-    # Bit-equivalence with the rebuild pattern that the rollout caller
-    # used to do (and which Fix #1 deletes). Same math, same inputs →
-    # same bits, checked with allclose at atol=1e-7.
+    # Equivalence with the rebuild pattern that the rollout caller
+    # used to do (and which Fix #1 deletes). Same formulas in a different
+    # op order, so the float32 results are not the same bits: at this seed
+    # they differ by about 5e-7. allclose's default rtol=1e-5 admits that;
+    # atol=1e-7 alone would not.
     rebuild_lp_d = sum(
         torch.distributions.Categorical(logits=lg).log_prob(action[..., i])
         for i, lg in enumerate(logits_list))
