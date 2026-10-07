@@ -609,6 +609,7 @@ class Cs2PuffeRL(PuffeRL):
         LAST file names the model and carries the epoch checked against the
         sidecar, so a crash leaves a set that resume accepts whole or refuses.
         """
+        assert self.logger is not None, "PuffeRL.__init__ replaces a None logger with NoLogger"
         run_id = self.logger.run_id
         path = Path(self.config["data_dir"]) / run_id
         path.mkdir(parents=True, exist_ok=True)
