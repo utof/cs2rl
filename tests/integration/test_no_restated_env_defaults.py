@@ -247,8 +247,9 @@ def _argparse_default_offenders(tree, label):
         dest = dest.value if isinstance(dest, ast.Constant) else None
         if dest is None:
             for a in node.args:
-                if isinstance(a, ast.Constant) and str(a.value).startswith("--"):
-                    dest = a.value[2:].replace("-", "_")
+                flag = a.value if isinstance(a, ast.Constant) else None
+                if isinstance(flag, str) and flag.startswith("--"):
+                    dest = flag[2:].replace("-", "_")
                     break
         if dest not in FIELD_DEFAULTS or "default" not in kw:
             continue
