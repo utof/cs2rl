@@ -28,6 +28,7 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from typing import NotRequired, TypedDict
 
 import modal
 
@@ -458,6 +459,51 @@ def _require_pinned_image_digest(digest: str) -> str:
     return IMAGE_DIGEST
 
 
+class LaunchPayload(TypedDict):
+    """The JSON-safe dict `launch_run` spawns `train_remote` with; `_launch_payload` builds it.
+
+    A TypedDict is a plain dict at runtime, so the wire payload is unchanged.
+    The receiving side still coerces each read (`int(...)`, `str(...)`) as it
+    did when the payload was typed `dict[str, object]`.
+    """
+
+    run_id: str
+    attempt_id: str
+    git_sha: str
+    tree: str
+    source_archive_sha256: str
+    source_mount_path: str
+    resume_mount_path: str | None
+    resume_sha256: str | None
+    resume_size: int | None
+    resume_source_path: str | None
+    effective_map: str
+    gpu: str
+    cpu_request: int
+    cpu_soft_limit: int
+    memory_request_mib: int
+    memory_hard_limit_mib: int
+    num_envs: int
+    vec_workers: int
+    timeout_minutes: int
+    save_every_seconds: int
+    train_args: list[str]
+    timesteps: int
+    training_argv: list[str]
+    requested_timesteps: int
+    effective_timesteps: int
+    batch_size: int
+    seed: int
+    created_at: str
+    runner_commit: str
+    config_hash: str
+    image_digest: str
+    modal_version: str
+    thread_caps: list[str]
+    resumed_from_run_id: str | None
+    wandb_enabled: NotRequired[bool]
+
+
 def _launch_payload(
     request: mrl.RunRequest,
     *,
@@ -472,10 +518,10 @@ def _launch_payload(
     modal_version: str,
     wandb_enabled: bool,
     created_at: str,
-) -> dict[str, object]:
+) -> LaunchPayload:
     resume_mount = None if resume_client is None else str(mrl.mounted_path(resume_client))
     run_root = mrl.mounted_path(mrl.RUNS_ROOT / request.run_id)
-    payload: dict[str, object] = {
+    payload: LaunchPayload = {
         "run_id": request.run_id,
         "attempt_id": attempt_id,
         "git_sha": git_sha,
@@ -516,7 +562,7 @@ def _launch_payload(
     return payload
 
 
-def build_remote_manifest(payload: dict[str, object]) -> mrl.Manifest:
+def build_remote_manifest(payload: LaunchPayload) -> mrl.Manifest:
     """Materialize the design §5 Manifest from the Function payload."""
     digest = _require_pinned_image_digest(str(payload["image_digest"]))
     requested = int(payload["requested_timesteps"])
@@ -567,7 +613,7 @@ def _remote_run_root(run_id: str) -> Path:
     return mrl.mounted_path(mrl.RUNS_ROOT / run_id)
 
 
-def _request_from_payload(payload: dict[str, object]) -> mrl.RunRequest:
+def _request_from_payload(payload: LaunchPayload) -> mrl.RunRequest:
     train_args = tuple(str(token) for token in payload["train_args"])
     wandb_name = "attached" if payload.get("wandb_enabled") else None
     return mrl.build_run_request(
@@ -719,7 +765,7 @@ def launch_run(
     single_use_containers=True,
     include_source=False,
 )
-def train_remote(payload: dict[str, object]) -> dict[str, object]:
+def train_remote(payload: LaunchPayload) -> dict[str, object]:
     """Own the delivery claim before preparation; invoked via with_options(...).spawn.
 
     A duplicate must return before parsing the request, preparing source or
