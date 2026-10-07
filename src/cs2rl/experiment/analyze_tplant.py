@@ -296,12 +296,13 @@ def analyze_run(run_dir: Path,
     elim_share = (None if not win_ct_mean else max(0.0, win_ct_mean - (timeout_mean or 0.0)) /
                   win_ct_mean)
 
-    # Second pass over already-loaded rows. Presence-gated: old-format
-    # jsonl has no game/win_by_detonation so mix_mean stays None. Average
+    # Second pass over already-loaded rows. Presence-gated: outcome_mix is
+    # None for a row without game/win_by_detonation, so an old-format jsonl
+    # leaves mix_rows empty and mix_mean None. Average
     # the per-row rate differences (same aggregation as ct_win_rate_mean);
     # do NOT form mean(m)/mean(p). Does not touch the 5M plant-rate
     # window or ct_win_by_elim_share.
-    mix_rows = [outcome_mix(row) for row in rows if "game/win_by_detonation" in row]
+    mix_rows = [m for m in map(outcome_mix, rows) if m is not None]
     mix_mean = None
     if mix_rows:
         keys = ("t_detonation", "ct_defuse", "timeout", "t_elimination", "ct_elimination")
