@@ -519,6 +519,8 @@ def test_onnx_export_output_order_pinned():
                 },
             )
             mu = outs[7]
+            assert isinstance(mu,
+                              np.ndarray), f"ORT returned {type(mu).__name__} for a tensor output"
             assert mu.shape == (1, 1), f"mu shape: {mu.shape}"
             assert mu.dtype == np.float32, f"mu dtype: {mu.dtype}"
             # tanh*max_turn_speed bound: a hair of slack absorbs fp32 wobble.
