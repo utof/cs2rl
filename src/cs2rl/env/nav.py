@@ -596,12 +596,22 @@ def _build_area_adjacency(nav_graph: NavGraph) -> np.ndarray:
     Source navmesh, but are not directly traversable in this sim because movement
     is a 2D point step over the rasterized walkable surface. Derive adjacency from
     neighboring on-mesh raster cells so pathfinding matches the areas agents can
-    actually enter via the raster lookup (C's _raster_at) + fixed XY moves.
+    actually enter via the raster lookup (C's _raster_at) + fixed XY moves. The cell
+    rule is _raster_adjacency's.
     """
-    adj = np.zeros((nav_graph.N, nav_graph.N), dtype=bool)
+    return _raster_adjacency(nav_graph._pos_grid, nav_graph.N)
+
+
+def _raster_adjacency(grid: np.ndarray, n: int) -> np.ndarray:
+    """Area adjacency of a raster: two areas touch where any of their cells are 8-neighbours.
+
+    `grid` is int[H, W], cell -> area index, -1 off-mesh; returns bool[n, n]. The diagonal is
+    True (staying in an area is always a legal move) and the matrix is symmetric.
+    make_cs2_map reaches this through _build_area_adjacency (the nav mesh's raster).
+    """
+    adj = np.zeros((n, n), dtype=bool)
     np.fill_diagonal(adj, True)
 
-    grid = nav_graph._pos_grid
     height, width = grid.shape
     offsets = (
         (-1, -1),
