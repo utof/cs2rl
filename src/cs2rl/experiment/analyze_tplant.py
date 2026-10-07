@@ -429,7 +429,8 @@ def _tag_cell(pairs, rng, boot_n, *, structural, structural_verdict=STRUCTURAL_V
     `rng` is tag_summary's ONE random.Random(seed), shared by every cell and
     drawn from boot_n * len(pairs) times per call. PITFALL: tag_summary calls
     this over its normal cells, then its structural cells, each in insertion
-    order; a per-cell rng or another call order moves every CI.
+    order; a per-cell rng or another call order hands a cell different draws,
+    which can move its CI.
     """
     diffs = [w - c for c, w in pairs]
     conflict = statistics.median(diffs)

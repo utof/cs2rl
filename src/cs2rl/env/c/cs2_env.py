@@ -891,8 +891,9 @@ def _map_arrays(md: MapData) -> dict[str, np.ndarray]:
 
     PITFALL: every value is a NEW array (flatten() always copies, is_ramp's
     astype to int8 copies, the spawn and delta arrays are built here), so nothing
-    else holds them. The caller must keep every value alive for the env's lifetime
-    (Cs2Env._refs), or the C pointers dangle.
+    else holds them. The caller must keep the ten pointer-field arrays alive for
+    the env's lifetime (Cs2Env._refs), or their C pointers dangle; binding.init
+    copies the five content-copied arrays into StaticData.
     """
 
     def _arr(a, dtype):
@@ -1058,9 +1059,10 @@ class Cs2Env(pufferlib.PufferEnv):
         Construction order: team spirit (_resolve_team_spirit), the map arrays
         (_map_arrays, kept alive in self._refs), the Rung 0 flags, the R0-G knobs
         (_resolve_sim_knobs), the spawn-capacity check, the C env
-        (_static_data_values builds the StaticData mapping, _init_native packs it
-        and calls binding.init), the recoil flag and the area bounds, then the
-        Python-side views and the per-step scratch.
+        (_static_data_values builds the StaticData mapping, _pointer_arrays
+        checks the ten pointer arrays against StaticDataC, _init_native packs the
+        mapping and calls binding.init), the recoil flag and the area bounds,
+        then the Python-side views and the per-step scratch.
         """
         if not isinstance(config, EnvConfig):
             raise TypeError(f"config must be an EnvConfig, got {type(config).__name__}")
@@ -1082,9 +1084,11 @@ class Cs2Env(pufferlib.PufferEnv):
         arrays = _map_arrays(map_data)
         # Keep refs alive — prevents GC of backing numpy arrays. Every array
         # _map_arrays returns is a NEW array nothing else holds (see its
-        # PITFALL), and C keeps the ten pointer fields (sd->centroids_z,
-        # sd->is_ramp, ...) for the env's lifetime. An array dropped from here
-        # would be collected at once and its C pointer would dangle.
+        # PITFALL). C borrows the ten pointer fields (sd->centroids_z,
+        # sd->is_ramp, ...) for the env's lifetime: one of those dropped from
+        # here is collected once __init__ returns, and its C pointer dangles.
+        # binding.init copies the five content-copied arrays into StaticData;
+        # they are kept here too, in the pre-split _refs order.
         self._refs = list(arrays.values())
 
         # Rung 0 (spec 2026-08-29 §2.1): these are validated BEFORE binding.init,
