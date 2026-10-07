@@ -21,8 +21,8 @@ base commit that predates this file: feed it on stdin from that checkout's root,
 cs2rl's import guard sees the script and the package in one checkout,
 ``python - run --out base.json < /path/to/trainer_equivalence.py``. The base must have
 ``cs2rl.train.compose`` (#92 part 2); older commits built their test trainers in
-``tests/_helpers/trainer_harness.py`` only. All 25 cases ran in 74 s on the development VM
-(2026-10-06).
+``tests/_helpers/trainer_harness.py`` only. All 26 cases ran in 91 s on the development VM
+(2026-10-07).
 
 WHAT IS FINGERPRINTED (``snapshot``):
   - every ``vars(trainer)`` value, minus EXCLUDED (wall clock, handles, and the objects
