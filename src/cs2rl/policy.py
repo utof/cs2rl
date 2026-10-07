@@ -89,14 +89,13 @@ def load_state_dict_arch_checked(policy, state_dict, *, source):
     PITFALL: this does NOT convert. Legacy→split conversion is a deliberate
     act with a σ-re-init → heads convert → trunk convert ordering
     constraint, so it stays at the one call site that means it (the
-    train-main warm split). An object without the flag attributes (every
-    Dust2Policy has both) compares as legacy on that axis via getattr(..., False).
+    train-main warm split). Every Dust2Policy declares both flags, so they are
+    read directly: an object without them raises AttributeError (#355).
     """
     ckpt_heads = state_dict_is_split(state_dict)
     ckpt_trunk = state_dict_is_trunk_split(state_dict)
-    # A missing flag attribute reads as legacy (off).
-    policy_heads = bool(getattr(policy, "tct_split_heads", False))
-    policy_trunk = bool(getattr(policy, "tct_split_trunk", False))
+    policy_heads = bool(policy.tct_split_heads)
+    policy_trunk = bool(policy.tct_split_trunk)
     if ckpt_heads != policy_heads or ckpt_trunk != policy_trunk:
 
         def _name_heads(flag):
@@ -232,7 +231,7 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
         raise ValueError("Random action selection should bypass select_policy_actions_native")
 
     obs_t = torch.as_tensor(obs, device=device)
-    if hasattr(policy, "obs_dim") and obs_t.shape[-1] != policy.obs_dim:
+    if obs_t.shape[-1] != policy.obs_dim:
         obs_t = obs_t[..., :policy.obs_dim]
     with torch.no_grad():
         logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)

@@ -30,8 +30,6 @@ import time
 
 import numpy as np
 
-from cs2rl.policy import LOG_STD_MAX, LOG_STD_MIN
-
 
 def format_train_status(epoch, ts_val, logs):
     sps = logs.get("SPS", 0.0)
@@ -78,7 +76,7 @@ def elimination_only_win_rates(logs):
 # ── SECTION: Network Health Monitoring ────────────────────────────────────
 
 
-def compute_network_health(model, device):
+def compute_network_health(policy, device):
     """Compute network health metrics for logging.
 
     Returns a dict with:
@@ -94,7 +92,7 @@ def compute_network_health(model, device):
     metrics = {}
 
     # Weight norms per named parameter
-    for name, param in model.named_parameters():
+    for name, param in policy.named_parameters():
         safe_name = name.replace(".", "_")
         metrics[f"health/weight_norm_{safe_name}"] = param.norm().item()
 
@@ -168,8 +166,9 @@ def log_aim_log_std(policy, logs):
     forward path clamps per copy (spec §3.2), so a mean-then-clamp here would
     report a σ the policy never used whenever one copy sits outside the band.
 
-    Architecture is detected from the policy object (hasattr aim_log_std_t),
-    never from config — config.json is rewritten every launch and lies after a
+    Architecture is detected from the policy object (policy.tct_split_heads, which
+    the constructor sets from the same argument that creates aim_log_std_t), never
+    from config — config.json is rewritten every launch and lies after a
     flag-less resume (spec §3.4).
     """
     # cs2rl.train.loop imports torch lazily inside functions (module import stays cheap
@@ -178,18 +177,17 @@ def log_aim_log_std(policy, logs):
 
     # R0-E.3: clamp to the RUN's bounds (policy.aim_log_std_min/max), not the module
     # constants — otherwise the log would report a σ the forward never used.
-    floor = float(getattr(policy, "aim_log_std_min", LOG_STD_MIN))
-    cap = float(getattr(policy, "aim_log_std_max", LOG_STD_MAX))
+    floor = float(policy.aim_log_std_min)
+    cap = float(policy.aim_log_std_max)
     # R0-E.2 (#131): when pitch is pinned (aim_dim_mask[1] == 0) the pitch σ
     # is a dead parameter — never sampled, never in log_prob_c, never
     # updated. SKIP its keys (not NaN: NaN survives json.dumps only as the
     # non-standard `NaN` token and would read as a live-but-broken signal on
     # a dashboard). Every consumer already tolerates absence:
     # format_train_status uses logs.get(..., 0.0); the T7 gate is 5v5-only.
-    mask = getattr(policy, "aim_dim_mask", None)
-    pitch_live = mask is None or float(mask[1]) != 0.0
+    pitch_live = float(policy.aim_dim_mask[1]) != 0.0
     with torch.no_grad():
-        if hasattr(policy, "aim_log_std_t"):
+        if policy.tct_split_heads:
             raw_t = policy.aim_log_std_t.detach().cpu().numpy()
             raw_ct = policy.aim_log_std_ct.detach().cpu().numpy()
             ls_t = torch.clamp(policy.aim_log_std_t, floor, cap).cpu().numpy()
@@ -244,7 +242,7 @@ def compute_head_divergence(policy):
     """
     import torch
 
-    if not hasattr(policy, "aim_log_std_t"):
+    if not policy.tct_split_heads:
         return {}
 
     def _flat(obj):
@@ -284,10 +282,10 @@ def compute_trunk_divergence(policy):
     WHY relative and not raw L2: the optimizer runs weight_decay=1e-4, so
     even a copy that receives zero gradient keeps moving. Raw L2 has no
     achievable null. The ratio is scale-free; the honest null is still a
-    decay-aware control. Gate is hasattr(policy, "encoder_t") — the live
+    decay-aware control. Gate is policy.tct_split_trunk — the live
     architecture, never config.json — matching split/trunk_active.
 
-    Returns {} when there is no encoder_t. The metric is undefined with
+    Returns {} when the trunk is not split. The metric is undefined with
     one copy, and emitting a fake 0.0 would read as "the teams agree".
 
     PITFALL: modules are grouped, not per-tensor — every Linear in the
@@ -298,7 +296,7 @@ def compute_trunk_divergence(policy):
     """
     import torch
 
-    if not hasattr(policy, "encoder_t"):
+    if not policy.tct_split_trunk:
         return {}
 
     def _flat(obj):

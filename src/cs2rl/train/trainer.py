@@ -43,7 +43,7 @@ import pufferlib
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
-from cs2rl.policy import LOG_STD_MAX, _hybrid_sample_logits
+from cs2rl.policy import _hybrid_sample_logits
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.train.entropy import WS_GRACE, WS_OFF, warmstart_entropy_state
 from cs2rl.train.resume import _atomic_save_state_dict, collect_train_state
@@ -454,11 +454,11 @@ class Cs2PuffeRL(PuffeRL):
         # #131): the σ cap (policy.aim_log_std_max), the live aim dims
         # (aim_dim_mask.sum(): 1 when pitch is pinned) and the entropy-bonus switch
         # (0 continuous entropy when the Gaussian is excluded from the objective, so
-        # the target and floor track the discrete heads only). getattr defaults keep
-        # pre-R0-E policies/configs working.
+        # the target and floor track the discrete heads only). Every Dust2Policy
+        # declares the cap and the mask, so both are read directly (#355).
         max_entropy_discrete = sum(np.log(n) for n in ACTION_HEAD_SIZES)
-        _cap = float(getattr(self.policy, "aim_log_std_max", LOG_STD_MAX))
-        _n_aim = float(getattr(self.policy, "aim_dim_mask", torch.ones(AIM_DIM)).sum())
+        _cap = float(self.policy.aim_log_std_max)
+        _n_aim = float(self.policy.aim_dim_mask.sum())
         _bonus = bool(self.config.get("aim_entropy_bonus", True))
         max_entropy_continuous = (_n_aim * 0.5 * np.log(2 * np.pi * np.e * np.exp(_cap)**2))\
             if _bonus else 0.0
@@ -744,7 +744,7 @@ class Cs2PuffeRL(PuffeRL):
             (logits, mu_aim, log_std_aim, value),
             max_turn_speed=self.policy.max_turn_speed.item(),
             mask=action_mask,
-            aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+            aim_dim_mask=self.policy.aim_dim_mask,
         )
         return _RolloutStep(state=state,
                             action=action,
@@ -803,7 +803,7 @@ class Cs2PuffeRL(PuffeRL):
             (opp_logits, opp_mu, opp_log_std, None),
             max_turn_speed=past_policy.max_turn_speed.item(),
             mask=action_mask[opp_mask] if action_mask is not None else None,
-            aim_dim_mask=getattr(past_policy, "aim_dim_mask", None),
+            aim_dim_mask=past_policy.aim_dim_mask,
         )
         opp_logprob = opp_logprob_d + opp_logprob_c
 
@@ -1185,7 +1185,7 @@ class Cs2PuffeRL(PuffeRL):
             mb_prio=batch.prio,
             mb_masks=batch.masks,
             mb_part=batch.part_f,
-            aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+            aim_dim_mask=self.policy.aim_dim_mask,
             aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
         )
 
@@ -1410,7 +1410,7 @@ class Cs2PuffeRL(PuffeRL):
             idx=batch.idx,
             mb_label="mb0" if is_mb0 else "mbL",
             mb_part=batch.part_f,
-            aim_dim_mask=getattr(self.policy, "aim_dim_mask", None),
+            aim_dim_mask=self.policy.aim_dim_mask,
             aim_entropy_bonus=bool(config.get("aim_entropy_bonus", True)),
         )
         tag_metrics = self._tag_metrics

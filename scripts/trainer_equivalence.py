@@ -339,64 +339,64 @@ def build(seed,
 # ── case hooks: hook(trainer, epoch, phase), phase "built" or "after_eval" ──────────
 def _cfg(**c):
 
-    def hook(t, epoch, phase):
+    def hook(trainer, epoch, phase):
         if phase == "built":
-            t.config.update(c)
+            trainer.config.update(c)
 
     return hook
 
 
 def _attrs(**a):
 
-    def hook(t, epoch, phase):
+    def hook(trainer, epoch, phase):
         if phase == "built":
             for k, v in a.items():
-                setattr(t, k, v)
+                setattr(trainer, k, v)
 
     return hook
 
 
 def _after_eval(fn):
 
-    def hook(t, epoch, phase):
+    def hook(trainer, epoch, phase):
         if phase == "after_eval":
-            fn(t, epoch)
+            fn(trainer, epoch)
 
     return hook
 
 
 def _chain(*hooks):
 
-    def hook(t, epoch, phase):
+    def hook(trainer, epoch, phase):
         for h in hooks:
-            h(t, epoch, phase)
+            h(trainer, epoch, phase)
 
     return hook
 
 
-def _cpu_bf16_autocast(t, epoch, phase):
+def _cpu_bf16_autocast(trainer, epoch, phase):
     import torch
 
     if phase == "built":
-        t.amp_context = torch.amp.autocast("cpu", dtype=torch.bfloat16)
+        trainer.amp_context = torch.amp.autocast("cpu", dtype=torch.bfloat16)
 
 
 def _keep_participating(step):
 
-    def fn(t, epoch):
-        t.participating.zero_()
-        t.participating[::step] = True
+    def fn(trainer, epoch):
+        trainer.participating.zero_()
+        trainer.participating[::step] = True
 
     return fn
 
 
-def _force_events(t, epoch):
-    t._event_mask[::3] = True
+def _force_events(trainer, epoch):
+    trainer._event_mask[::3] = True
 
 
-def _collapse_watch(t, epoch):
+def _collapse_watch(trainer, epoch):
     if epoch == 1:
-        t._warmstart_h0 = 1e6
+        trainer._warmstart_h0 = 1e6
 
 
 _WS_GRACE = dict(warmstart_entropy=True, warmstart_alpha_ceiling=0.0, warmstart_grace_steps=10**12)
@@ -455,7 +455,7 @@ CASES: dict[str, dict[str, Any]] = {
          loss_patch="nan_odd",
          hook=_chain(_cfg(**_TAG), _attrs(total_minibatches=4))),
     "empty_all":
-    dict(build={}, epochs=2, hook=_after_eval(lambda t, e: t.participating.zero_())),
+    dict(build={}, epochs=2, hook=_after_eval(lambda trainer, e: trainer.participating.zero_())),
     "empty_some":
     dict(build=dict(opponent="noop", n_active_per_team=1),
          epochs=2,
@@ -573,7 +573,7 @@ def run_case(name, seed=0):
         trainer, cleanup = build(seed, **spec.build)
         try:
             built = construction(trainer)
-            hook = spec.hook or (lambda t, e, p: None)
+            hook = spec.hook or (lambda trainer, e, p: None)
             hook(trainer, -1, "built")
             if spec.seed_pool:
                 _seed_pool(trainer)

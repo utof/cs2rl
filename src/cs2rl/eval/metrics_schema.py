@@ -678,16 +678,16 @@ REGISTRY.update({
         "which is rewritten at every launch and lies after a flag-less resume. Its "
         "placement OUTSIDE the --tag-diagnostic hook is part of the contract."),
     "split/trunk_active":
-    _e("last", "flag", (), "Unconditional twin of split/active, keyed on encoder_t."),
+    _e("last", "flag", (), "Unconditional twin of split/active, keyed on policy.tct_split_trunk."),
     "split/head_l2_rel/*":
     _f(
         "last", "ratio",
         tuple(f"split/head_l2_rel/{n}" for n in ("action_heads", "aim_mu", "aim_log_std")), (),
-        "ARCHITECTURE-GATED: compute_head_divergence returns {} without action_heads_t, "
+        "ARCHITECTURE-GATED: compute_head_divergence returns {} unless policy.tct_split_heads, "
         "so these keys are genuinely absent in a non-split run — unlike split/active."),
     "split/trunk_l2_rel/*":
     _f("last", "ratio", tuple(f"split/trunk_l2_rel/{n}" for n in ("encoder", "lstm")), (),
-       "Architecture-gated on encoder_t. Modules are GROUPED, not per-tensor."),
+       "Architecture-gated on policy.tct_split_trunk. Modules are GROUPED, not per-tensor."),
 })
 for _n in ("action_heads", "aim_mu", "aim_log_std"):
     REGISTRY[f"split/head_l2_rel/{_n}"] = _e(

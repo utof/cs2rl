@@ -670,7 +670,7 @@ def bc_loss(policy, obs_t, disc_t, cont_t, valid=None, entropy_coef: float = DEF
         (logits, mu_aim, log_std.detach(), value),
         action=flat_disc,
         continuous_action=flat_cont,
-        aim_dim_mask=getattr(policy, "aim_dim_mask", None),
+        aim_dim_mask=policy.aim_dim_mask,
     )
 
     if valid is None:

@@ -3,7 +3,7 @@
 Use [README](../README.md) for setup/smoke commands and
 [CONTRIBUTING](../CONTRIBUTING.md#tests) for the full-suite/worktree procedure.
 The documented two-worker suite was measured on one development machine;
-start with at least 7 GB MemAvailable and copy existing visibility caches into
+start with at least 5 GB MemAvailable and copy existing visibility caches into
 a worktree. Those measurements are not hardware-independent performance guarantees.
 
 ## Existing checks

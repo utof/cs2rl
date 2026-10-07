@@ -101,9 +101,7 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
     # uncompiled_policy is the raw module; a torch.compile wrapper would prefix
     # names with "_orig_mod." and break the name match (the parameter OBJECTS
     # are shared, so the identity prune below is unaffected either way).
-    policy = getattr(trainer, "uncompiled_policy", None)
-    if policy is None:
-        policy = trainer.policy
+    policy = trainer.uncompiled_policy
     sigma_params = [
         p for name, p in policy.named_parameters() if _re.search(r"aim_log_std(_t|_ct)?$", name)
     ]
@@ -126,10 +124,11 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
     new_group["params"] = sigma_params
     new_group["weight_decay"] = weight_decay
     opt.add_param_group(new_group)
-    sch = getattr(trainer, "scheduler", None)
-    if sch is not None and hasattr(sch, "base_lrs"):
-        sch.base_lrs.append(float(new_group.get("initial_lr", new_group["lr"])))
-        sch._last_lr = [g["lr"] for g in opt.param_groups]
+    # PuffeRL.__init__ always builds the scheduler; a direct read raises if that changes,
+    # where a skipped append would leave the σ group's LR silently unannealed (#355).
+    sch = trainer.scheduler
+    sch.base_lrs.append(float(new_group.get("initial_lr", new_group["lr"])))
+    sch._last_lr = [g["lr"] for g in opt.param_groups]
     return len(sigma_params)
 
 
@@ -682,8 +681,8 @@ def _log_epoch(run: _EpochLoop, logs: dict, ts_val: float):
     # split labels, derived from the POLICY OBJECT, never from config.json (which a
     # flag-less crash-resume of a split run rewrites as false). Written on EVERY row,
     # not behind --tag-diagnostic / --tag-every: an unlabeled row reads as a legacy run.
-    logs["split/active"] = float(hasattr(policy, "aim_log_std_t"))
-    logs["split/trunk_active"] = float(hasattr(policy, "encoder_t"))
+    logs["split/active"] = float(policy.tct_split_heads)
+    logs["split/trunk_active"] = float(policy.tct_split_trunk)
     logs.update(compute_head_divergence(policy))
     logs.update(compute_trunk_divergence(policy))
     _inject_tag_metrics(trainer, logs)

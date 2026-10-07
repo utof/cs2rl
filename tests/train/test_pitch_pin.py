@@ -433,3 +433,58 @@ def test_log_aim_log_std_skips_pitch_when_pinned(simple_map):
         assert "policy/aim_log_std_pitch" in logs
     finally:
         cleanup()
+
+
+def test_a_renamed_aim_dim_mask_raises_at_its_readers(simple_map):
+    """#355: the readers read ``policy.aim_dim_mask`` directly.
+
+    They used ``getattr(policy, "aim_dim_mask", None)``, and a None mask counts every aim
+    dim as live: measured on a pin_pitch policy with the buffer renamed, the sampler's
+    logprob_c gained the pitch term and log_aim_log_std logged the dead pitch sigma, with
+    no error. Each reader below runs once on the intact policy (so the stand-in ``self``
+    is enough), then must raise once the buffer is renamed. The fallback back at any one
+    of them is red here.
+    """
+    from types import SimpleNamespace
+
+    from cs2rl import train_bc
+    from cs2rl.env.c.cs2_env import make_env
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.policy import build_policy
+    from cs2rl.train.metrics import log_aim_log_std
+    from cs2rl.train.trainer import Cs2PuffeRL
+
+    env = make_env(map_data=simple_map, config=EnvConfig(pin_pitch=1), seed=1)
+    try:
+        policy = build_policy(env, "cpu", pin_pitch=True)
+    finally:
+        env.close()
+    obs = torch.zeros(2, policy.obs_dim)
+    rollout_self = SimpleNamespace(config={"use_rnn": False}, policy=policy)
+
+    def sample_actions():
+        # pyrefly: ignore[bad-argument-type]  a stand-in self with only what the rollout reads
+        return Cs2PuffeRL._sample_actions(rollout_self, obs, None, None, slice(0, 2), None, None)
+
+    def bc_loss():
+        disc = torch.zeros(2, 1, len(ACTION_HEAD_SIZES), dtype=torch.int64)
+        return train_bc.bc_loss(policy, obs[:, None], disc, torch.zeros(2, 1, AIM_DIM), valid=None)
+
+    readers = {
+        "log_aim_log_std": lambda: log_aim_log_std(policy, {}),
+        "Cs2PuffeRL._sample_actions": sample_actions,
+        "train_bc.bc_loss": bc_loss,
+    }
+    with torch.no_grad():
+        for read in readers.values():
+            read()
+        policy._buffers["aim_dim_mask_renamed"] = policy._buffers.pop("aim_dim_mask")
+        silent = []
+        for name, read in readers.items():
+            try:
+                read()
+            except AttributeError as e:
+                assert "aim_dim_mask" in str(e), (name, e)
+            else:
+                silent.append(name)
+    assert not silent, f"read a renamed aim_dim_mask without raising: {silent}"
