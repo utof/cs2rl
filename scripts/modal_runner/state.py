@@ -63,8 +63,12 @@ class RunStatus:
 
     @classmethod
     def from_dict(cls, payload: Mapping[str, Any]) -> RunStatus:
-        # Any, not object: the values are parsed JSON and these coercions are the check. A wrong
-        # type raises TypeError or ValueError, which derive_run_view_from_bytes reports as corrupt.
+        # Any, not object: the values are parsed JSON, and pyrefly rejects int() of an object. The
+        # only checks here: a missing key raises KeyError, and a non-numeric schema_version or an
+        # unknown status raises TypeError or ValueError. int() also accepts numeric strings,
+        # floats and bools, and str() accepts any value, so attempt_id and updated_at are not
+        # checked. derive_run_view_from_bytes reports these errors as corrupt; read_status lets
+        # them propagate.
         return cls(
             schema_version=int(payload["schema_version"]),
             status=Status(str(payload["status"])),
