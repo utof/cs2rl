@@ -1298,11 +1298,14 @@ class Cs2PuffeRL(PuffeRL):
         Runs before the policy backward. The policy loss was built from the pre-step
         alpha, so this step cannot reach this minibatch's policy gradient; GRACE
         keeps log_alpha at its operating point for the ramp's handover.
-        A non-finite alpha loss (a NaN or infinite entropy or target) is skipped before
-        its backward, so neither log_alpha nor its Adam moments see that gradient (#353).
-        Stepping on one made log_alpha NaN for the rest of the run, and with it every
-        later entropy bonus, so the NaN guard skipped every later policy step. The
+        A non-finite alpha loss (e.g. from a NaN or infinite entropy or target) is skipped
+        before its backward, so neither log_alpha nor its Adam moments see that gradient
+        (#353). Stepping on one made log_alpha NaN for the rest of the run, and with it
+        every later entropy bonus, so the NaN guard skipped every later policy step. The
         skipped loss still enters the logged mean, losses/alpha_loss.
+        KNOWN LIMIT: a log_alpha that is already non-finite (a checkpoint saved by a run
+        that hit #353) makes every alpha loss non-finite, so it is never stepped or
+        repaired here.
         """
         if self._warmstart_phase != WS_GRACE and torch.isfinite(step.alpha_loss).all():
             self._alpha_optimizer.zero_grad()

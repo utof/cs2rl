@@ -40,7 +40,7 @@ CASES reach the update's branches: default; the noop statue and parked rows; pas
 self-play (with and without the action-mask view); TAG; KL early stop; warm-start entropy
 (grace/floor, ramp, hand-off, collapse watch, non-positive h0); the NaN guard (including a
 NaN in the middle of an accumulation window, and a NaN entropy, whose alpha loss is NaN so
-alpha does not step); empty minibatches; value clipping with prioritised event replay; the
+alpha skips that minibatch's step); empty minibatches; value clipping with prioritised event replay; the
 checkpoint/done tail; CPU bf16 autocast (``fp32_*`` is its positive control: same case
 without autocast, its digest must differ).
 
