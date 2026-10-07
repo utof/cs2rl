@@ -591,7 +591,6 @@ def launch_run(
     repo: Path,
     app_obj: object | None = None,
     train_fn: object | None = None,
-    modal_module: object | None = None,
     now: datetime | None = None,
     attempt_id: str | None = None,
     stdout: object | None = None,
@@ -600,7 +599,6 @@ def launch_run(
     repo = Path(repo)
     stamp = now if now is not None else datetime.now(UTC)
     nonce = attempt_id if attempt_id is not None else uuid.uuid4().hex
-    modal_mod = modal if modal_module is None else modal_module
     train = train_remote if train_fn is None else train_fn
     app_handle = app if app_obj is None else app_obj
     sink = sys.stdout if stdout is None else stdout
@@ -613,7 +611,7 @@ def launch_run(
     secret = None
     if request.wandb_secret_name is not None:
         try:
-            secret = modal_mod.Secret.from_name(request.wandb_secret_name)
+            secret = modal.Secret.from_name(request.wandb_secret_name)
         except Exception as err:
             if _is_not_found_error(err):
                 raise mrl.ValidationError("requested W&B Secret is missing") from err
@@ -623,19 +621,17 @@ def launch_run(
     prior_digest: str | None = None
     if request.resume.prior_run_id is not None:
         parent_volume = _lookup_named(
-            modal_mod.Volume,
+            modal.Volume,
             mrl.VOLUME_NAME,
             missing="artifact volume is missing",
         )
         prior_bytes, prior_digest = prior_checkpoint_or_raise(parent_volume,
                                                               request.resume.prior_run_id, stamp)
 
-    modal_mod.Volume.objects.create(mrl.VOLUME_NAME, allow_existing=True)
-    modal_mod.Dict.objects.create(mrl.REGISTRY_NAME, allow_existing=True)
-    volume = _lookup_named(modal_mod.Volume, mrl.VOLUME_NAME, missing="artifact volume is missing")
-    registry_dict = _lookup_named(modal_mod.Dict,
-                                  mrl.REGISTRY_NAME,
-                                  missing="run registry is missing")
+    modal.Volume.objects.create(mrl.VOLUME_NAME, allow_existing=True)
+    modal.Dict.objects.create(mrl.REGISTRY_NAME, allow_existing=True)
+    volume = _lookup_named(modal.Volume, mrl.VOLUME_NAME, missing="artifact volume is missing")
+    registry_dict = _lookup_named(modal.Dict, mrl.REGISTRY_NAME, missing="run registry is missing")
     registry = ModalDictRegistry(registry_dict)
     artifacts = ModalVolumeIndex(volume)
     mrl.reserve_run(registry, artifacts, request.run_id, nonce, now=stamp)
@@ -682,7 +678,7 @@ def launch_run(
         resume_client=uploaded["resume_client"],
         resume_digest=uploaded["resume_digest"],
         resume_size=uploaded["resume_size"],
-        modal_version=str(modal_mod.__version__),
+        modal_version=str(modal.__version__),
         wandb_enabled=secret is not None,
         created_at=stamp.isoformat(),
     )
