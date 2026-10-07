@@ -11,6 +11,8 @@ Phase semantics pinned here:
              ~500x alpha discontinuity at an unplotted step — spec finding 2).
   OFF   (2): steady state, identical to no-warmstart behavior; floor active.
 """
+import pytest
+
 from cs2rl.train.entropy import WS_GRACE, WS_OFF, WS_RAMP, warmstart_entropy_state
 
 
@@ -62,13 +64,13 @@ def test_ramp_endpoints_and_midpoint():
     kw = dict(grace_steps=5_000_000, ramp_steps=10_000_000, h_anchor=1.8, base_target=2.874)
     at_start = warmstart_entropy_state(5_000_000, **kw)
     assert at_start.phase == WS_RAMP
-    assert abs(at_start.target - 1.8) < 1e-9
+    assert at_start.target == pytest.approx(1.8, abs=1e-9)
     assert at_start.floor_active is False
     mid = warmstart_entropy_state(10_000_000, **kw)
-    assert abs(mid.target - (1.8 + 2.874) / 2) < 1e-9
+    assert mid.target == pytest.approx((1.8 + 2.874) / 2, abs=1e-9)
     end = warmstart_entropy_state(15_000_000, **kw)
     assert end.phase == WS_OFF
-    assert abs(end.target - 2.874) < 1e-9
+    assert end.target == pytest.approx(2.874, abs=1e-9)
     assert end.floor_active is True
 
 
@@ -80,7 +82,7 @@ def test_ramp_steps_zero_goes_straight_to_off():
                                 base_target=2.874)
     assert s.phase == WS_OFF
     assert s.floor_active is True
-    assert abs(s.target - 2.874) < 1e-9
+    assert s.target == pytest.approx(2.874, abs=1e-9)
 
 
 def test_grace_steps_zero_with_anchor_starts_ramp_immediately():
@@ -90,7 +92,7 @@ def test_grace_steps_zero_with_anchor_starts_ramp_immediately():
                                 h_anchor=1.8,
                                 base_target=2.874)
     assert s.phase == WS_RAMP
-    assert abs(s.target - 1.8) < 1e-9
+    assert s.target == pytest.approx(1.8, abs=1e-9)
     assert s.floor_active is False
 
 
@@ -101,7 +103,7 @@ def test_far_future_step_is_off_at_base_target():
                                 h_anchor=1.8,
                                 base_target=2.874)
     assert s.phase == WS_OFF
-    assert abs(s.target - 2.874) < 1e-9
+    assert s.target == pytest.approx(2.874, abs=1e-9)
     assert s.floor_active is True
 
 
@@ -121,4 +123,4 @@ def test_downward_ramp_when_anchor_above_base():
                                 ramp_steps=5_000_000,
                                 h_anchor=4.0,
                                 base_target=2.874)
-    assert abs(s.target - (4.0 + 2.874) / 2) < 1e-9
+    assert s.target == pytest.approx((4.0 + 2.874) / 2, abs=1e-9)
