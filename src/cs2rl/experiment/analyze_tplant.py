@@ -59,7 +59,7 @@ import re
 import statistics
 import sys
 from pathlib import Path
-from typing import Any
+from typing import Any, NamedTuple
 
 BOMB_TIMER_DEFAULT = 640               # ticks; src/cs2rl/env/nav.py BOMB_TIMER — keep in sync
 CAP_DEFAULT = 640                      # ticks; src/cs2rl/env/c/nav_data.h CFG_ROUND_TIME
@@ -401,6 +401,166 @@ STRUCTURAL_VERDICT = "structural (split run — cross≡0 by architecture)"
 TRUNK_STRUCTURAL_VERDICT = "structural (trunk split — cross≡0 by architecture)"
 
 
+def _tag_phase(step, dead_windows):
+    """Phase of a row: "dead" if `step` lies in a (start, end) dead window, ends included."""
+    return "dead" if any(a <= step <= b for a, b in dead_windows) else "healthy"
+
+
+def _is_missing(v):
+    """True for a TAG value that cannot be used: None, or a float NaN (zero-norm subset)."""
+    return v is None or (isinstance(v, float) and math.isnan(v))
+
+
+def _tag_cell(pairs, rng, boot_n, *, structural, structural_verdict=STRUCTURAL_VERDICT):
+    """Bootstrap + verdict for one (group, mb, phase) cell.
+
+    `structural` short-circuits the verdict only — n_epochs, the medians
+    and the CI are still computed and printed, because "cross is 0.000 and
+    within is 0.55" is informative context for a reader even when the
+    cell is excluded from the decision. Pass TRUNK_STRUCTURAL_VERDICT
+    for a trunk cell: the heads string must stay exclusive to heads so
+    the Batch 7 footer predicate (any cell == STRUCTURAL_VERDICT) does
+    not also fire on a trunk-split run.
+
+    `pairs` is never empty: a cell exists only once a pair was appended to
+    it. So the medians here are statistics.median, which raises on empty
+    input, rather than this module's median, which returns None for it.
+
+    `rng` is tag_summary's ONE random.Random(seed), shared by every cell and
+    drawn from boot_n * len(pairs) times per call. PITFALL: tag_summary calls
+    this over its normal cells, then its structural cells, each in insertion
+    order; a per-cell rng or another call order moves every CI.
+    """
+    diffs = [w - c for c, w in pairs]
+    conflict = statistics.median(diffs)
+    boots = []
+    for _ in range(boot_n):
+        sample = [diffs[rng.randrange(len(diffs))] for _ in diffs]
+        boots.append(statistics.median(sample))
+    boots.sort()
+    ci_low = boots[int(0.025 * boot_n)]
+    ci_high = boots[int(0.975 * boot_n) - 1]
+    if structural:
+        verdict = structural_verdict
+    elif len(pairs) < CONFLICT_MIN_N:
+        verdict = f"insufficient data (n={len(pairs)})"
+    elif conflict >= CONFLICT_MIN and ci_low > 0:
+        verdict = "CONFLICT"
+    else:
+        verdict = "no conflict detected"
+    return {
+        "n_epochs": len(pairs),
+        "median_cross_half": statistics.median([c for c, _ in pairs]),
+        "median_within": statistics.median([w for _, w in pairs]),
+        "conflict": conflict,
+        "ci_low": ci_low,
+        "ci_high": ci_high,
+        "verdict": verdict,
+    }
+
+
+def _row_tag_cells(row):
+    """One row's TAG values: ({(group, mb): {metric: value}}, [(mb, vf), ...]).
+
+    The per-(group, mb) values are returned as logged, NaN and None included: the
+    caller's drop rules read them. Only vf values that are not _is_missing are
+    returned. Both keep the row's key order.
+    """
+    per_gm = {}
+    vf_vals = []
+    for k, v in row.items():
+        m = _TAG_KEY.match(k)
+        if m:
+            per_gm.setdefault((m["group"], m["mb"]), {})[m["metric"]] = v
+            continue
+        mvf = _TAG_VF_KEY.match(k)
+        if mvf and not _is_missing(v):
+            vf_vals.append((mvf["mb"], v))
+    return per_gm, vf_vals
+
+
+class _TagTally(NamedTuple):
+    """What _accumulate_tag_rows collects from the rows for tag_summary."""
+    acc: dict                          # (group, mb, phase) -> [(cross_half, within)]
+    struct_acc: dict                   # (group, mb, phase) -> [(cross_half, within)] on split rows
+    vf_acc: dict                       # (mb, phase) -> [vf]
+    n_raw: int                         # rows with any tag measurement, counted BEFORE drops
+    saw_split_key: bool                # any row carried split/active at all
+    saw_trunk_key: bool                # any row carried split/trunk_active at all (backstop)
+    saw_trunk_active: bool             # any raw row had split/trunk_active == 1 (footer)
+    heads_cross_all: list              # every surviving policy_heads cross_half (backstop input)
+    trunk_cross_all: list              # every surviving trunk cross_half (trunk backstop)
+
+
+def _accumulate_tag_rows(rows, dead_windows) -> _TagTally:
+    """tag_summary's pass over the rows: the drop rules and the per-cell accumulation.
+
+    n_raw and the three saw_* flags are read from every row BEFORE the selfplay /
+    NaN / band drops; the cell pairs and the two *_cross_all lists only from the
+    rows and (group, mb) values that survive them. Everything fills in row order,
+    then key order, and tag_summary bootstraps the cells in that insertion order.
+    """
+    acc = {}                                                                               # (group, mb, phase) -> [(cross_half, within)]
+    vf_acc = {}                                                                            # (mb, phase) -> [vf]
+    n_raw = 0                                                                              # rows with any tag measurement, counted BEFORE drops
+    struct_acc = {}                                                                        # (group, mb, phase) -> [(cross_half, within)] on split rows
+    saw_split_key = False                                                                  # any row carried split/active at all
+    saw_trunk_key = False                                                                  # any row carried split/trunk_active at all (backstop)
+    saw_trunk_active = False                                                               # any raw row had split/trunk_active == 1 (footer)
+    heads_cross_all = []                                                                   # every surviving policy_heads cross_half (backstop input)
+    trunk_cross_all = []                                                                   # every surviving trunk cross_half (trunk backstop)
+    for row in rows:
+        if any(_TAG_KEY.match(k) or _TAG_VF_KEY.match(k) for k in row):
+            n_raw += 1
+        row_split = bool(row.get(SPLIT_ACTIVE_KEY))
+        if SPLIT_ACTIVE_KEY in row:
+            saw_split_key = True
+                                                                                           # Footer / backstop scan MUST run before selfplay/NaN/band drops.
+                                                                                           # 0.0 is heads-only (float(hasattr)); only == 1 / == 1.0 counts as
+                                                                                           # trunk-active. KEY in row is the backstop's "key was seen" bit —
+                                                                                           # a present 0.0 must NOT fire the missing-key warning.
+        if SPLIT_TRUNK_ACTIVE_KEY in row:
+            saw_trunk_key = True
+        if row.get(SPLIT_TRUNK_ACTIVE_KEY) == 1:
+            saw_trunk_active = True
+        if row.get("tag/selfplay_active"):
+            continue
+        phase = _tag_phase(row.get("step", 0.0), dead_windows)
+        per_gm, vf_vals = _row_tag_cells(row)
+        for mb, v in vf_vals:
+            vf_acc.setdefault((mb, phase), []).append(v)
+        for (group, mb), vals in per_gm.items():
+            need = ("cossim_cross_half", "cossim_within_t", "cossim_within_ct", "gnorm_t",
+                    "gnorm_ct")
+            if any(_is_missing(vals.get(n)) for n in need):
+                continue
+            gct = vals["gnorm_ct"]
+            ratio = vals["gnorm_t"] / gct if gct else float("inf")
+            if not (NORM_RATIO_BAND[0] <= ratio <= NORM_RATIO_BAND[1]):
+                continue
+            within = 0.5 * (vals["cossim_within_t"] + vals["cossim_within_ct"])
+            if group == "policy_heads":
+                heads_cross_all.append(vals["cossim_cross_half"])
+            elif group == "trunk":
+                trunk_cross_all.append(vals["cossim_cross_half"])
+                                                                                           # split/active labels policy_heads only; split/trunk_active
+                                                                                           # labels trunk only. Do not overload either key.
+            row_trunk = row.get(SPLIT_TRUNK_ACTIVE_KEY) == 1
+            target = struct_acc if ((row_split and group == "policy_heads") or
+                                    (row_trunk and group == "trunk")) else acc
+            target.setdefault((group, mb, phase), []).append((vals["cossim_cross_half"], within))
+
+    return _TagTally(acc=acc,
+                     struct_acc=struct_acc,
+                     vf_acc=vf_acc,
+                     n_raw=n_raw,
+                     saw_split_key=saw_split_key,
+                     saw_trunk_key=saw_trunk_key,
+                     saw_trunk_active=saw_trunk_active,
+                     heads_cross_all=heads_cross_all,
+                     trunk_cross_all=trunk_cross_all)
+
+
 def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
     """Per group × mb × phase conflict scores (spec 2026-08-13 §4.5).
 
@@ -449,132 +609,34 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
     ('_structural_backstop') is unchanged.
     """
     rng = random.Random(seed)
-
-    def _phase(step):
-        return "dead" if any(a <= step <= b for a, b in dead_windows) else "healthy"
-
-    def _bad(v):
-        return v is None or (isinstance(v, float) and math.isnan(v))
-
-    acc = {}                                                                               # (group, mb, phase) -> [(cross_half, within)]
-    vf_acc = {}                                                                            # (mb, phase) -> [vf]
-    n_raw = 0                                                                              # rows with any tag measurement, counted BEFORE drops
-    struct_acc = {}                                                                        # (group, mb, phase) -> [(cross_half, within)] on split rows
-    saw_split_key = False                                                                  # any row carried split/active at all
-    saw_trunk_key = False                                                                  # any row carried split/trunk_active at all (backstop)
-    saw_trunk_active = False                                                               # any raw row had split/trunk_active == 1 (footer)
-    heads_cross_all = []                                                                   # every surviving policy_heads cross_half (backstop input)
-    trunk_cross_all = []                                                                   # every surviving trunk cross_half (trunk backstop)
-    for row in rows:
-        if any(_TAG_KEY.match(k) or _TAG_VF_KEY.match(k) for k in row):
-            n_raw += 1
-        row_split = bool(row.get(SPLIT_ACTIVE_KEY))
-        if SPLIT_ACTIVE_KEY in row:
-            saw_split_key = True
-                                                                                           # Footer / backstop scan MUST run before selfplay/NaN/band drops.
-                                                                                           # 0.0 is heads-only (float(hasattr)); only == 1 / == 1.0 counts as
-                                                                                           # trunk-active. KEY in row is the backstop's "key was seen" bit —
-                                                                                           # a present 0.0 must NOT fire the missing-key warning.
-        if SPLIT_TRUNK_ACTIVE_KEY in row:
-            saw_trunk_key = True
-        if row.get(SPLIT_TRUNK_ACTIVE_KEY) == 1:
-            saw_trunk_active = True
-        if row.get("tag/selfplay_active"):
-            continue
-        phase = _phase(row.get("step", 0.0))
-        per_gm = {}
-        for k, v in row.items():
-            m = _TAG_KEY.match(k)
-            if m:
-                per_gm.setdefault((m["group"], m["mb"]), {})[m["metric"]] = v
-                continue
-            mvf = _TAG_VF_KEY.match(k)
-            if mvf and not _bad(v):
-                vf_acc.setdefault((mvf["mb"], phase), []).append(v)
-        for (group, mb), vals in per_gm.items():
-            need = ("cossim_cross_half", "cossim_within_t", "cossim_within_ct", "gnorm_t",
-                    "gnorm_ct")
-            if any(_bad(vals.get(n)) for n in need):
-                continue
-            gct = vals["gnorm_ct"]
-            ratio = vals["gnorm_t"] / gct if gct else float("inf")
-            if not (NORM_RATIO_BAND[0] <= ratio <= NORM_RATIO_BAND[1]):
-                continue
-            within = 0.5 * (vals["cossim_within_t"] + vals["cossim_within_ct"])
-            if group == "policy_heads":
-                heads_cross_all.append(vals["cossim_cross_half"])
-            elif group == "trunk":
-                trunk_cross_all.append(vals["cossim_cross_half"])
-                                                                                           # split/active labels policy_heads only; split/trunk_active
-                                                                                           # labels trunk only. Do not overload either key.
-            row_trunk = row.get(SPLIT_TRUNK_ACTIVE_KEY) == 1
-            target = struct_acc if ((row_split and group == "policy_heads") or
-                                    (row_trunk and group == "trunk")) else acc
-            target.setdefault((group, mb, phase), []).append((vals["cossim_cross_half"], within))
-
-    def _cell(pairs, structural, structural_verdict=STRUCTURAL_VERDICT):
-        """Bootstrap + verdict for one (group, mb, phase) cell.
-
-        `structural` short-circuits the verdict only — n_epochs, the medians
-        and the CI are still computed and printed, because "cross is 0.000 and
-        within is 0.55" is informative context for a reader even when the
-        cell is excluded from the decision. Pass TRUNK_STRUCTURAL_VERDICT
-        for a trunk cell: the heads string must stay exclusive to heads so
-        the Batch 7 footer predicate (any cell == STRUCTURAL_VERDICT) does
-        not also fire on a trunk-split run.
-
-        `pairs` is never empty: a cell exists only once a pair was appended to
-        it. So the medians here are statistics.median, which raises on empty
-        input, rather than this module's median, which returns None for it.
-        """
-        diffs = [w - c for c, w in pairs]
-        conflict = statistics.median(diffs)
-        boots = []
-        for _ in range(boot_n):
-            sample = [diffs[rng.randrange(len(diffs))] for _ in diffs]
-            boots.append(statistics.median(sample))
-        boots.sort()
-        ci_low = boots[int(0.025 * boot_n)]
-        ci_high = boots[int(0.975 * boot_n) - 1]
-        if structural:
-            verdict = structural_verdict
-        elif len(pairs) < CONFLICT_MIN_N:
-            verdict = f"insufficient data (n={len(pairs)})"
-        elif conflict >= CONFLICT_MIN and ci_low > 0:
-            verdict = "CONFLICT"
-        else:
-            verdict = "no conflict detected"
-        return {
-            "n_epochs": len(pairs),
-            "median_cross_half": statistics.median([c for c, _ in pairs]),
-            "median_within": statistics.median([w for _, w in pairs]),
-            "conflict": conflict,
-            "ci_low": ci_low,
-            "ci_high": ci_high,
-            "verdict": verdict,
-        }
+    t = _accumulate_tag_rows(rows, dead_windows)
 
     out: dict[str, Any] = {}
-    for (group, mb, phase), pairs in acc.items():
-        out.setdefault(group, {}).setdefault(mb, {})[phase] = _cell(pairs, structural=False)
+    for (group, mb, phase), pairs in t.acc.items():
+        out.setdefault(group, {}).setdefault(mb, {})[phase] = _tag_cell(pairs,
+                                                                        rng,
+                                                                        boot_n,
+                                                                        structural=False)
     # Structural cells are written after the normal ones, so on a contended
     # slot the structural label WINS — deliberate: contention only happens when
     # some of a split run's rows lost the split/active key (e.g. a resume under
     # pre-Batch-7 code), and the architecture fact is still true for those
     # rows. tag_summary is called per run dir (see main); concatenating rows
     # from a split and a legacy run into one call is not a supported input.
-    for (group, mb, phase), pairs in struct_acc.items():
+    for (group, mb, phase), pairs in t.struct_acc.items():
         verdict = TRUNK_STRUCTURAL_VERDICT if group == "trunk" else STRUCTURAL_VERDICT
-        out.setdefault(group, {}).setdefault(mb, {})[phase] = _cell(pairs,
-                                                                    structural=True,
-                                                                    structural_verdict=verdict)
-    out["_vf"] = {k: median(v) for k, v in vf_acc.items()}
-    out["_n_raw"] = n_raw
-    out["_structural_backstop"] = bool(heads_cross_all) and not saw_split_key and all(
-        c == 0.0 for c in heads_cross_all)
-    out["_saw_trunk_active"] = saw_trunk_active
-    out["_trunk_structural_backstop"] = (bool(trunk_cross_all) and not saw_trunk_key
-                                         and all(c == 0.0 for c in trunk_cross_all))
+        out.setdefault(group, {}).setdefault(mb, {})[phase] = _tag_cell(pairs,
+                                                                        rng,
+                                                                        boot_n,
+                                                                        structural=True,
+                                                                        structural_verdict=verdict)
+    out["_vf"] = {k: median(v) for k, v in t.vf_acc.items()}
+    out["_n_raw"] = t.n_raw
+    out["_structural_backstop"] = bool(t.heads_cross_all) and not t.saw_split_key and all(
+        c == 0.0 for c in t.heads_cross_all)
+    out["_saw_trunk_active"] = t.saw_trunk_active
+    out["_trunk_structural_backstop"] = (bool(t.trunk_cross_all) and not t.saw_trunk_key
+                                         and all(c == 0.0 for c in t.trunk_cross_all))
     return out
 
 
