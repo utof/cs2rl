@@ -24,6 +24,7 @@ import sys
 import tempfile
 import threading
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
@@ -261,7 +262,7 @@ class ModalDictRegistry:
     def __init__(self, mapping: object):
         self._dict = mapping
 
-    def put_if_absent(self, key: str, value: dict[str, object]) -> bool:
+    def put_if_absent(self, key: str, value: Mapping[str, object]) -> bool:
         return bool(self._dict.put(key, dict(value), skip_if_exists=True))
 
     def get(self, key: str) -> dict[str, object] | None:
@@ -273,7 +274,7 @@ class ModalDictRegistry:
             return None
         return dict(stored)
 
-    def set_existing(self, key: str, value: dict[str, object]) -> None:
+    def set_existing(self, key: str, value: Mapping[str, object]) -> None:
         current = self.get(key)
         if current is None or current.get("attempt_id") != value.get("attempt_id"):
             raise mrl.ValidationError("registry claim is not owned by this attempt")

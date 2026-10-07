@@ -8,6 +8,7 @@ costs in the seam manifest, and where helpers go.
 """
 import json
 import threading
+from collections.abc import Mapping
 from datetime import UTC, timedelta
 from pathlib import PurePosixPath
 
@@ -242,7 +243,7 @@ class FakeRegistry:
         self.data: dict[str, dict[str, object]] = {}
         self.events: list[tuple[object, ...]] = []
 
-    def put_if_absent(self, key: str, value: dict[str, object]) -> bool:
+    def put_if_absent(self, key: str, value: Mapping[str, object]) -> bool:
         with self._lock:
             self.events.append(("put_if_absent", key))
             if key in self.data:
@@ -255,7 +256,7 @@ class FakeRegistry:
             stored = self.data.get(key)
             return None if stored is None else dict(stored)
 
-    def set_existing(self, key: str, value: dict[str, object]) -> None:
+    def set_existing(self, key: str, value: Mapping[str, object]) -> None:
         with self._lock:
             current = self.data.get(key)
             if current is None or current.get("attempt_id") != value.get("attempt_id"):
