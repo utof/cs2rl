@@ -16,14 +16,16 @@ def test_nonfinite_alpha_loss_leaves_log_alpha_finite(monkeypatch, fault):
     """One non-finite alpha-loss input in update 0; update 1 trains alpha and the policy.
 
     #353: the alpha step runs before the NaN guard. When it stepped on a non-finite alpha
-    loss, log_alpha and its Adam moments went NaN for good, the entropy bonus
+    loss, log_alpha and its Adam moments went NaN and stayed NaN, the entropy bonus
     ``-effective_alpha * entropy`` was NaN in every later minibatch, and the NaN guard
-    skipped every later policy step: at fc6ce11, one NaN-entropy minibatch left 0 of the
-    policy's 27 parameter tensors changed in each of the next three updates.
+    skipped every later policy step: at fc6ce11, on this trainer, one NaN-entropy
+    minibatch left 0 of the policy's 27 parameter tensors changed in each of the next
+    three updates.
 
     The entropy faults fill the first minibatch's entropy with NaN, +inf or -inf (+inf
     makes the alpha loss -inf, not NaN). ``target_nan`` makes update 0's entropy target
-    NaN, the alpha loss's other input: entropy, policy loss and the policy step stay finite.
+    NaN, the alpha loss's other input; entropy and the policy loss stay finite, so the
+    policy still steps in update 0.
     """
     from cs2rl.train import trainer as trainer_module
     from cs2rl.train.resume import seed_everything
