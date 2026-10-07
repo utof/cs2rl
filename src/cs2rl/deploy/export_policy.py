@@ -150,9 +150,9 @@ def _check_load_result(result, aim_mu: nn.Linear | None) -> None:
         # The wrapper's own `_max_turn_speed` buffer is hand-populated via
         # register_buffer in LSTMPolicyONNXWrapper.__init__ (the underscore
         # prevents a collision with the checkpoint's top-level `max_turn_speed`
-        # key, which we read out by value, not via load_state_dict). Strict-load
-        # therefore reports it as missing on every Batch 3 export — filter it
-        # explicitly.
+        # key, which we read out by value, not via load_state_dict). The
+        # strict=False load therefore lists it in missing_keys on every Batch 3
+        # export — filter it explicitly.
         missing_unexpected = [
             k for k in result.missing_keys
             if not (aim_mu is None and k.startswith("aim_mu.")) and k != "_max_turn_speed"
