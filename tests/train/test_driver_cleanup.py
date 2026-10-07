@@ -113,11 +113,21 @@ def run_driver(monkeypatch, tmp_path):
         return captured["vec"]
 
     class Policy:
-        """A seeded tensor lets the normal control check checkpoint contents."""
+        """A seeded tensor lets the normal control check checkpoint contents.
+
+        The epoch log reads what every Dust2Policy declares directly (#355), so the
+        fake declares it too: an unsplit policy with the module's σ band and both
+        aim dims live.
+        """
 
         def __init__(self):
+            from cs2rl.policy import LOG_STD_MAX, LOG_STD_MIN
+
             self.weight = torch.rand(2)
             self.aim_log_std = torch.zeros(2)
+            self.aim_log_std_min, self.aim_log_std_max = LOG_STD_MIN, LOG_STD_MAX
+            self.aim_dim_mask = torch.ones(2)
+            self.tct_split_heads = self.tct_split_trunk = False
 
         def named_parameters(self):
             return []
