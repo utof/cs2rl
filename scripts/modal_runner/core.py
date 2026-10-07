@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from types import TracebackType
 from typing import Protocol
 
 VOLUME_NAME = "cs2rl-training-artifacts"
@@ -179,11 +180,20 @@ class Registry(Protocol):
 
 
 class LockLike(Protocol):
+    """A context-manager lock, e.g. threading.Lock.
+
+    __exit__ copies typeshed's parameter types. An implementation must accept
+    every argument the protocol declares, so declaring `object` (or
+    `*exc: object`) rejects threading.Lock, whose __exit__ accepts only
+    `type[BaseException] | None` first (gh#237). The parameters are
+    positional-only because Lock and RLock name them differently.
+    """
 
     def __enter__(self) -> object:
         ...
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
+                 tb: TracebackType | None, /) -> None:
         ...
 
 
