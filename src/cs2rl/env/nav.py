@@ -198,7 +198,7 @@ class NavGraph:
         self._build_pos_grid()
 
         # ── Visibility matrix (built in Task 2) ───────────────────────────
-        self.vis_matrix = None
+        self.vis_matrix: np.ndarray | None = None
 
     # ── Wall segment extraction ────────────────────────────────────────────
 

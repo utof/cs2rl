@@ -61,6 +61,7 @@ delta_y = np.array([_DELTA_VECTORS[k][1] for k in sorted(_DELTA_VECTORS)], dtype
 dir_facing = np.array([_DIR_FACING[k] for k in sorted(_DIR_FACING)], dtype=np.float32)
 
 grid_flat = md.grid.astype(np.int32).flatten()         # row-major [H * W]
+assert md.vis_matrix is not None                       # make_simple_map always builds it
 vis_flat = md.vis_matrix.astype(np.int8).flatten()
 adj_flat = md.adjacency.astype(np.int8).flatten()
 cxy_flat = md.centroids.astype(np.float32).flatten()   # [N * 2]

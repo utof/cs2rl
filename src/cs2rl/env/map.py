@@ -33,7 +33,7 @@ class MapData:
     N: int
     area_ids: np.ndarray               # int32[N] — for simple maps, just np.arange(N)
     centroids: np.ndarray              # float32[N, 2] — XY
-    vis_matrix: np.ndarray             # bool[N, N]
+    vis_matrix: np.ndarray | None      # bool[N, N]; None only from make_cs2_map(build_vis=False)
     adjacency: np.ndarray              # bool[N, N]
 
     # Verticality — per-area terrain elevation and ramp flag (spec L1, L8).

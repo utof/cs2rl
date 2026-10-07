@@ -100,6 +100,7 @@ def test_preset_geometry():
     assert all(md.centroids[i][0] == 150 for i in md.t_spawn_areas)
     assert all(md.centroids[i][0] == 350 for i in md.ct_spawn_areas)
     assert md.bombsite_dist_scale == 0.0 and not md.bombsite_mask.any()
+    assert md.vis_matrix is not None
     assert md.vis_matrix.all()                         # flat, no walls
     assert (md.adjacency.sum(1) >= 4).all()            # self + ≥3 neighbours (corner) — no isolated cell
     assert ARENA_DUEL_V1["cell_size"] == 20.0
