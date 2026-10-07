@@ -316,7 +316,6 @@ def check_spawn_counts(vecenv, map_name: str) -> tuple[int, int]:
     PITFALL: RuntimeError, never a bare assert (python -O strips asserts). A
     non-Cs2Env driver is a wiring bug and must also stop the run.
     """
-    # KNOWN LIMIT: pyrefly 1.2.0 types this getattr (untyped default) as Any | None; 1.3.2 does not.
     env = getattr(vecenv, "driver_env", vecenv)
     try:
         sd = env._c_env.sd.contents
@@ -383,7 +382,6 @@ def assert_pin_pitch_agreement(vecenv, policy):
     non-C env here is a wiring bug and must stop the run (RuntimeError, never
     a bare assert: python -O would strip it).
     """
-    # KNOWN LIMIT: pyrefly 1.2.0 types this getattr (untyped default) as Any | None; 1.3.2 does not.
     env = getattr(vecenv, "driver_env", vecenv)
     try:
         c_pin = int(env._c_env.sd.contents.pin_pitch)
@@ -410,7 +408,6 @@ def assert_max_turn_speed_agreement(vecenv, policy):
     PITFALL: RuntimeError, never a bare assert (python -O strips asserts). A
     non-Cs2Env driver is a wiring bug and must also stop the run.
     """
-    # KNOWN LIMIT: pyrefly 1.2.0 types this getattr (untyped default) as Any | None; 1.3.2 does not.
     env = getattr(vecenv, "driver_env", vecenv)
     try:
         c = float(env._c_env.sd.contents.max_turn_speed)

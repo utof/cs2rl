@@ -546,7 +546,7 @@ def _canonical_ctype_name(ctype):
     from here.
     """
     if issubclass(ctype, ctypes._Pointer):
-        # KNOWN LIMIT: pyrefly 1.2.0 rejects reading the generic `_type_` off `_Pointer`'s class.
+        # KNOWN LIMIT: pyrefly 1.3.2 (and 1.2.0) rejects reading the generic `_type_` off `_Pointer`'s class.
         return "ptr_" + _canonical_ctype_name(ctype._type_)
     if issubclass(ctype, ctypes.Array):
         return f"arr_{_canonical_ctype_name(ctype._type_)}_{ctype._length_}"

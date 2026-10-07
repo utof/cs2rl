@@ -390,8 +390,6 @@ def compute_game_metrics(logs):
     if not isinstance(logs, dict):
         return {}
 
-    # KNOWN LIMIT: pyrefly 1.2.0 types dict.get with an untyped default as Any | None, so math on
-    # _get's results below is a snapshot row; 1.3.2 does not.
     def _get(key, default=0.0):
         return logs.get(f"environment/{key}", logs.get(key, default))
 
