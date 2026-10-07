@@ -28,11 +28,14 @@ from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import NotRequired, TypedDict
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import modal
 
 import scripts.modal_runner as mrl
+
+if TYPE_CHECKING:
+    from _typeshed import SupportsWrite
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 CUDA_IMAGE = ("nvidia/cuda:12.8.1-devel-ubuntu22.04@"
@@ -655,7 +658,7 @@ def launch_run(
     app_obj: object | None = None,
     now: datetime | None = None,
     attempt_id: str | None = None,
-    stdout: object | None = None,
+    stdout: SupportsWrite[str] | None = None,
 ) -> dict[str, object]:
     """Validate locally, then create/claim/upload and invoke the configured Function."""
     repo = Path(repo)
