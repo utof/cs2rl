@@ -34,7 +34,9 @@ def _analyze(rows):
 def test_old_format_still_inverts():
     row = {"game/bomb_plant_rate": 0.5, "environment/round_length": 960.0}
     # (960 - 0.5*640)/0.5 - 640 = 640
-    assert abs(t_plant(row, CAP, BOMB, PMIN) - 640.0) < 1e-9
+    t = t_plant(row, CAP, BOMB, PMIN)
+    assert t is not None, "p = 0.5 is above p_min, so the old-format row inverts"
+    assert abs(t - 640.0) < 1e-9
 
 
 def test_old_format_respects_p_min():
@@ -77,6 +79,7 @@ def test_outcome_mix_is_rate_differences():
         "game/win_rate_ct": 0.6,
     }
     mix = outcome_mix(row)
+    assert mix is not None, "the row carries game/win_by_detonation"
     assert mix["t_detonation"] == pytest.approx(0.2)
     assert mix["ct_defuse"] == pytest.approx(0.1)
     assert mix["timeout"] == pytest.approx(0.4)
@@ -96,6 +99,7 @@ def test_outcome_mix_clamps_negatives_and_skips_old_rows():
         "game/win_rate_ct": 0.4,
     }
     mix = outcome_mix(row)
+    assert mix is not None, "the row carries game/win_by_detonation"
     assert mix["t_detonation"] == pytest.approx(0.0)
     assert mix["ct_defuse"] == pytest.approx(0.1)
     assert mix["timeout"] == pytest.approx(0.4)
@@ -114,6 +118,7 @@ def test_outcome_mix_clamps_negatives_and_skips_old_rows():
         "game/timeout_rate": 0.0,
         "game/win_rate_ct": 0.0,
     })
+    assert t_neg is not None, "the row carries game/win_by_detonation"
     assert t_neg["t_elimination"] == pytest.approx(0.0)
     assert t_neg["t_detonation"] == pytest.approx(0.3)
 
@@ -164,6 +169,7 @@ def test_analyze_run_mix_mean_is_mean_of_rows_not_mix_of_means():
     ]
     r = _analyze(rows)
     mix = r["outcome_mix_mean"]
+    assert mix is not None, "both rows carry game/win_by_detonation"
     assert set(mix) == set(_MIX_KEYS)
     assert mix["ct_defuse"] == pytest.approx(0.1)
     assert mix["timeout"] == pytest.approx(0.3)
