@@ -128,7 +128,7 @@ def _minimal_values():
     and the test would fail on the missing exception — instead of taking the
     pytest session down with it and reporting nothing.
     """
-    values = {
+    values: dict[str, object] = {
         name: ([] if issubclass(ctype, ctypes.Array) else 0)
         for name, ctype in cs2_env._SD_PACKED_TYPES.items()
     }
