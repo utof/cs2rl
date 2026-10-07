@@ -2043,7 +2043,7 @@ def test_launch_upload_failure_records_failure_code_without_freeing_id(fake_moda
     type("NotFoundError", (Exception, ), {}),
     type("FakeNotFoundError", (Exception, ), {}),
 ])
-def test_lookup_helpers_chain_unexpected_errors(fake_modal, phase, error_type):
+def test_lookup_helpers_chain_unexpected_errors(fake_modal, monkeypatch, phase, error_type):
     """SDK exception identity, not a lookalike name, determines volume absence."""
     launch = _import_run_modal()
     artifacts = _import_artifacts()
@@ -2061,22 +2061,18 @@ def test_lookup_helpers_chain_unexpected_errors(fake_modal, phase, error_type):
 
     error = error_type("volume backend exploded")
 
-    class BoomModal:
-
-        class Volume:
-
-            @staticmethod
-            def from_name(name, create_if_missing=False):
-                assert (name, create_if_missing) == (mrl.VOLUME_NAME, False)
-                if phase == "from-name":
-                    raise error
-                return SimpleNamespace(hydrate=hydrate)
+    def boom_from_name(name, create_if_missing=False):
+        assert (name, create_if_missing) == (mrl.VOLUME_NAME, False)
+        if phase == "from-name":
+            raise error
+        return SimpleNamespace(hydrate=hydrate)
 
     def hydrate():
         raise error
 
+    monkeypatch.setattr(fake_modal.Volume, "from_name", staticmethod(boom_from_name))
     with pytest.raises(error_type, match="volume backend exploded") as artifact_info:
-        artifacts.collect_status("ok-id", modal_module=BoomModal)
+        artifacts.collect_status("ok-id")
     assert artifact_info.value is error
     assert artifact_info.value.__cause__ is None
 

@@ -59,7 +59,6 @@ def _sidecar_payload(ckpt_bytes: bytes, *, now: datetime) -> dict[str, object]:
 def backfill_sidecar(
     run_id: str,
     *,
-    modal_module: object | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Publish a sidecar for a terminal run whose container never wrote one.
@@ -67,7 +66,7 @@ def backfill_sidecar(
     Raises ValidationError and uploads nothing unless every guard passes.
     """
     mrl.validate_run_id(run_id)
-    volume = arts.lookup_volume(modal_module)
+    volume = arts.lookup_volume()
     stamp = now if now is not None else datetime.now(UTC)
 
     # The still-active gate is the shared bytes-in protocol, not a private

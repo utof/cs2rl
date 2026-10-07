@@ -82,7 +82,7 @@ def read_volume_file(volume: modal.Volume, remote: str) -> bytes | None:
     return b"".join(chunks)
 
 
-def lookup_volume(modal_module: object | None = None):
+def lookup_volume():
     """Look up the artifact Volume read-only, or raise if it does not exist.
 
     `create_if_missing=False` is the whole point: observing a run must never
@@ -90,17 +90,13 @@ def lookup_volume(modal_module: object | None = None):
     would make every run look merely absent instead of making the mistake
     obvious. A missing Volume is an operator-facing ValidationError.
 
-    `modal_module` is the seam tests inject a fake through; production passes
-    nothing and gets the real `modal`.
-
     PITFALL: from_name returns a lazy handle. Explicit public hydration puts
     missing-Volume translation at the lookup operation, before file APIs can
     report a missing path. Only the SDK's NotFoundError means absent here;
     permission, transport and unexpected failures retain their diagnostics.
     """
-    modal_mod = modal if modal_module is None else modal_module
     try:
-        volume = modal_mod.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
+        volume = modal.Volume.from_name(mrl.VOLUME_NAME, create_if_missing=False)
         volume.hydrate()
     except modal.exception.NotFoundError as err:
         raise mrl.ValidationError("artifact volume is missing") from err
@@ -120,7 +116,6 @@ class VolumeIndex:
 def collect_status(
     run_id: str,
     *,
-    modal_module: object | None = None,
     now: datetime | None = None,
 ) -> dict[str, object]:
     """Read-only status. Missing Volume fails without creating objects.
@@ -142,7 +137,7 @@ def collect_status(
         two reads to catch a sidecar being rewritten underneath us mid-status.
     """
     mrl.validate_run_id(run_id)
-    volume = lookup_volume(modal_module)
+    volume = lookup_volume()
     stamp = now if now is not None else datetime.now(UTC)
     index = VolumeIndex(volume)
     status_bytes = index.read_file(mrl.RUNS_ROOT / run_id / mrl.STATUS_FILENAME)
@@ -226,7 +221,6 @@ def download_run(
     run_id: str,
     *,
     dest_root: Path | None = None,
-    modal_module: object | None = None,
 ) -> Path:
     """Download runs/<id>/ into dest_root/<id> via a sibling temp directory."""
     mrl.validate_run_id(run_id)
@@ -234,7 +228,7 @@ def download_run(
     dest = dest_root / run_id
     if dest.exists():
         raise mrl.ValidationError(f"refusing to overwrite existing download: {dest}")
-    volume = lookup_volume(modal_module)
+    volume = lookup_volume()
     prefix = _client_path(mrl.RUNS_ROOT / run_id)
     entries: list[object] = []
     try:
