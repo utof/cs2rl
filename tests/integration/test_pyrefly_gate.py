@@ -180,7 +180,7 @@ def test_a_gutted_staged_snapshot_reds_even_when_the_working_tree_snapshot_is_in
     """Stage an emptied snapshot while the working-tree copy stays correct.
 
     The symmetric argument to test 2, one level down. A gate that reads the
-    snapshot from the working tree compares 752 against an intact 752, exits 0,
+    snapshot from the working tree compares the errors against that intact copy, exits 0,
     and lets someone break the freeze for everyone who commits next -- while
     showing them green.
     """
@@ -443,8 +443,8 @@ def test_a_bad_interpreter_aborts_instead_of_reporting_328_additions(tmp_path, s
 
     pyrefly does NOT fail on a bad --python-interpreter-path: it prints a WARN on
     stderr, falls back to the default environment, and returns a full,
-    plausible-looking result set -- 826 errors here against a frozen 752, i.e.
-    ADDED 328 / REMOVED 254, 270 of the additions bare missing-import.
+    plausible-looking result set -- when the gate was added, 826 errors against a
+    frozen 752, i.e. ADDED 328 / REMOVED 254, 270 of the additions bare missing-import.
 
     Only "missing" is caught by an existence check. The other two return True
     from exists() and reach the fallback anyway, which is why the gate probes the
