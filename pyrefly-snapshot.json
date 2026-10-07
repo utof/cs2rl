@@ -2,7 +2,6 @@
 {"concise_description": "Generic attribute `_type_` of class `_Pointer` is not visible on the class", "name": "missing-attribute", "path": "src/cs2rl/env/c/cs2_env.py", "source_line": "return \"ptr_\" + _canonical_ctype_name(ctype._type_)"}
 {"concise_description": "Object of class `NoneType` has no attribute `_c_env`", "name": "missing-attribute", "path": "src/cs2rl/policy.py", "source_line": "driver_env._c_env.sd.contents.max_turn_speed,"}
 {"concise_description": "Object of class `NoneType` has no attribute `single_observation_space`", "name": "missing-attribute", "path": "src/cs2rl/policy.py", "source_line": "if obs_dim_override is not None else driver_env.single_observation_space.shape[0])"}
-{"concise_description": "Object of class `Stats` has no attribute `stats`", "name": "missing-attribute", "path": "src/cs2rl/profile_step.py", "source_line": "for func, (cc, nc, tt, ct, _callers) in stats.stats.items():"}
 {"concise_description": "Object of class `NoneType` has no attribute `_c_env`", "name": "missing-attribute", "path": "src/cs2rl/train/envs.py", "source_line": "c = float(env._c_env.sd.contents.max_turn_speed)"}
 {"concise_description": "Object of class `NoneType` has no attribute `_c_env`", "name": "missing-attribute", "path": "src/cs2rl/train/envs.py", "source_line": "c_pin = int(env._c_env.sd.contents.pin_pitch)"}
 {"concise_description": "Object of class `NoneType` has no attribute `_c_env`", "name": "missing-attribute", "path": "src/cs2rl/train/envs.py", "source_line": "sd = env._c_env.sd.contents"}

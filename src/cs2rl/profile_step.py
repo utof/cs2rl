@@ -22,9 +22,7 @@ from __future__ import annotations
 
 import argparse
 import cProfile
-import io
 import json
-import pstats
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -92,11 +90,14 @@ def _profile_loop(step_fn, steps: int, top_n: int) -> dict[str, list[dict[str, A
 
 
 def _extract_profile_rows(pr: cProfile.Profile, sort_by: str, top_n: int) -> list[dict[str, Any]]:
-    stats = pstats.Stats(pr, stream=io.StringIO())
-    items = []
-    # KNOWN LIMIT: typeshed declares no Stats.stats. The typed get_stats_profile() keys
+    # create_stats() is what pstats.Stats(pr) calls to fill its own .stats, which is this
+    # same {(file, line, name): (cc, nc, tt, ct, callers)} dict, and typeshed types
+    # Profile.stats. It re-reads the stopped profiler on every call, so _profile_loop's second
+    # call sees the same data. The typed pstats get_stats_profile() is no substitute: it keys
     # functions by bare name (same-named functions collapse) and gives ncalls as a str.
-    for func, (cc, nc, tt, ct, _callers) in stats.stats.items():
+    pr.create_stats()
+    items = []
+    for func, (cc, nc, tt, ct, _callers) in pr.stats.items():
         filename, line, name = func
         items.append({
             "function": f"{Path(filename).name}:{line}:{name}",
