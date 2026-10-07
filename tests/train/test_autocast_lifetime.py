@@ -19,8 +19,9 @@ def _autocast_state():
 
 
 @pytest.mark.parametrize("precision", ["default", "cpu_bfloat16", "outer_cpu"])
-@pytest.mark.parametrize("path",
-                         ["normal", "empty", "nonfinite", "forward_error", "backward_error"])
+@pytest.mark.parametrize(
+    "path",
+    ["normal", "empty", "nonfinite", "nonfinite_entropy", "forward_error", "backward_error"])
 def test_train_restores_autocast_scope(monkeypatch, precision, path):
     """Check real forward/backward, skip and exception paths, including an outer owner.
 
@@ -57,6 +58,8 @@ def test_train_restores_autocast_scope(monkeypatch, precision, path):
             value_dtypes.append(result[2].dtype)
             if path == "nonfinite":
                 return (result[0] * float("nan"), *result[1:])
+            if path == "nonfinite_entropy":
+                return (result[0], result[1] * float("nan"), *result[2:])
             return result
 
         def observe_backward(gradient):
@@ -95,14 +98,21 @@ def test_train_restores_autocast_scope(monkeypatch, precision, path):
                 if value_dtypes:
                     expected = torch.bfloat16 if precision == "cpu_bfloat16" else torch.float32
                     assert all(dtype == expected for dtype in value_dtypes)
-                if path in ("normal", "nonfinite"):
+                if path in ("normal", "nonfinite", "nonfinite_entropy"):
                     assert trainer.losses["minibatches_run"] == 2
                     assert trainer.losses["empty_minibatches"] == 0
                     assert bool(trainer.optimizer.state) == (path == "normal")
-                    # alpha steps before the NaN guard and the policy step, so a skipped
-                    # minibatch still steps it: one alpha step per minibatch run.
+                if path in ("normal", "nonfinite"):
+                    # alpha steps before the NaN guard and the policy step, so a minibatch
+                    # skipped for a non-finite policy loss whose alpha loss is finite still
+                    # steps it: one alpha step per minibatch run.
                     alpha_state = trainer._alpha_optimizer.state[trainer._log_alpha_tensor]
                     assert alpha_state["step"].item() == 2
+                if path == "nonfinite_entropy":
+                    # A NaN entropy makes the alpha loss NaN too: alpha never steps and
+                    # log_alpha keeps its finite value (#353).
+                    assert not trainer._alpha_optimizer.state
+                    assert torch.isfinite(trainer._log_alpha_tensor).all()
                 if path == "normal":
                     assert backward_states
                     # A second call also checks reuse of the same autocast object.
