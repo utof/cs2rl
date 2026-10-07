@@ -644,7 +644,7 @@ def _bind_for(node, env, literals=None):
     elif isinstance(target, ast.Tuple) and isinstance(it, (ast.Tuple, ast.List)):
         # `for name, a, b in (("action_heads", x, y), ...)` — bind position-wise,
         # taking only the slots whose element is a constant in EVERY row.
-        cols = {}
+        cols: dict[str, tuple[str, ...] | None] = {}
         for i, name in enumerate(target.elts):
             if not isinstance(name, ast.Name):
                 continue
@@ -1195,7 +1195,7 @@ def metrics_write_sites(src=None):
     containers = {c.split(".")[-1] for s in EMITTER_SITES for c in s.containers}
     found = {}
 
-    def _record(path, qualname, container, key_node, fallback_lineno):
+    def _record(path, qualname, container, key_node, fallback_lineno: int):
         text = _key_text(key_node)
         if text is None or not KEY_SHAPED.match(text.replace("*", "x")):
             return
@@ -1354,6 +1354,8 @@ def island_merge_sources():
             elif (isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr)
                   and _container_name(node.target) in site.containers):
                 merged = [node.value]
+            else:
+                continue
             for arg in merged or ():
                 for source in _one_hop_bindings(fn, arg):
                     out.append(
@@ -1390,7 +1392,7 @@ def reader_key_literals(rel_path):
     """
     path = REPO_ROOT / rel_path
     tree = _parse_file(path)
-    candidates = []
+    candidates: list[ast.expr] = []
 
     def _collect_literal(node):
         """A module-level constant table: the `*_KEY` names and REPORT_EXTRA."""
@@ -1639,8 +1641,13 @@ def reader_derived_column_sources(rel_path="src/cs2rl/experiment/gate.py"):
                 and any(isinstance(t, ast.Name) and t.id == "REPORT_EXTRA" for t in node.targets)):
             continue
         for row in node.value.elts:
+            # Each row is a (column, "kind", (args...)) literal; any other shape fails here.
+            assert isinstance(row, (ast.Tuple, ast.List)), ast.unparse(row)
+            kind_node = row.elts[1]
+            assert isinstance(kind_node, ast.Constant), ast.unparse(row)
+            assert isinstance(kind_node.value, str), ast.unparse(row)
             col = (_resolve(row.elts[0], env) or (None, ))[0]
-            kind = row.elts[1].value
+            kind = kind_node.value
             keys = set()
             for elt in ast.walk(row.elts[2]):
                 keys |= _named_keys(elt)
@@ -1818,14 +1825,13 @@ def tag_key_axes():
     fn = _find_qualname(_module_ast("train/update.py"), "tag_grad_cossim")
     site = next(s for s in EMITTER_SITES if s.qualname == "tag_grad_cossim")
     literals = _local_literal_bindings(fn)
-    loops = [
-        n for n in ast.walk(fn)
-        if isinstance(n, ast.For) and isinstance(n.target, ast.Name) and any(
-            isinstance(w, ast.Subscript) and _container_name(w.value) == "out" for w in ast.walk(n))
-    ]
+    loops = [(n, n.target.id) for n in ast.walk(fn)
+             if isinstance(n, ast.For) and isinstance(n.target, ast.Name) and any(
+                 isinstance(w, ast.Subscript) and _container_name(w.value) == "out"
+                 for w in ast.walk(n))]
     group = ()
-    for loop in loops:
-        bound = _bind_for(loop, {}, literals).get(loop.target.id)
+    for loop, target in loops:
+        bound = _bind_for(loop, {}, literals).get(target)
         if bound:
             group = tuple(bound)
             break
