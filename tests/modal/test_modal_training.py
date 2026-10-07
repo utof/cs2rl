@@ -48,11 +48,12 @@ from tests.conftest import REPO_ROOT
 
 ROOT = REPO_ROOT
 
-import scripts.modal_runner as mrl                                     # noqa: E402, I001
-from scripts.modal_runner import commands, core, state, training       # noqa: E402, I001
-from tests.modal.modal_patch_binding_campaign import binding_target    # noqa: E402, I001
-from tests.modal.modal_test_helpers import (                           # noqa: E402
-    FakeChild, _aware, _make_manifest, _minimal_completed_tree, _no_torch, _noop_heartbeat)
+import scripts.modal_runner as mrl                                                      # noqa: E402, I001
+from scripts.modal_runner import commands, core, state, training                        # noqa: E402, I001
+from tests.modal.modal_patch_binding_campaign import binding_target                     # noqa: E402, I001
+from tests.modal.modal_test_helpers import (                                            # noqa: E402
+    FakeChild, _advance_to, _aware, _make_manifest, _minimal_completed_tree, _no_torch,
+    _noop_heartbeat)
 
 # ── Run result: the explicit result schema ─────────────────────────────────
 
@@ -98,19 +99,6 @@ def _prepared_source(tmp_path: Path, **overrides) -> core.PreparedSource:
     return prepared
 
 
-def _advance_to_building(run_root, attempt_id="attempt-a", *, lock):
-    state.transition_status(run_root,
-                            core.Status.PREPARING,
-                            now=_aware(),
-                            attempt_id=attempt_id,
-                            lock=lock)
-    return state.transition_status(run_root,
-                                   core.Status.BUILDING,
-                                   now=_aware(),
-                                   attempt_id=attempt_id,
-                                   lock=lock)
-
-
 def _training_kwargs(tmp_path: Path, *, prepared: core.PreparedSource) -> dict[str, Any]:
     """Fixed safe attempt setup; callers edit the native collaborators directly.
 
@@ -123,7 +111,7 @@ def _training_kwargs(tmp_path: Path, *, prepared: core.PreparedSource) -> dict[s
     run_root = tmp_path / "run"
     run_root.mkdir(exist_ok=True)
     lock = threading.Lock()
-    _advance_to_building(run_root, lock=lock)
+    _advance_to(run_root, core.Status.BUILDING, attempt_id="attempt-a", lock=lock)
     launches: list[tuple[tuple, dict]] = []
     kills: list[tuple[int, int]] = []
 

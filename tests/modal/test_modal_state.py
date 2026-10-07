@@ -18,9 +18,9 @@ from tests.conftest import REPO_ROOT
 
 ROOT = REPO_ROOT
 
-import scripts.modal_runner as mrl                     # noqa: E402, I001
-from scripts.modal_runner import core, state           # noqa: E402, I001
-from tests.modal.modal_test_helpers import _aware      # noqa: E402
+import scripts.modal_runner as mrl                                     # noqa: E402, I001
+from scripts.modal_runner import core, state                           # noqa: E402, I001
+from tests.modal.modal_test_helpers import _advance_to, _aware         # noqa: E402
 
 # ── Run state: atomic writes, transitions, heartbeat, status, artifacts ────
 
@@ -97,29 +97,11 @@ def test_status_transitions_are_monotonic_and_attempt_owned(tmp_path):
     assert (run_root / "STATUS.json").read_bytes() == before
 
 
-def _advance_to_training(run_root, attempt_id="a1", *, lock):
-    state.transition_status(run_root,
-                            core.Status.PREPARING,
-                            now=_aware(),
-                            attempt_id=attempt_id,
-                            lock=lock)
-    state.transition_status(run_root,
-                            core.Status.BUILDING,
-                            now=_aware(),
-                            attempt_id=attempt_id,
-                            lock=lock)
-    return state.transition_status(run_root,
-                                   core.Status.TRAINING,
-                                   now=_aware(),
-                                   attempt_id=attempt_id,
-                                   lock=lock)
-
-
 def test_heartbeat_refreshes_updated_at_under_lock(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
     lock = threading.Lock()
-    _advance_to_training(run_root, lock=lock)
+    _advance_to(run_root, core.Status.TRAINING, attempt_id="a1", lock=lock)
     # Fake clock: a beat at each 60s mark must refresh updated_at.
     last = None
     for minute in (1, 2):
@@ -144,7 +126,7 @@ def test_blocked_heartbeat_cannot_clobber_completed(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
     lock = threading.Lock()
-    _advance_to_training(run_root, lock=lock)
+    _advance_to(run_root, core.Status.TRAINING, attempt_id="a1", lock=lock)
 
     lock.acquire()
     started = threading.Event()
@@ -186,7 +168,7 @@ def test_late_heartbeat_cannot_replace_terminal(tmp_path):
     run_root.mkdir()
     lock = threading.Lock()
     stop = threading.Event()
-    _advance_to_training(run_root, lock=lock)
+    _advance_to(run_root, core.Status.TRAINING, attempt_id="a1", lock=lock)
 
     def heartbeat_loop():
         while not stop.is_set():
@@ -214,7 +196,7 @@ def test_late_heartbeat_cannot_replace_terminal(tmp_path):
 def test_derive_status_stale_after_five_minutes_does_not_mutate(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
-    written = _advance_to_training(run_root, lock=threading.Lock())
+    written = _advance_to(run_root, core.Status.TRAINING, attempt_id="a1", lock=threading.Lock())
     assert written is not None, "a1 has owned STATUS since its PREPARING write"
     before = (run_root / "STATUS.json").read_bytes()
     derived = state.derive_status(written, now=_aware(hour=12, minute=5))
