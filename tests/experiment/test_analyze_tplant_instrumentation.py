@@ -177,6 +177,14 @@ def test_analyze_run_mix_mean_is_mean_of_rows_not_mix_of_means():
     assert mix["ct_elimination"] != pytest.approx(0.1)
 
 
+def test_resume_offset_is_the_segment_last_step_not_its_max():
+    """_global_steps PITFALL: segment b is offset by segment a's LAST row step (2e5), not
+    its max (3e5), so the run ends at 2e5 + 2e5."""
+    rows = [{"run_id": "a", "epoch": i, "step": s} for i, s in enumerate((1e5, 3e5, 2e5))]
+    rows += [{"run_id": "b", "epoch": i, "step": s} for i, s in enumerate((1e5, 2e5))]
+    assert _analyze(rows)["total_steps"] == 4e5
+
+
 def test_print_report_emits_mix_labels_when_present():
     rows = [{
         "run_id": "n",

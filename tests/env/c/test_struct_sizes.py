@@ -8,7 +8,7 @@ struct_sizes() asks the same compiler that laid the structs out, so the ctypes
 mirrors in cs2_env.py are pinned to the C headers automatically.
 
 sizeof alone cannot catch a value packed under the *wrong field name* in
-Cs2Env.__init__ — swapping two floats keeps every size identical while silently
+Cs2Env._static_data_values — swapping two floats keeps every size identical while silently
 feeding reward_kill into reward_death. static_data_scalars() closes that hole by
 reading scalar StaticData fields back out of a live env, so a test can push
 distinct sentinels through Cs2Env and check where they landed.
@@ -149,7 +149,7 @@ _INT_SENTINEL_OVERRIDES = {
 # WHAT A TRANSPOSITION LOOKS LIKE NOW (spec 2026-08-31 §2 W2): it used to be two
 # swapped positions in py_init's PyArg_ParseTuple format string. That string is
 # gone; Python packs StaticData by name instead, so the same bug is now two
-# swapped NAMED PACKING ASSIGNMENTS in Cs2Env.__init__ — "crouch_enabled":
+# swapped NAMED PACKING ASSIGNMENTS in Cs2Env._static_data_values — "crouch_enabled":
 # self.jump_enabled. The layout hash that replaced the format string cannot see
 # it, because it compares DECLARATIONS and this puts a wrong value into a
 # correctly described slot. This scheme is still the only thing that catches it,
@@ -303,7 +303,7 @@ def test_struct_sizes_exposes_team_constants():
 def test_static_data_scalars_round_trip(simple_map):
     """Distinct sentinels in → same sentinels out, per named field.
 
-    This is the VALUE-ROUTING guard. Cs2Env.__init__ names every StaticData
+    This is the VALUE-ROUTING guard. Cs2Env._static_data_values names every StaticData
     field it packs, and writing the wrong value under a correct name is
     invisible to sizeof, to the offset anchors, and to the layout hash — all
     three describe the struct, not the values put into it. Two swapped floats
@@ -385,12 +385,12 @@ def test_static_data_scalars_round_trip(simple_map):
             assert not wrong, (
                 f"config {cfg_i} ({_BOOL_SENTINEL_CONFIGS[cfg_i]}): sentinel landed in the wrong "
                 "StaticData field — two of the named assignments in the `static_data` mapping in "
-                "Cs2Env.__init__ (src/cs2rl/env/c/cs2_env.py) carry each other's values. "
+                "Cs2Env._static_data_values (src/cs2rl/env/c/cs2_env.py) carry each other's values. "
                 f"{{field: (sent, got, whose_sentinel_got_is)}} = {wrong}")
             # R0-G (Task 11): round_time / laser_range / max_turn_speed are now
             # make_env kwargs, so they are in the config and were checked above.
             # laser_range_sq is NOT a kwarg — it is derived from the laser_range
-            # sentinel inside Cs2Env.__init__, so check the derivation rather than
+            # sentinel inside Cs2Env._static_data_values, so check the derivation rather than
             # a nav constant. The None ⇒ env/nav.py default path is covered by
             # tests/train/test_env_knobs.py::test_default_knobs_match_nav_constants.
             assert sc["laser_range_sq"] == pytest.approx(sentinels["laser_range"]**2)

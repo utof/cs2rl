@@ -8,7 +8,6 @@ Provides:
 
 from __future__ import annotations
 
-from collections import deque
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -23,6 +22,8 @@ from cs2rl.env.nav import (
     _areas_near,
     _build_area_adjacency,
     _compute_area_distance_to_targets,
+    _hop_distances,
+    _raster_adjacency,
     _select_distinct_spawn_areas,
 )
 
@@ -150,6 +151,30 @@ class MapData:
         return True
 
 
+def _bombsite_dist_and_scale(dist: np.ndarray) -> tuple[np.ndarray, float]:
+    """(bombsite_dist, bombsite_dist_scale) from raw float32 hop distances (inf = no hop count).
+
+    The scale is 1 / the largest FINITE distance (0.0 when that is 0 or there is none). Only
+    after it is computed are the non-finite entries (unreachable areas, and on dust2 also the
+    area-id gaps) replaced with 4×max. make_cs2_map and make_simple_map both use this.
+    """
+    finite = dist[np.isfinite(dist)]
+    scale = 0.0
+    if finite.size:
+        mx = float(finite.max())
+        scale = 1.0 / mx if mx > 0 else 0.0
+        # R0-F (#136): scale is computed from the FINITE entries above; only now
+        # replace non-finite hops with 4×max so closeness = 1 − 4 < 0 → clamps to 0 in C
+        # exactly as the old isfinite() skip did (isfinite folds to true under
+        # -ffast-math and leaked inf).
+        # PITFALL: never fill before computing the scale — the sentinel would
+        # shrink it 4× and silently rescale every nav reward. No finite entry
+        # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
+        # scale > 0 handles it.
+        dist = np.where(np.isfinite(dist), dist, 4.0 * mx).astype(np.float32)
+    return dist, scale
+
+
 _CS2_MAP_CACHE: dict = {}
 
 
@@ -216,22 +241,7 @@ def make_cs2_map(nav_path: str, cache_path: str, *, build_vis: bool = True) -> M
     bombsite_dist = np.full(max_area_id + 1, np.inf, dtype=np.float32)
     for area_id in nav_graph.area_ids:
         bombsite_dist[area_id] = bombsite_area_distance[nav_graph._id_to_idx[area_id]]
-
-    finite_dist = bombsite_dist[np.isfinite(bombsite_dist)]
-    bombsite_dist_scale = 0.0
-    if finite_dist.size:
-        max_dist = float(finite_dist.max())
-        bombsite_dist_scale = 1.0 / max_dist if max_dist > 0 else 0.0
-        # R0-F (#136): scale is computed from the FINITE entries above; only now
-        # replace non-finite hops (area-id gaps + unreachable areas) with 4×max so
-        # closeness = 1 − 4 < 0 → clamps to 0 in C exactly as the old isfinite()
-        # skip did (isfinite folds to true under -ffast-math and leaked inf).
-        # PITFALL: never fill before computing the scale — the sentinel would
-        # shrink it 4× and silently rescale every nav reward. No finite entry
-        # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
-        # scale > 0 handles it.
-        bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
-                                 4.0 * max_dist).astype(np.float32)
+    bombsite_dist, bombsite_dist_scale = _bombsite_dist_and_scale(bombsite_dist)
 
     bm_int8 = bombsite_mask.astype(np.int8)
     bombsite_by_idx = np.array(
@@ -364,6 +374,106 @@ ARENA_DUEL_V1 = {
 MAX_STEP_HEIGHT = 18.0
 
 
+def _rooms_raster(rooms, x_min: float, y_min: float, x_max: float, y_max: float,
+                  cell_size: float) -> np.ndarray:
+    """Raster grid int32[H, W]: world cell → area_idx (-1 = off-mesh).
+
+    Each room covers the columns from int((x0 - x_min) / cell_size) up to, not including,
+    ceil((x1 - x_min) / cell_size), and the same rows in y. Later rooms overwrite earlier
+    ones where they overlap, so a cell size that does not divide the room edges gives a
+    shared cell to the later room (see the ARENA_DUEL_V1 PITFALLS).
+    """
+    grid_w = int(np.ceil((x_max - x_min) / cell_size))
+    grid_h = int(np.ceil((y_max - y_min) / cell_size))
+    grid = np.full((grid_h, grid_w), -1, dtype=np.int32)
+    for idx, x0, y0, x1, y1, *_ in rooms:              # *_ ignores z, is_ramp
+        col0 = int((x0 - x_min) / cell_size)
+        col1 = int(np.ceil((x1 - x_min) / cell_size))
+        row0 = int((y0 - y_min) / cell_size)
+        row1 = int(np.ceil((y1 - y_min) / cell_size))
+        grid[row0:row1, col0:col1] = idx
+    return grid
+
+
+def _prune_cliff_edges(adjacency: np.ndarray, centroids_z: np.ndarray, is_ramp: np.ndarray) -> None:
+    """L9 adjacency post-prune (spec §2 L9), IN PLACE on `adjacency`.
+
+    Removes the edges whose endpoints are BOTH non-ramp AND |Δz| > MAX_STEP_HEIGHT, in both
+    directions. It uses the threshold of the C-env cliff guard (cs2_movement.h
+    SV_MAX_STEP_HEIGHT_CS), and the C env checks this adjacency before that guard, so a pruned
+    edge is neither walkable nor counted by nav-distance shaping.
+    KNOWN LIMIT: the two rules differ. The guard refuses a grounded step up more than the
+    threshold into a non-ramp target, whatever the source area; this prune keeps every edge
+    with a ramp endpoint. So an edge from a ramp up a cliff to a non-ramp area is kept here
+    although the guard refuses the climb: on the default simple map, ramps 13 and 14 (top
+    z=64) to catwalk 15 (z=128).
+    Pitfall: only prune non-ramp↔non-ramp cliff edges — ramp targets are always allowed
+    (is_ramp=True is the explicit walk-up affordance, spec L11). MAX_STEP_HEIGHT (module
+    constant) MUST numerically match SV_MAX_STEP_HEIGHT_CS in cs2_movement.h. See the
+    module-level constant for the full rationale.
+    """
+    n = len(is_ramp)
+    for i in range(n):
+        for j in range(n):
+            if i == j or not adjacency[i, j]:
+                continue
+            if is_ramp[i] or is_ramp[j]:
+                continue               # ramp endpoints exempt from cliff pruning
+            if abs(centroids_z[i] - centroids_z[j]) > MAX_STEP_HEIGHT:
+                adjacency[i, j] = False
+
+
+def _raster_line_visible(grid: np.ndarray, x_min: float, y_min: float, cell_size: float, c0,
+                         c1) -> bool:
+    """Bresenham LOS from world point c0 to c1 over `grid`; blocked by cells == -1.
+
+    A walk that leaves the grid stops there and counts as visible. The step rule's
+    tie-break (`e2 > -dy`, `e2 < dx`) decides which cells a diagonal segment touches,
+    and the vis_matrix depends on it.
+    """
+    grid_h, grid_w = grid.shape
+    x0, y0 = c0
+    x1, y1 = c1
+    col0 = int((x0 - x_min) / cell_size)
+    row0 = int((y0 - y_min) / cell_size)
+    col1 = int((x1 - x_min) / cell_size)
+    row1 = int((y1 - y_min) / cell_size)
+    dx, dy = abs(col1 - col0), abs(row1 - row0)
+    sc = 1 if col1 > col0 else -1
+    sr = 1 if row1 > row0 else -1
+    err = dx - dy
+    cc, cr = col0, row0
+    while True:
+        if not (0 <= cr < grid_h and 0 <= cc < grid_w):
+            break
+        if grid[cr, cc] < 0:
+            return False
+        if cc == col1 and cr == row1:
+            break
+        e2 = 2 * err
+        if e2 > -dy:
+            err -= dy
+            cc += sc
+        if e2 < dx:
+            err += dx
+            cr += sr
+    return True
+
+
+def _raster_vis_matrix(grid: np.ndarray, x_min: float, y_min: float, cell_size: float,
+                       centroids: np.ndarray) -> np.ndarray:
+    """bool[N, N] centroid-to-centroid visibility (_raster_line_visible); diagonal True."""
+    n = len(centroids)
+    vis_matrix = np.zeros((n, n), dtype=bool)
+    for i in range(n):
+        vis_matrix[i, i] = True
+        for j in range(i + 1, n):
+            v = _raster_line_visible(grid, x_min, y_min, cell_size, centroids[i], centroids[j])
+            vis_matrix[i, j] = v
+            vis_matrix[j, i] = v
+    return vis_matrix
+
+
 def make_simple_map(
     rooms=SIMPLE_ROOMS,
     t_spawns=SIMPLE_T_SPAWNS,
@@ -407,87 +517,17 @@ def make_simple_map(
         is_ramp[idx] = ramp
 
     # 3. Raster grid: world coord → area_idx (-1 = off-mesh)
-    grid_w = int(np.ceil((x_max - x_min) / cell_size))
-    grid_h = int(np.ceil((y_max - y_min) / cell_size))
-    grid = np.full((grid_h, grid_w), -1, dtype=np.int32)
-    for idx, x0, y0, x1, y1, *_ in rooms:              # *_ ignores z, is_ramp
-        col0 = int((x0 - x_min) / cell_size)
-        col1 = int(np.ceil((x1 - x_min) / cell_size))
-        row0 = int((y0 - y_min) / cell_size)
-        row1 = int(np.ceil((y1 - y_min) / cell_size))
-        grid[row0:row1, col0:col1] = idx
+    grid = _rooms_raster(rooms, x_min, y_min, x_max, y_max, cell_size)
 
-    # 4. Adjacency: two areas are adjacent if any of their raster cells are 8-neighbors.
-    # Diagonal must be True: movement within the same area is always valid.
-    adjacency = np.zeros((N, N), dtype=bool)
-    np.fill_diagonal(adjacency, True)
-    rows, cols = np.where(grid >= 0)
-    for r, c in zip(rows.tolist(), cols.tolist(), strict=True):
-        a = grid[r, c]
-        for dr in (-1, 0, 1):
-            for dc in (-1, 0, 1):
-                if dr == 0 and dc == 0:
-                    continue
-                nr, nc = r + dr, c + dc
-                if 0 <= nr < grid_h and 0 <= nc < grid_w:
-                    b = grid[nr, nc]
-                    if b >= 0 and b != a:
-                        adjacency[a, b] = True
-                        adjacency[b, a] = True
+    # 4. Adjacency: two areas are adjacent if any of their raster cells are 8-neighbors
+    # (diagonal True). The same rule make_cs2_map uses on the nav mesh's raster.
+    adjacency = _raster_adjacency(grid, N)
 
-    # 4b. L9 adjacency post-prune (spec §2 L9): remove edges where BOTH endpoints
-    # are non-ramp AND |Δz| > MAX_STEP_HEIGHT. This mirrors the C-env cliff guard
-    # (cs2_movement.h SV_MAX_STEP_HEIGHT_CS) so that nav-distance shaping does not
-    # assign shortcut bonuses for movement edges that the C env will physically refuse.
-    # Pitfall: only prune non-ramp↔non-ramp cliff edges — ramp targets are always
-    # allowed (is_ramp=True is the explicit walk-up affordance, spec L11).
-    # MAX_STEP_HEIGHT (module constant) MUST numerically match SV_MAX_STEP_HEIGHT_CS in
-    # cs2_movement.h. See module-level constant for full rationale.
-    for i in range(N):
-        for j in range(N):
-            if i == j or not adjacency[i, j]:
-                continue
-            if is_ramp[i] or is_ramp[j]:
-                continue               # ramp endpoints exempt from cliff pruning
-            if abs(centroids_z[i] - centroids_z[j]) > MAX_STEP_HEIGHT:
-                adjacency[i, j] = False
+    # 4b. L9 post-prune: drop the non-ramp↔non-ramp cliff edges (spec §2 L9).
+    _prune_cliff_edges(adjacency, centroids_z, is_ramp)
 
     # 5. Visibility: Bresenham LOS centroid-to-centroid; blocked by cells == -1
-    def _bresenham_visible(c0, c1) -> bool:
-        x0, y0 = c0
-        x1, y1 = c1
-        col0 = int((x0 - x_min) / cell_size)
-        row0 = int((y0 - y_min) / cell_size)
-        col1 = int((x1 - x_min) / cell_size)
-        row1 = int((y1 - y_min) / cell_size)
-        dx, dy = abs(col1 - col0), abs(row1 - row0)
-        sc = 1 if col1 > col0 else -1
-        sr = 1 if row1 > row0 else -1
-        err = dx - dy
-        cc, cr = col0, row0
-        while True:
-            if not (0 <= cr < grid_h and 0 <= cc < grid_w):
-                break
-            if grid[cr, cc] < 0:
-                return False
-            if cc == col1 and cr == row1:
-                break
-            e2 = 2 * err
-            if e2 > -dy:
-                err -= dy
-                cc += sc
-            if e2 < dx:
-                err += dx
-                cr += sr
-        return True
-
-    vis_matrix = np.zeros((N, N), dtype=bool)
-    for i in range(N):
-        vis_matrix[i, i] = True
-        for j in range(i + 1, N):
-            v = _bresenham_visible(centroids[i], centroids[j])
-            vis_matrix[i, j] = v
-            vis_matrix[j, i] = v
+    vis_matrix = _raster_vis_matrix(grid, x_min, y_min, cell_size, centroids)
 
     # 6. Bombsite data
     bombsite_set = set(bombsites)
@@ -495,28 +535,11 @@ def make_simple_map(
     bombsite_mask[np.array(list(bombsite_set), dtype=np.int32)] = True
     bombsite_by_idx = bombsite_mask.astype(np.int8)
 
-    # BFS from bombsite cells to compute hop-distance per area
-    dist_hops = np.full(N, np.inf, dtype=np.float32)
-    for b in bombsite_set:
-        dist_hops[b] = 0.0
-    queue: deque = deque(b for b in bombsite_set)
-    while queue:
-        cur = queue.popleft()
-        for nxt in range(N):
-            if adjacency[cur, nxt] and dist_hops[nxt] == np.inf:
-                dist_hops[nxt] = dist_hops[cur] + 1.0
-                queue.append(nxt)
-
-    bombsite_dist = dist_hops                                               # float32[N] (area_id == area_idx)
-    finite = bombsite_dist[np.isfinite(bombsite_dist)]
-    bombsite_dist_scale = 0.0
-    if finite.size:
-        mx = float(finite.max())
-        bombsite_dist_scale = 1.0 / mx if mx > 0 else 0.0
-                                                                            # R0-F (#136): same sentinel fill as the dust2 path — see comment there.
-                                                                            # Scale first (from finite entries), then inf → 4×max (finite, clamps to 0).
-        bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
-                                 4.0 * mx).astype(np.float32)
+    # BFS from the bombsite areas to compute hop-distance per area. area_id == area_idx,
+    # so the bombsite ids are already the indices _hop_distances takes. Then the scale and
+    # the unreachable-area sentinel, from the helper make_cs2_map uses too.
+    bombsite_dist, bombsite_dist_scale = _bombsite_dist_and_scale(
+        _hop_distances(adjacency, list(bombsite_set)))                 # float32[N]
 
     area_bounds = np.zeros((N, 4), dtype=np.float32)
     for idx, x0, y0, x1, y1, *_ in rooms:

@@ -20,7 +20,7 @@ PITFALL: the values below ARE the trained baseline. An unflagged run must stay
 byte-identical to the pre-#165 env; do not "tidy" a number here.
 
 PITFALL: `None` on round_time / laser_range / max_turn_speed means "the env/nav.py
-constant" and is resolved (and validated) inside Cs2Env.__init__, never here —
+constant" and is resolved (and validated) by Cs2Env.__init__ (_resolve_sim_knobs), never here —
 resolving it here would need `nav`. Only non-None values are validated here.
 """
 from __future__ import annotations

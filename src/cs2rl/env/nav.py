@@ -596,12 +596,23 @@ def _build_area_adjacency(nav_graph: NavGraph) -> np.ndarray:
     Source navmesh, but are not directly traversable in this sim because movement
     is a 2D point step over the rasterized walkable surface. Derive adjacency from
     neighboring on-mesh raster cells so pathfinding matches the areas agents can
-    actually enter via the raster lookup (C's _raster_at) + fixed XY moves.
+    actually enter via the raster lookup (C's _raster_at) + fixed XY moves. The cell
+    rule is _raster_adjacency's.
     """
-    adj = np.zeros((nav_graph.N, nav_graph.N), dtype=bool)
+    return _raster_adjacency(nav_graph._pos_grid, nav_graph.N)
+
+
+def _raster_adjacency(grid: np.ndarray, n: int) -> np.ndarray:
+    """Area adjacency of a raster: two areas touch where any of their cells are 8-neighbours.
+
+    `grid` is int[H, W], cell -> area index, -1 off-mesh; returns bool[n, n]. The diagonal is
+    True (staying in an area is always a legal move) and the matrix is symmetric.
+    make_cs2_map reaches this through _build_area_adjacency (the nav mesh's raster);
+    make_simple_map calls it on its room raster.
+    """
+    adj = np.zeros((n, n), dtype=bool)
     np.fill_diagonal(adj, True)
 
-    grid = nav_graph._pos_grid
     height, width = grid.shape
     offsets = (
         (-1, -1),
@@ -679,21 +690,34 @@ def _compute_area_distance_to_targets(
     area_adjacency: np.ndarray,
     targets,
 ):
-    target_ids = [target for target in targets if target in nav_graph._id_to_idx]
-    dist = np.full(nav_graph.N, np.inf, dtype=np.float32)
-    if not target_ids:
-        return dist
+    """Hop distance from every area to the nearest of `targets` (area IDS), by area index.
 
+    Target ids the nav graph does not know are dropped; the BFS itself is _hop_distances.
+    """
+    target_ids = [target for target in targets if target in nav_graph._id_to_idx]
+    return _hop_distances(area_adjacency, [nav_graph._id_to_idx[target] for target in target_ids])
+
+
+def _hop_distances(adjacency: np.ndarray, target_idxs) -> np.ndarray:
+    """Multi-source BFS over a bool[N, N] adjacency: float32[N] hop counts to the nearest target.
+
+    `target_idxs` are area INDICES (rows of `adjacency`), not area ids: make_cs2_map reaches
+    this through _compute_area_distance_to_targets, which maps ids to indices, and
+    make_simple_map calls it directly because its area_id == area_idx. Targets are 0.0; an
+    area no target reaches stays np.inf, and with no targets every entry is np.inf. Both map
+    builders replace the inf entries with a finite sentinel only after computing their scale
+    from the finite ones (map._bombsite_dist_and_scale).
+    """
+    dist = np.full(adjacency.shape[0], np.inf, dtype=np.float32)
     q = deque()
-    for target in target_ids:
-        idx = nav_graph._id_to_idx[target]
+    for idx in target_idxs:
         dist[idx] = 0.0
         q.append(idx)
 
     while q:
         idx = q.popleft()
         next_dist = dist[idx] + 1.0
-        neighbors = np.flatnonzero(area_adjacency[idx])
+        neighbors = np.flatnonzero(adjacency[idx])
         for nbr in neighbors:
             nbr = int(nbr)
             if next_dist >= dist[nbr]:

@@ -6,10 +6,13 @@ excluding 0 AND n >= 5 surviving epochs; drops: selfplay_active epochs, NaN
 measurements, norm ratio outside [0.1, 10].
 """
 import io
+import json
 import math
 from contextlib import redirect_stdout
 
-from cs2rl.experiment.analyze_tplant import print_tag_report, tag_summary
+import pytest
+
+from cs2rl.experiment.analyze_tplant import main, print_tag_report, tag_summary
 
 
 def _row(step,
@@ -150,6 +153,22 @@ def test_vf_control_prints_even_when_all_pg_epochs_drop():
     assert "vf control mb0/healthy" in out.getvalue()
 
 
+@pytest.mark.parametrize("bad", [float("nan"), None])
+def test_vf_control_skips_missing_values(bad):
+    """The vf control is the median of the PRESENT vf values: _row_tag_cells drops a NaN
+    or None vf, so one -0.8 and two missing values give -0.8.
+
+    Keep -0.8 first. Unfiltered, this order gives a NaN median, but the median of
+    (nan, -0.8, nan) is -0.8 (every comparison with NaN is False, so the sort cannot
+    order them), and that order would let the NaN case pass with the filter knocked
+    out. Unfiltered, None raises TypeError in the sort.
+    """
+    rows = [_row(step=i * 1e5, cross_half=0.15, within=0.60) for i in range(3)]
+    for row, vf in zip(rows, (-0.8, bad, bad), strict=True):
+        row["tag/cossim_vf/mb0"] = vf
+    assert tag_summary(rows, dead_windows=[])["_vf"] == {("mb0", "healthy"): -0.8}
+
+
 def test_dead_window_rows_split_into_dead_phase():
     rows = ([_row(step=i * 1e5, cross_half=0.5, within=0.55) for i in range(10)] +
             [_row(step=(10 + i) * 1e5, cross_half=-0.2, within=0.5) for i in range(10)])
@@ -157,6 +176,32 @@ def test_dead_window_rows_split_into_dead_phase():
     assert s["trunk"]["mb0"]["healthy"]["n_epochs"] == 10
     assert s["trunk"]["mb0"]["dead"]["n_epochs"] == 10
     assert s["trunk"]["mb0"]["dead"]["conflict"] > 0.5
+
+
+def test_main_tag_puts_resumed_rows_on_the_global_step_axis(tmp_path):
+    """A legacy resume (new run_id) restarts its steps. main --tag must rewrite them to the
+    concatenated axis that analyze_run's dead windows use: every TAG row of the dead second
+    segment sits at global 2e6 + local step, inside the dead window [2e6, 5e6]."""
+    healthy = [{
+        "run_id": "a",
+        "epoch": i,
+        "step": (i + 1) * 1e5,
+        "game/bomb_plant_rate": 0.5
+    } for i in range(20)]                                              # global 1e5 .. 2e6
+    dead = [
+        dict(_row(step=(i + 1) * 1e5, cross_half=0.15, within=0.60),
+             run_id="b",
+             epoch=i,
+             **{"game/bomb_plant_rate": 0.0}) for i in range(30)
+    ]                                                                  # local 1e5 .. 3e6
+    (tmp_path / "metrics.jsonl").write_text("".join(json.dumps(r) + "\n" for r in healthy + dead))
+    out = io.StringIO()
+    with redirect_stdout(out):
+        assert main(["--tag", str(tmp_path)]) == 0
+    text = out.getvalue()
+    assert "dead [2e+06 .. 5e+06]" in text
+    assert "mb0/dead (n=30)" in text
+    assert "mb0/healthy" not in text
 
 
 def _split_row(step, cross_half, within, group, mb="mb0", split_active=1.0):
