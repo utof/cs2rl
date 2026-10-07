@@ -885,8 +885,9 @@ def _resolve_team_spirit(
 def _map_arrays(md: MapData) -> dict[str, np.ndarray]:
     """The contiguous, C-typed arrays Cs2Env hands to binding.init, built from `md`.
 
-    Keyed by the StaticData field each one fills; the ten pointer fields use their C
-    field names. Insertion order is the order of Cs2Env._refs.
+    Keyed by the C name of the StaticData field each one fills: the ten pointer
+    fields (_pointer_arrays) and the five content-copied arrays. Insertion order
+    is the order of Cs2Env._refs.
 
     PITFALL: every value is a NEW array (flatten() always copies, is_ramp's
     astype to int8 copies, the spawn and delta arrays are built here), so nothing
@@ -1054,10 +1055,12 @@ class Cs2Env(pufferlib.PufferEnv):
         (spec §2.1). The keyword-only inputs describe this instance, not the
         dynamics, and config.json does not record them (spec §2.2).
 
-        Order: map arrays (_map_arrays, kept alive in self._refs), the Rung 0
-        flags, the R0-G knobs, the spawn-capacity check, then the C env
-        (_static_data_values packs StaticData, _init_native calls binding.init),
-        then the Python-side views and per-step scratch.
+        Construction order: team spirit (_resolve_team_spirit), the map arrays
+        (_map_arrays, kept alive in self._refs), the Rung 0 flags, the R0-G knobs
+        (_resolve_sim_knobs), the spawn-capacity check, the C env
+        (_static_data_values builds the StaticData mapping, _init_native packs it
+        and calls binding.init), the recoil flag and the area bounds, then the
+        Python-side views and the per-step scratch.
         """
         if not isinstance(config, EnvConfig):
             raise TypeError(f"config must be an EnvConfig, got {type(config).__name__}")
@@ -1078,10 +1081,10 @@ class Cs2Env(pufferlib.PufferEnv):
 
         arrays = _map_arrays(map_data)
         # Keep refs alive — prevents GC of backing numpy arrays. Every array
-        # _map_arrays returns is held here for the env's lifetime, so the C
-        # pointers sd->centroids_z, sd->is_ramp and the rest stay valid.
-        # is_ramp's int8 copy is a NEW array (result of .astype); it would be
-        # collected immediately if not held here — the C pointer would then dangle.
+        # _map_arrays returns is a NEW array nothing else holds (see its
+        # PITFALL), and C keeps the ten pointer fields (sd->centroids_z,
+        # sd->is_ramp, ...) for the env's lifetime. An array dropped from here
+        # would be collected at once and its C pointer would dangle.
         self._refs = list(arrays.values())
 
         # Rung 0 (spec 2026-08-29 §2.1): these are validated BEFORE binding.init,
@@ -1120,8 +1123,9 @@ class Cs2Env(pufferlib.PufferEnv):
         """The value of every packed StaticData field, keyed by C field name.
 
         Reads the Rung 0 flags and the resolved R0-G knobs off self, so
-        Cs2Env.__init__ sets those first; the map geometry comes from `md` and the
-        five content-copied arrays from `arrays` (_map_arrays).
+        Cs2Env.__init__ sets those first, and the reward weights and pbrs_gamma off
+        self.config; the map geometry comes from `md` and the five content-copied
+        arrays from `arrays` (_map_arrays).
         """
         rw = self.config.rewards
         inv_x = 2.0 / (md.x_max - md.x_min)
@@ -1244,12 +1248,12 @@ class Cs2Env(pufferlib.PufferEnv):
             raise RuntimeError(
                 f"C StaticData.n_active_per_team is {_sc['n_active_per_team']}, expected "
                 f"{self.n_active_per_team} — the buffer C copied and the `static_data` mapping "
-                "Cs2Env._static_data_values packed disagree")
+                "Cs2Env._static_data_values built disagree")
 
     def _attach_area_bounds(self, md: MapData) -> None:
         """Point sd->area_bounds at the map's room AABBs, when the map has them."""
         # Room AABB for ramp interpolation. Not a binding.init arg (it is a
-        # pointer into a Python-owned buffer, not a scalar). make_simple_map fills area_bounds from SIMPLE_ROOMS;
+        # pointer into a Python-owned buffer, not a scalar). make_simple_map fills area_bounds from its rooms;
         # make_cs2_map leaves None so interpolation stays centroids_z.
         # Ownership: `ab` stays in self._refs for the life of this Cs2Env and C
         # only borrows the pointer. Dropping that ref while the env is alive
@@ -1260,7 +1264,7 @@ class Cs2Env(pufferlib.PufferEnv):
             self._c_env.sd.contents.area_bounds = ab.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
     def _bind_buffer_views(self) -> None:
-        """Zero-copy NumPy views into the C env's buffers, and PufferEnv's slots onto them."""
+        """Zero-copy NumPy views into the C env's buffers; PufferEnv's slots point at them unless buf was given."""
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)
         masks_ptr = binding.get_masks(self._capsule)
         self._masks_view = np.frombuffer(
@@ -1285,7 +1289,7 @@ class Cs2Env(pufferlib.PufferEnv):
             self.truncations = self._trunc_view
 
     def _init_step_scratch(self, include_step_stats_in_info: bool) -> None:
-        """Per-step scratch buffers, the shared-memory view slots and the info lists."""
+        """Per-step scratch buffers, the shared-memory view slots, the reward_symmetrize flag and the info lists."""
         self._actions_shape = (N_AGENTS, ACTION_DIM)
         self._actions_scratch = np.zeros(self._actions_shape, dtype=np.int32)
         # Batch 3: continuous-aim Δyaw scratch buffer (N_AGENTS, AIM_DIM=1) float32.
