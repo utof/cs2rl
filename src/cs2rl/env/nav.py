@@ -607,7 +607,8 @@ def _raster_adjacency(grid: np.ndarray, n: int) -> np.ndarray:
 
     `grid` is int[H, W], cell -> area index, -1 off-mesh; returns bool[n, n]. The diagonal is
     True (staying in an area is always a legal move) and the matrix is symmetric.
-    make_cs2_map reaches this through _build_area_adjacency (the nav mesh's raster).
+    make_cs2_map reaches this through _build_area_adjacency (the nav mesh's raster);
+    make_simple_map calls it on its room raster.
     """
     adj = np.zeros((n, n), dtype=bool)
     np.fill_diagonal(adj, True)
@@ -701,10 +702,11 @@ def _hop_distances(adjacency: np.ndarray, target_idxs) -> np.ndarray:
     """Multi-source BFS over a bool[N, N] adjacency: float32[N] hop counts to the nearest target.
 
     `target_idxs` are area INDICES (rows of `adjacency`), not area ids: make_cs2_map reaches
-    this through _compute_area_distance_to_targets, which maps ids to indices. Targets are
-    0.0; an area no target reaches stays np.inf, and with no targets every entry is np.inf.
-    make_cs2_map replaces the inf entries with a finite sentinel only after computing its
-    scale from the finite ones.
+    this through _compute_area_distance_to_targets, which maps ids to indices, and
+    make_simple_map calls it directly because its area_id == area_idx. Targets are 0.0; an
+    area no target reaches stays np.inf, and with no targets every entry is np.inf. Both map
+    builders replace the inf entries with a finite sentinel only after computing their scale
+    from the finite ones (map._bombsite_dist_and_scale).
     """
     dist = np.full(adjacency.shape[0], np.inf, dtype=np.float32)
     q = deque()
