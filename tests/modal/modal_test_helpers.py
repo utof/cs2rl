@@ -50,6 +50,7 @@ they once named runner-half test cycles that travelled here with those helpers.
 The last, "Shared since W4", holds the 6 names W4's split made shared, which do
 not fit one header line, so it states the rule they meet instead.
 """
+import dataclasses
 import io
 import json
 import subprocess
@@ -209,39 +210,38 @@ def _live_batch_size(num_envs: int = 256) -> int:
 def _make_manifest(**overrides) -> mrl.Manifest:
     requested = 30_000_000
     batch_size = _live_batch_size()
-    payload = {
-        "schema_version": 1,
-        "run_id": "ok-id",
-        "attempt_id": "attempt-a",
-        "commit": "a" * 40,
-        "tree": "b" * 40,
-        "source_archive_sha256": "c" * 64,
-        "modal_version": "1.4.3",
-        "image_digest": "sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7",
-        "effective_map": "simple",
-        "gpu": "T4",
-        "cpu_request": 8,
-        "cpu_soft_limit": 8,
-        "memory_request_mib": 16384,
-        "memory_hard_limit_mib": 16384,
-        "vec_workers": 8,
-        "timeout_minutes": 120,
-        "training_argv": ["--train", "--timesteps", "30000000"],
-        "requested_timesteps": requested,
-        "effective_timesteps": (requested // batch_size) * batch_size,
-        "batch_size": batch_size,
-        "seed": 2,
-        "created_at": "2026-08-13T00:00:00+00:00",
-        "resume_sha256": None,
-        "resume_size": None,
-        "resume_source_path": None,
-        "runner_commit": "a" * 40,
-        "config_hash": "d" * 64,
-        "thread_caps": [f"{key}={value}" for key, value in sorted(mrl.THREAD_CAP_ENV.items())],
-        "resumed_from_run_id": None,
-    }
-    payload.update(overrides)
-    return mrl.Manifest(**payload)
+    manifest = mrl.Manifest(
+        schema_version=1,
+        run_id="ok-id",
+        attempt_id="attempt-a",
+        commit="a" * 40,
+        tree="b" * 40,
+        source_archive_sha256="c" * 64,
+        modal_version="1.4.3",
+        image_digest="sha256:6617a625f4090c76c545a0e7d63f2e441718ef9af7f4efe7dd1242a29e289fd7",
+        effective_map="simple",
+        gpu="T4",
+        cpu_request=8,
+        cpu_soft_limit=8,
+        memory_request_mib=16384,
+        memory_hard_limit_mib=16384,
+        vec_workers=8,
+        timeout_minutes=120,
+        training_argv=["--train", "--timesteps", "30000000"],
+        requested_timesteps=requested,
+        effective_timesteps=(requested // batch_size) * batch_size,
+        batch_size=batch_size,
+        seed=2,
+        created_at="2026-08-13T00:00:00+00:00",
+        resume_sha256=None,
+        resume_size=None,
+        resume_source_path=None,
+        runner_commit="a" * 40,
+        config_hash="d" * 64,
+        thread_caps=[f"{key}={value}" for key, value in sorted(mrl.THREAD_CAP_ENV.items())],
+        resumed_from_run_id=None,
+    )
+    return dataclasses.replace(manifest, **overrides)
 
 
 def _minimal_completed_tree(tmp_path: Path, *, steps: list[int] | None = None):

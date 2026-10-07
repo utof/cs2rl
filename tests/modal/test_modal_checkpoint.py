@@ -7,6 +7,7 @@ tests/modal/test_modal_packaging.py: which file a test belongs in, what the chan
 costs in the seam manifest, and where helpers go.
 """
 import ast
+import dataclasses
 import inspect
 import json
 import sys
@@ -104,7 +105,7 @@ def test_validate_completed_run_rejects_bad_evidence(tmp_path, defect):
     elif defect == "nonmonotonic":
         _write_metrics(run_root / "checkpoints" / "metrics.jsonl", [100, 50])
     elif defect == "wrong_hash":
-        manifest = mrl.Manifest(**{**manifest.to_dict(), "config_hash": "e" * 64})
+        manifest = dataclasses.replace(manifest, config_hash="e" * 64)
     elif defect == "short_step":
         _write_metrics(run_root / "checkpoints" / "metrics.jsonl", [effective - 1])
     with pytest.raises(mrl.ValidationError):
