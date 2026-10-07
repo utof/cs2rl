@@ -349,8 +349,8 @@ def test_knockout_the_three_island_interior_blind_shapes_are_now_reported(tmp_pa
     # The third is caught the other way: `game_metrics` IS declared, so the check
     # above correctly leaves it alone and `census()` has to produce the key. Pin
     # that the census walk now recognises the shape.
-    fn = ast.parse("def f():\n    game_metrics.setdefault('game/probe_sd', 1.0)\n").body[0]
-    targets = census.site_write_targets(fn.body[0].value, {"game_metrics": ""})
+    call = ast.parse("game_metrics.setdefault('game/probe_sd', 1.0)", mode="eval").body
+    targets = census.site_write_targets(call, {"game_metrics": ""})
     assert [census._key_text(k) for _, k, _, _ in targets
             ] == ["game/probe_sd"
                   ], (f"site_write_targets no longer recognises setdefault: {targets}")

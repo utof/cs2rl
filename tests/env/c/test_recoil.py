@@ -169,6 +169,7 @@ def test_recoil_is_not_reachable_from_the_cli():
     # forbid the function from documenting itself. Strip the docstring and pin
     # the CODE, which is what the rule is about.
     fn = ast.parse(textwrap.dedent(inspect.getsource(train_config.env_config_from_args))).body[0]
+    assert isinstance(fn, ast.FunctionDef), "getsource of a function parses to its def"
     if ast.get_docstring(fn) is not None:
         fn.body = fn.body[1:]
     assert "recoil" not in ast.unparse(fn)
