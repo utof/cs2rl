@@ -10,7 +10,8 @@ A site is a hit when either of two nets flags it:
     STATE_CLASSES class (nested defs included), or a name an enclosing function assigns one
     of those (``t = trainer``). Any key counts, so an attribute nobody declares is caught.
   * key net: the key is a constant that a STATE_CLASSES class or stock PuffeRL stores on
-    ``self`` (or registers as a buffer or parameter), however the object is spelled, unless
+    ``self``, registers as a buffer or parameter, or annotates in its class body (such as
+    Cs2PuffeRL's ``_cont_action_shm: object``), however the object is spelled, unless
     the object is an argparse namespace (``args``, ``<x>.args``): option names such as
     ``aim_log_std_max``, ``tct_split_heads`` and ``tct_split_trunk`` are policy attributes too.
 WHY. A fallback tolerates a missing attribute, so a renamed or undeclared one silently takes
@@ -29,7 +30,12 @@ bodies included, with ALLOWED_FALLBACKS as its only exceptions;
 test_every_tracked_python_file_is_scanned_or_named keeps the scope that wide.
 KNOWN LIMITS.
   * An object neither net recognises passes: a parameter spelled ``tr``, read through a key
-    that no STATE_CLASSES class or PuffeRL stores. The #355 census found no such spelling.
+    the key net does not hold. At f9e6d51, the functions and lambdas under SCAN_ROOTS whose
+    first parameter is ``t``, ``tr`` or ``model`` took ten trainers and one policy
+    (compute_network_health's ``model``, ten hook functions and lambdas in
+    scripts/trainer_equivalence.py); #355 renamed those parameters ``policy`` and
+    ``trainer``. A new parameter spelled outside the net and read through an undeclared key
+    still passes.
   * Aliases are ``name = <expr>``, ``name: T = <expr>`` and same-length tuple unpacking in
     an enclosing function; a trainer reached through a container, a loop target, a call's
     return value or a walrus is not followed.
@@ -120,12 +126,32 @@ def _aliases(fn):
     return out
 
 
+def _class_owned_names(cls):
+    """Names one parsed class stores on self, registers as a buffer or parameter, or
+    annotates in its own body (a ``name: T`` inside a method is a local, not an attribute)."""
+    names = {
+        n.target.id
+        for n in cls.body if isinstance(n, ast.AnnAssign) and isinstance(n.target, ast.Name)
+    }
+    for n in ast.walk(cls):
+        if (isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Store)
+                and isinstance(n.value, ast.Name) and n.value.id == "self"):
+            names.add(n.attr)
+        elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
+              and n.func.attr in ("register_buffer", "register_parameter") and n.args
+              and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)):
+            names.add(n.args[0].value)
+    return names
+
+
 def _owned_names():
-    """Names STATE_CLASSES and stock PuffeRL store on self or register (the key net's set).
+    """The key net's set: _class_owned_names of each STATE_CLASSES class and stock PuffeRL.
 
     Read from source, like the anchor walk in tests/train/test_trainer_composition.py: a
     class-level walk sees every branch, including the conditional ``aim_log_std_t`` /
-    ``encoder_t`` modules. PuffeRL's file is located without importing pufferl (and torch).
+    ``encoder_t`` modules. Class-body annotations count because Cs2PuffeRL declares
+    ``_action_mask_shm`` and ``_cont_action_shm`` only there; compose.build_trainer sets them
+    after construction. PuffeRL's file is located without importing pufferl (and torch).
     """
     spec = importlib.util.find_spec("pufferlib.pufferl")
     assert spec is not None and spec.origin, "pufferlib.pufferl is not importable"
@@ -138,14 +164,7 @@ def _owned_names():
             if isinstance(n, ast.ClassDef) and n.name == cls_name
         ]
         assert len(classes) == 1, f"{path}: expected one class {cls_name}, found {len(classes)}"
-        for n in ast.walk(classes[0]):
-            if (isinstance(n, ast.Attribute) and isinstance(n.ctx, ast.Store)
-                    and isinstance(n.value, ast.Name) and n.value.id == "self"):
-                names.add(n.attr)
-            elif (isinstance(n, ast.Call) and isinstance(n.func, ast.Attribute)
-                  and n.func.attr in ("register_buffer", "register_parameter") and n.args
-                  and isinstance(n.args[0], ast.Constant) and isinstance(n.args[0].value, str)):
-                names.add(n.args[0].value)
+        names |= _class_owned_names(classes[0])
     return names
 
 
@@ -237,8 +256,8 @@ def test_every_tracked_python_file_is_scanned_or_named():
 def test_every_allowed_fallback_matches_exactly_one_site():
     """A row with no site is stale; a row matching two sites hides the second one's decision.
 
-    With the test above, this makes the row count equal the number of legitimate fallback
-    reads the scan finds.
+    With test_no_trainer_or_policy_state_is_read_through_a_fallback, this makes the row count
+    equal the number of legitimate fallback reads the scan finds.
     """
     counts = collections.Counter((f, q, k) for f, q, k, _line in fallback_sites())
     wrong = {row: counts[row] for row in ALLOWED_FALLBACKS if counts[row] != 1}
@@ -262,12 +281,15 @@ PLANT = textwrap.dedent('''\
             return (getattr(tr, "aim_dim_mask", None),    # a Dust2Policy registered buffer
                     getattr(tr, "tct_split_heads", None),  # a Dust2Policy self store
                     getattr(tr, "_tag_metrics", None),     # a Cs2PuffeRL self store
-                    getattr(tr, "scheduler", None))        # a stock PuffeRL self store
+                    getattr(tr, "scheduler", None),        # a stock PuffeRL self store
+                    getattr(tr, "_cont_action_shm", None))  # a Cs2PuffeRL class-body annotation
 
         g = getattr(run.env, "unowned", None)           # unrelated object, unowned key
         tr2, _ = run.trainer, None
         h = getattr(tr2, "via_tuple", None)             # hit: tuple-unpacked alias
-        return a, b, c, d, e, f, g, h, inner, odd
+        tr3: object = trainer
+        i = getattr(tr3, "via_annotated", None)         # hit: annotated alias
+        return a, b, c, d, e, f, g, h, i, inner, odd
 
 
     class Cs2PuffeRL:
@@ -281,8 +303,9 @@ PLANT = textwrap.dedent('''\
     ''')
 PLANT_HITS = {("isolate", "undeclared"), ("isolate", "via_alias"), ("isolate", "via_policy"),
               ("isolate", "via_run"), ("isolate.inner", "nested"), ("isolate", "via_tuple"),
-              ("isolate.odd", "aim_dim_mask"), ("isolate.odd", "tct_split_heads"),
-              ("isolate.odd", "_tag_metrics"), ("isolate.odd", "scheduler"),
+              ("isolate", "via_annotated"), ("isolate.odd", "aim_dim_mask"),
+              ("isolate.odd", "tct_split_heads"), ("isolate.odd", "_tag_metrics"),
+              ("isolate.odd", "scheduler"), ("isolate.odd", "_cont_action_shm"),
               ("Cs2PuffeRL.m", "late")}
 
 
@@ -291,7 +314,9 @@ def test_the_scan_flags_each_spelling_under_each_root(tmp_path):
 
     One plant under each SCAN_ROOTS entry, scanned through fallback_sites itself, so the walk
     of every root is exercised end to end; a broken net loses its rows (the odd() rows need
-    the key net's owned-name set, one key from each source it reads). A root dropped
+    the key net's owned-name set, one key from each source it reads). Every name the real
+    classes register is also annotated in their class bodies, so a broken register branch
+    loses no row here; test_the_key_net_reads_each_declaration_form pins it. A root dropped
     from SCAN_ROOTS is test_every_tracked_python_file_is_scanned_or_named's case.
     """
     for r in SCAN_ROOTS:
@@ -303,3 +328,24 @@ def test_the_scan_flags_each_spelling_under_each_root(tmp_path):
     for r in SCAN_ROOTS:
         found = {(q, k) for f, q, k, _line in sites if f == f"{r}/plant.py"}
         assert found == PLANT_HITS, f"{r}: missed {PLANT_HITS - found}, extra {found - PLANT_HITS}"
+
+
+def test_the_key_net_reads_each_declaration_form():
+    """Each _class_owned_names branch has a name of its own here.
+
+    On the real classes every registered name is also annotated, so only this test pins the
+    register branch. The method's annotated local and the store on another object stay out.
+    """
+    cls = ast.parse(
+        textwrap.dedent('''\
+        class C:
+            annotated: int
+
+            def __init__(self, other):
+                self.stored = 1
+                self.register_buffer("buffer", None)
+                self.register_parameter("parameter", None)
+                local: int = 2
+                other.elsewhere = local
+        ''')).body[0]
+    assert _class_owned_names(cls) == {"annotated", "stored", "buffer", "parameter"}
