@@ -632,12 +632,27 @@ def _request_from_payload(payload: LaunchPayload) -> mrl.RunRequest:
     )
 
 
+class _SpawnOptions(TypedDict):
+    """The `Function.with_options` keywords `launch_run` sets.
+
+    `launch_run` unpacks it into `with_options`, so pyrefly checks every key and
+    value against modal's own signature. `volumes` copies the stub's exact dict
+    type, because a dict parameter is invariant and a narrower dict is rejected.
+    """
+
+    gpu: str
+    cpu: tuple[int, int]
+    memory: tuple[int, int]
+    timeout: int
+    volumes: dict[str | PurePosixPath, modal.Volume | modal.CloudBucketMount]
+    secrets: NotRequired[list[modal.Secret]]
+
+
 def launch_run(
     request: mrl.RunRequest,
     *,
     repo: Path,
     app_obj: object | None = None,
-    train_fn: object | None = None,
     now: datetime | None = None,
     attempt_id: str | None = None,
     stdout: object | None = None,
@@ -646,7 +661,6 @@ def launch_run(
     repo = Path(repo)
     stamp = now if now is not None else datetime.now(UTC)
     nonce = attempt_id if attempt_id is not None else uuid.uuid4().hex
-    train = train_remote if train_fn is None else train_fn
     app_handle = app if app_obj is None else app_obj
     sink = sys.stdout if stdout is None else stdout
 
@@ -734,7 +748,7 @@ def launch_run(
         created_at=stamp.isoformat(),
     )
 
-    options: dict[str, object] = {
+    options: _SpawnOptions = {
         "gpu": request.gpu,
         "cpu": request.cpu_request_limit,
         "memory": request.memory_request_limit,
@@ -753,7 +767,8 @@ def launch_run(
     # own Function CLI uses spawn when --detach is set. spawn() returns a
     # FunctionCall handle and does not wait, so the local entrypoint can exit
     # without owning the GPU input.
-    handle = train.with_options(**options).spawn(payload)
+    # KNOWN LIMIT: pyrefly 1.2.0 rejects the ParamSpec in modal's spawn stub; 1.3.2 accepts it.
+    handle = train_remote.with_options(**options).spawn(payload)
     function_call_id = getattr(handle, "object_id", None)
     print(f"function_call_id={function_call_id}", file=sink)
     return {
