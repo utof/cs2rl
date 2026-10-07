@@ -901,9 +901,15 @@ def site_write_targets(node, containers):
     unit test that knocks each of them out cannot drift apart:
 
         c[k] = v / c[k] += v      subscript assignment
-        c = {k: v, ...}           a dict literal bound to a container NAME
+        c = {k: v, ...}           a dict literal bound to a container NAME, with or
+                                  without an annotation (`c: T = {...}`)
         c.update({k: v, ...})     a literal update
         c.setdefault(k, v)        (final review I-3)
+
+    WHY the annotated form. `summary: dict[str, Any] = {...}` in
+    Cs2Env._build_terminal_info (#354) is an ast.AnnAssign, not an ast.Assign;
+    before it was accepted the census silently dropped that dict's six keys and
+    only the registry's reverse check noticed.
 
     WHY setdefault is here at all. It was missing, and the miss was invisible
     twice over: `census()` did not produce the key, so the registry never had to
@@ -918,7 +924,8 @@ def site_write_targets(node, containers):
     tested against a synthetic snippet.
     """
     writes = []
-    if isinstance(node, (ast.Assign, ast.AugAssign)):
+    # An AnnAssign without a value (`c: T`) declares a name and writes nothing.
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for tgt in targets:
             if isinstance(tgt, ast.Subscript) and _container_name(tgt.value) in containers:
@@ -1133,7 +1140,7 @@ def metrics_write_sites(src=None):
     missed `metrics[`, which occurs outside the island):
 
       write POSITIONS  ``c[k] = ...`` / ``c[k] += ...``, a dict literal bound to a
-                       name, a bare dict literal anywhere, ``c.update({...})`` and
+                       name (annotated or not), a bare dict literal anywhere, ``c.update({...})`` and
                        ``c.setdefault(k, ...)`` (the last added by final review
                        I-3 — it was a write shape NEITHER walk knew about, so a
                        `setdefault` emission was invisible tree-wide, not just
@@ -1203,7 +1210,10 @@ def metrics_write_sites(src=None):
     def _walk_all(path, node, qualname):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             qualname = f"{qualname}.{node.name}" if qualname else node.name
-        if isinstance(node, (ast.Assign, ast.AugAssign)):
+        # The same assignment shapes as site_write_targets. Without AnnAssign a bare-keyed
+        # `stats: dict = {...}` reached _record only as the nested literal, with no
+        # container name, and the bare keys were dropped.
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for tgt in targets:
                 if isinstance(tgt, ast.Subscript):

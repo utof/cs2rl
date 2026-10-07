@@ -360,6 +360,7 @@ def test_knockout_the_three_island_interior_blind_shapes_are_now_reported(tmp_pa
     ("logs['game/a'] = 1", "game/a"),
     ("logs['game/a'] += 1", "game/a"),
     ("logs = {'game/a': 1}", "game/a"),
+    ("logs: dict = {'game/a': 1}", "game/a"),
     ("logs.update({'game/a': 1})", "game/a"),
     ("logs.setdefault('game/a', 1)", "game/a"),
 ])
@@ -376,6 +377,20 @@ def test_the_census_recognises_each_write_shape_it_claims_to(snippet, expected):
     targets = census.site_write_targets(node, {"logs": ""})
     assert [census._key_text(k) for _, k, _, _ in targets
             ] == [expected], (f"{snippet!r} is not recognised as a write into `logs`: {targets}")
+
+
+@pytest.mark.parametrize("line", ["stats = {'kills': 1}", "stats: dict = {'kills': 1}"])
+def test_the_sweep_sees_a_bare_key_dict_literal_annotated_or_not(tmp_path, line):
+    """A BARE key passes the sweep's predicate only through its container's name.
+
+    Read off the nested literal alone it has no container and is dropped, which is
+    what happened to an annotated binding before `metrics_write_sites` accepted
+    ast.AnnAssign (#354). The unannotated row is the control.
+    """
+    (tmp_path / "helper.py").write_text(f"def helper():\n    {line}\n")
+    sweep = census.metrics_write_sites(src=tmp_path)
+    assert [(w.container, w.key) for w in sweep
+            ] == [("stats", "kills")], (f"{line!r} is not seen as a write into `stats`: {sweep}")
 
 
 def test_dicts_merged_into_island_containers_come_from_island_emitters():
