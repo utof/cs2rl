@@ -38,6 +38,7 @@ def test_pbrs_shaping_positive_on_kill():
     # mirror MapData.line_of_sight_2d to filter pair candidates so we pick a
     # pair the live env actually treats as combatable.
     nav = env.nav_graph
+    assert nav is not None, "make_env() loads dust2, which has a NavGraph"
     pair = None
     for i, area_i in enumerate(nav.area_ids[:400]):
         for area_j in nav.area_ids[i + 1:i + 200]:
@@ -208,6 +209,7 @@ def test_bomb_entry_bonus():
     env = make_env(seed=0, auto_reset=False)
     env.reset()
     nav_graph = env.nav_graph
+    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
     map_data = env.map_data
 
     # Find first bombsite area index
@@ -218,7 +220,7 @@ def test_bomb_entry_bonus():
             site_idx = idx
             site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
             break
-    assert site_idx is not None, "No bombsite found in map"
+    assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
 
     # Assign bomb to agent 0 and teleport them to bombsite
     for i in range(10):
@@ -252,6 +254,7 @@ def test_plant_progress_reward():
     env = make_env(seed=0, auto_reset=False)
     env.reset()
     nav_graph = env.nav_graph
+    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
     map_data = env.map_data
 
     # Find first bombsite area
@@ -262,7 +265,7 @@ def test_plant_progress_reward():
             site_idx = idx
             site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
             break
-    assert site_idx is not None, "No bombsite found in map"
+    assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
 
     # Set up bomber at bombsite — mark entry as already done so no entry bonus
     for i in range(10):
@@ -310,6 +313,7 @@ def test_planter_death_releases_plant_lock():
     sd = env._c_env.sd.contents
     map_data = env.map_data
     nav_graph = env.nav_graph
+    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
 
     site_idx = None
     site_centroid = None
@@ -318,7 +322,7 @@ def test_planter_death_releases_plant_lock():
             site_idx = idx
             site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
             break
-    assert site_idx is not None, "No bombsite found in map"
+    assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
 
     def _put_at_site(i, has_bomb):
         a = g.agents[i]
@@ -379,6 +383,7 @@ def test_plant_completion_writes_plant_tick():
     sd = env._c_env.sd.contents
     map_data = env.map_data
     nav_graph = env.nav_graph
+    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
     site_idx = None
     site_centroid = None
     for idx, is_site in enumerate(map_data.bombsite_by_idx):
@@ -386,7 +391,7 @@ def test_plant_completion_writes_plant_tick():
             site_idx = idx
             site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
             break
-    assert site_idx is not None
+    assert site_idx is not None and site_centroid is not None
     for i in range(10):
         g.agents[i].has_bomb = 0
     a = g.agents[0]
@@ -494,6 +499,7 @@ def test_kill_reward_weight_is_configurable():
     env.reset()
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
     nav = env.nav_graph
+    assert nav is not None, "make_env() loads dust2, which has a NavGraph"
 
     # Pair selection uses runtime LoS (see test_pbrs_shaping_positive_on_kill comment).
     pair = None
