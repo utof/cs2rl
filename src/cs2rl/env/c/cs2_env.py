@@ -3,6 +3,7 @@
 import ctypes
 import hashlib
 from dataclasses import dataclass
+from typing import Any
 
 import gymnasium
 import numpy as np
@@ -1250,7 +1251,7 @@ class Cs2Env(pufferlib.PufferEnv):
         self._terminal_rewards = np.empty(N_AGENTS, dtype=np.float32)
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
-        self._empty_infos = []
+        self._empty_infos: list[dict[str, Any]] = []
         self._include_step_stats_in_info = bool(include_step_stats_in_info)
         # Spec 2026-08-01 §4.3: Python-layer zero-sum transform, applied at the
         # very end of step(). No StaticDataC field and no C rebuild — the
@@ -1263,7 +1264,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # over the ctypes struct, so the same reference is safe to return each tick.
         if self._include_step_stats_in_info:
             self._step_stats_view = StepStatsView(self._c_env.step_stats)
-            self._nonterminal_infos = [{"step_stats": self._step_stats_view}]
+            self._nonterminal_infos: list[dict[str, Any]] = [{"step_stats": self._step_stats_view}]
         else:
             self._step_stats_view = None
             self._nonterminal_infos = self._empty_infos
@@ -1508,7 +1509,9 @@ class Cs2Env(pufferlib.PufferEnv):
 
     def _build_terminal_info(self):
         stats = self._c_env.episode_stats
-        summary = {
+        # Values are ints and floats; with include_step_stats_in_info, step() also adds
+        # the StepStatsView under "step_stats".
+        summary: dict[str, Any] = {
             "bomb_planted": int(stats.bomb_planted),
             "bomb_defused": int(stats.bomb_defused),
             "kills_t": int(stats.kills_t),
