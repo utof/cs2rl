@@ -76,7 +76,7 @@ def elimination_only_win_rates(logs):
 # ── SECTION: Network Health Monitoring ────────────────────────────────────
 
 
-def compute_network_health(model, device):
+def compute_network_health(policy, device):
     """Compute network health metrics for logging.
 
     Returns a dict with:
@@ -92,7 +92,7 @@ def compute_network_health(model, device):
     metrics = {}
 
     # Weight norms per named parameter
-    for name, param in model.named_parameters():
+    for name, param in policy.named_parameters():
         safe_name = name.replace(".", "_")
         metrics[f"health/weight_norm_{safe_name}"] = param.norm().item()
 
