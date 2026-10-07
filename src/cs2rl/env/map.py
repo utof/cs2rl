@@ -222,15 +222,14 @@ def make_cs2_map(nav_path: str, cache_path: str, *, build_vis: bool = True) -> M
     if finite_dist.size:
         max_dist = float(finite_dist.max())
         bombsite_dist_scale = 1.0 / max_dist if max_dist > 0 else 0.0
-    # R0-F (#136): scale is computed from the FINITE entries above; only now
-    # replace non-finite hops (area-id gaps + unreachable areas) with 4×max so
-    # closeness = 1 − 4 < 0 → clamps to 0 in C exactly as the old isfinite()
-    # skip did (isfinite folds to true under -ffast-math and leaked inf).
-    # PITFALL: never fill before computing the scale — the sentinel would
-    # shrink it 4× and silently rescale every nav reward. No finite entry
-    # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
-    # scale > 0 handles it.
-    if finite_dist.size:
+        # R0-F (#136): scale is computed from the FINITE entries above; only now
+        # replace non-finite hops (area-id gaps + unreachable areas) with 4×max so
+        # closeness = 1 − 4 < 0 → clamps to 0 in C exactly as the old isfinite()
+        # skip did (isfinite folds to true under -ffast-math and leaked inf).
+        # PITFALL: never fill before computing the scale — the sentinel would
+        # shrink it 4× and silently rescale every nav reward. No finite entry
+        # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
+        # scale > 0 handles it.
         bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
                                  4.0 * max_dist).astype(np.float32)
 
@@ -516,7 +515,6 @@ def make_simple_map(
         bombsite_dist_scale = 1.0 / mx if mx > 0 else 0.0
                                                                             # R0-F (#136): same sentinel fill as the dust2 path — see comment there.
                                                                             # Scale first (from finite entries), then inf → 4×max (finite, clamps to 0).
-    if finite.size:
         bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
                                  4.0 * mx).astype(np.float32)
 

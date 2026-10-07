@@ -10,7 +10,7 @@ import rerun as rr
 import rerun.blueprint as rrb
 
 
-def init_recording(save_path: str = None):
+def init_recording(save_path: str | None = None):
     rr.init("cs2rl", spawn=(save_path is None))
     if save_path:
         rr.save(save_path)
