@@ -205,6 +205,118 @@ def segment_rows(rows):
     return segments
 
 
+def _global_steps(segments):
+    """Every row on the concatenated step axis: ([(global_step, row), ...], total_steps).
+
+    Steps are cumulative WITHIN a segment (they restart at a resume seam), so each segment is
+    offset by the running total. PITFALL: that total grows by each segment's LAST row step,
+    not its max, and a row without "step" counts as 0. analyze_run (dead windows, plant-rate
+    windows) and main's --tag section read the axis from here, so they stay on the same one.
+    The rows are the caller's objects, not copies.
+    """
+    steps_rows = []
+    offset = 0.0
+    for _, seg in segments:
+        seg_last = 0.0
+        for row in seg:
+            seg_last = row.get("step", 0)
+            steps_rows.append((offset + seg_last, row))
+        offset += seg_last
+    return steps_rows, offset
+
+
+def _t_plant_block_slopes(segments, cap, bomb_timer, p_min, min_block):
+    """[(seg_idx, first_epoch, last_epoch, n, slope)] over blocks of consecutive kept rows.
+
+    A row is kept when t_plant() is not None for it. A block holds at least `min_block` kept
+    rows and never spans a resume seam; a block whose slope is None (fewer than 3 rows, or
+    all its rows on one epoch) is dropped.
+    """
+    blocks = []                        # list of (seg_idx, [(epoch, t_plant)])
+    for si, (_, seg) in enumerate(segments):
+        cur = []
+        for row in seg:
+            tp = t_plant(row, cap, bomb_timer, p_min)
+            if tp is None:
+                if len(cur) >= min_block:
+                    blocks.append((si, cur))
+                cur = []
+            else:
+                cur.append((row.get("epoch", 0), tp))
+        if len(cur) >= min_block:
+            blocks.append((si, cur))
+    block_slopes = []
+    for si, blk in blocks:
+        s = slope([e for e, _ in blk], [t for _, t in blk])
+        if s is not None:
+            block_slopes.append((si, blk[0][0], blk[-1][0], len(blk), s))
+    return block_slopes
+
+
+def _dead_windows(steps_rows, p_min, dead_window_steps):
+    """[(start, end)] global-step spans of at least `dead_window_steps` with plant rate <= p_min.
+
+    `steps_rows` is _global_steps' list. A missing or None plant rate counts as 0.0 (dead).
+    A window starts at the step of the last row BEFORE the first dead row (0.0 if the run
+    starts dead) and ends at the first live row's step, or at the last row's step if the run
+    ends dead.
+    """
+    dead_windows = []
+    prev_step = 0.0
+    win_start = None
+    for step, row in steps_rows:
+        p = row.get("game/bomb_plant_rate") or 0.0
+        if p <= p_min:
+            if win_start is None:
+                win_start = prev_step
+        else:
+            if win_start is not None and step - win_start >= dead_window_steps:
+                dead_windows.append((win_start, step))
+            win_start = None
+        prev_step = step
+    if win_start is not None and prev_step - win_start >= dead_window_steps:
+        dead_windows.append((win_start, prev_step))
+    return dead_windows
+
+
+def _plant_and_ct_series(steps_rows, window_steps):
+    """(plant_windows, ct): the per-window plant rates and the CT-pressure series.
+
+    plant_windows maps window index (global step // window_steps) to that window's plant
+    rates; ct holds every present value of plant rate ("plant"), CT kills ("kills_ct"), CT
+    win rate ("win_ct") and timeout rate ("timeout"), in row order. Absent or None values
+    are skipped, not counted as 0.
+    """
+    plant_windows = {}                                                                         # window_idx -> [p, ...]
+    ct = {"kills_ct": [], "win_ct": [], "timeout": [], "plant": []}
+    for step, row in steps_rows:
+        p = row.get("game/bomb_plant_rate")
+        if p is not None:
+            plant_windows.setdefault(int(step // window_steps), []).append(p)
+            ct["plant"].append(p)
+        for src, dst in (("environment/kills_ct", "kills_ct"), ("game/win_rate_ct", "win_ct"),
+                         ("game/timeout_rate", "timeout")):
+            v = row.get(src)
+            if v is not None:
+                ct[dst].append(v)
+    return plant_windows, ct
+
+
+def _outcome_mix_mean(rows):
+    """Mean of outcome_mix over the rows that have one, or None if no row does.
+
+    Presence-gated: outcome_mix is None for a row without game/win_by_detonation, so an
+    old-format jsonl gives None. Averages the per-row rate differences (same aggregation as
+    ct_win_rate_mean); do NOT form mean(m)/mean(p). Does not touch the 5M plant-rate window
+    or ct_win_by_elim_share.
+    """
+    mix_rows = [m for m in map(outcome_mix, rows) if m is not None]
+    if not mix_rows:
+        return None
+    keys = ("t_detonation", "ct_defuse", "timeout", "t_elimination", "ct_elimination")
+    return {k: sum(m[k] for m in mix_rows) / len(mix_rows) for k in keys}
+
+
 def analyze_run(run_dir: Path,
                 cap: float,
                 bomb_timer: float,
@@ -224,72 +336,16 @@ def analyze_run(run_dir: Path,
     segments = segment_rows(rows)
 
     # ── blocks + slopes (never spanning a resume seam) ──────────────────
-    blocks = []                        # list of (seg_idx, [(epoch, t_plant)])
-    for si, (_, seg) in enumerate(segments):
-        cur = []
-        for row in seg:
-            tp = t_plant(row, cap, bomb_timer, p_min)
-            if tp is None:
-                if len(cur) >= min_block:
-                    blocks.append((si, cur))
-                cur = []
-            else:
-                cur.append((row.get("epoch", 0), tp))
-        if len(cur) >= min_block:
-            blocks.append((si, cur))
-    block_slopes = []
-    for si, blk in blocks:
-        s = slope([e for e, _ in blk], [t for _, t in blk])
-        if s is not None:
-            block_slopes.append((si, blk[0][0], blk[-1][0], len(blk), s))
+    block_slopes = _t_plant_block_slopes(segments, cap, bomb_timer, p_min, min_block)
 
     # ── dead windows over concatenated step axis ────────────────────────
-    # Steps are cumulative WITHIN a segment; concatenate by offsetting each
-    # segment by the running total so windows and "after 15M" are global.
-    dead_windows = []
-    offset = 0.0
-    prev_step = 0.0
-    win_start = None
-    total_steps = 0.0
-    for _, seg in segments:
-        seg_last = 0.0
-        for row in seg:
-            step = offset + row.get("step", 0)
-            seg_last = row.get("step", 0)
-            p = row.get("game/bomb_plant_rate") or 0.0
-            if p <= p_min:
-                if win_start is None:
-                    win_start = prev_step
-            else:
-                if win_start is not None and step - win_start >= dead_window_steps:
-                    dead_windows.append((win_start, step))
-                win_start = None
-            prev_step = step
-        offset += seg_last
-    total_steps = offset
-    if win_start is not None and prev_step - win_start >= dead_window_steps:
-        dead_windows.append((win_start, prev_step))
+    # Windows and "after 15M" are on the global axis (_global_steps).
+    steps_rows, total_steps = _global_steps(segments)
+    dead_windows = _dead_windows(steps_rows, p_min, dead_window_steps)
     late_dead = [w for w in dead_windows if w[1] > dead_after_steps]
 
     # ── plant-rate windows + CT-pressure controls ───────────────────────
-    plant_windows = {}                                                                             # window_idx -> [p, ...]
-    ct = {"kills_ct": [], "win_ct": [], "timeout": [], "plant": []}
-    offset = 0.0
-    for _, seg in segments:
-        seg_last = 0.0
-        for row in seg:
-            step = offset + row.get("step", 0)
-            seg_last = row.get("step", 0)
-            p = row.get("game/bomb_plant_rate")
-            if p is not None:
-                plant_windows.setdefault(int(step // window_steps), []).append(p)
-                ct["plant"].append(p)
-            for src, dst in (("environment/kills_ct", "kills_ct"), ("game/win_rate_ct", "win_ct"),
-                             ("game/timeout_rate", "timeout")):
-                v = row.get(src)
-                if v is not None:
-                    ct[dst].append(v)
-        offset += seg_last
+    plant_windows, ct = _plant_and_ct_series(steps_rows, window_steps)
 
     mean = lambda v: sum(v) / len(v) if v else None                                            # noqa: E731
     win_ct_mean, timeout_mean = mean(ct["win_ct"]), mean(ct["timeout"])
@@ -298,17 +354,8 @@ def analyze_run(run_dir: Path,
     elim_share = (None if not win_ct_mean else max(0.0, win_ct_mean - (timeout_mean or 0.0)) /
                   win_ct_mean)
 
-    # Second pass over already-loaded rows. Presence-gated: outcome_mix is
-    # None for a row without game/win_by_detonation, so an old-format jsonl
-    # leaves mix_rows empty and mix_mean None. Average
-    # the per-row rate differences (same aggregation as ct_win_rate_mean);
-    # do NOT form mean(m)/mean(p). Does not touch the 5M plant-rate
-    # window or ct_win_by_elim_share.
-    mix_rows = [m for m in map(outcome_mix, rows) if m is not None]
-    mix_mean = None
-    if mix_rows:
-        keys = ("t_detonation", "ct_defuse", "timeout", "t_elimination", "ct_elimination")
-        mix_mean = {k: sum(m[k] for m in mix_rows) / len(mix_rows) for k in keys}
+    # Second pass over already-loaded rows (see _outcome_mix_mean).
+    mix_mean = _outcome_mix_mean(rows)
 
     return {
         "run": run_dir.name,
@@ -686,16 +733,10 @@ def main(argv=None):
                         rows=rows)
         print_report(r, args.window_steps)
         if args.tag:
-            # rebuild the concatenated step axis exactly like analyze_run
-            tag_rows, offset = [], 0.0
-            for _, seg in segment_rows(rows):
-                seg_last = 0.0
-                for row in seg:
-                    row = dict(row)
-                    seg_last = row.get("step", 0)
-                    row["step"] = offset + seg_last
-                    tag_rows.append(row)
-                offset += seg_last
+            # the concatenated step axis analyze_run used, on COPIES of the rows: "step"
+            # is rewritten to the global step and the caller's rows stay untouched
+            steps_rows, _ = _global_steps(segment_rows(rows))
+            tag_rows = [dict(row, step=step) for step, row in steps_rows]
             print_tag_report(tag_summary(tag_rows, r["dead_windows"]))
     return 0
 
