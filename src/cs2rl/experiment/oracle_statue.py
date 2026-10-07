@@ -587,6 +587,9 @@ def run_check(episodes: int = 200,
     # catch. `ttk_median_killed` is reported alongside for diagnosis only.
     censored = np.array([round_time + 1 if t is None else t for t in ttks], dtype=float)
     killed = [t for t in ttks if t is not None]
+    # The obs diagnostics live on ObsOracleActor only, which _build_hero_actor
+    # returns exactly when obs_only is set.
+    obs_actor = oracle if isinstance(oracle, ObsOracleActor) else None
     return {
         "episodes": episodes,
         "seed": seed,
@@ -603,10 +606,10 @@ def run_check(episodes: int = 200,
         "rz_max": rz_max,
         "unmatched_vis_slots": unmatched,
         "obs_only": obs_only,
-        "obs_blind_ticks": oracle.blind_ticks if obs_only else None,
-        "obs_inconsistent_slots": oracle.inconsistent_slots if obs_only else None,
-        "obs_rz_min": oracle.rz_min if obs_only else None,
-        "obs_rz_max": oracle.rz_max if obs_only else None,
+        "obs_blind_ticks": obs_actor.blind_ticks if obs_actor is not None else None,
+        "obs_inconsistent_slots": obs_actor.inconsistent_slots if obs_actor is not None else None,
+        "obs_rz_min": obs_actor.rz_min if obs_actor is not None else None,
+        "obs_rz_max": obs_actor.rz_max if obs_actor is not None else None,
         "failures": failures,
         **totals,
     }
@@ -643,7 +646,7 @@ def _rz_disagrees(res: dict) -> bool:
     """
     obs_lo, obs_hi = res.get("obs_rz_min"), res.get("obs_rz_max")
     c_lo, c_hi = res.get("rz_min"), res.get("rz_max")
-    if any(v is None for v in (obs_lo, obs_hi, c_lo, c_hi)):
+    if obs_lo is None or obs_hi is None or c_lo is None or c_hi is None:
         return False
     return abs(obs_lo - c_lo) > OBS_RZ_TOL or abs(obs_hi - c_hi) > OBS_RZ_TOL
 
