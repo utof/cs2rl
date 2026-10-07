@@ -351,7 +351,7 @@ def _module_level_names(tree):
     it, because a def that may not exist at run time has no one right
     destination.
     """
-    found = {}
+    found: dict[str, ast.stmt] = {}
     for node in tree.body:
         if isinstance(node, _DEFS):
             found[node.name] = node

@@ -72,7 +72,8 @@ def test_manifest_records_authoritative_simple_map_not_legacy_env():
     assert payload["resume_size"] is None
     assert payload["resume_source_path"] is None
     assert payload["modal_version"] == "1.4.3"
-    assert payload["image_digest"].startswith("sha256:")
+    digest = payload["image_digest"]
+    assert isinstance(digest, str) and digest.startswith("sha256:")
     assert payload["gpu"] == "T4"
     assert payload["vec_workers"] == 8
     assert payload["effective_map"] == "simple"

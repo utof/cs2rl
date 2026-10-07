@@ -142,7 +142,12 @@ def _noop_heartbeat(**_kwargs):
 def _write_dumped_config(run_root: Path) -> dict[str, object]:
     ckpt_dir = run_root / "checkpoints"
     ckpt_dir.mkdir(parents=True, exist_ok=True)
-    config = {"env": "cs2-dust2", "seed": 2, "data_dir": str(ckpt_dir), "timesteps": 30000000}
+    config: dict[str, object] = {
+        "env": "cs2-dust2",
+        "seed": 2,
+        "data_dir": str(ckpt_dir),
+        "timesteps": 30000000
+    }
     (ckpt_dir / "config.json").write_text(json.dumps(config))
     return config
 
@@ -175,6 +180,7 @@ class FakeChild:
         if timeout is not None and timeout >= training.TERM_GRACE_SECONDS:
             effective = 0
         if not self._done.wait(timeout=effective):
+            assert timeout is not None, "an untimed Event.wait returns only once set"
             raise subprocess.TimeoutExpired(["fake"], timeout)
         return self.returncode
 
