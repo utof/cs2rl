@@ -279,8 +279,8 @@ class ReloadingVolume(Protocol):
     modal's stub declares `Volume.reload` and `Volume.commit` as attributes
     of a callable Protocol type. pyrefly 1.2.0 checks a protocol method like a
     read-write attribute, whose type must match exactly, so `modal.Volume`
-    failed the method form. A read-only member accepts any compatible callable:
-    modal's, and a fake's plain method.
+    failed the method form. 1.3.2 still rejects it (#358). A read-only member
+    accepts any compatible callable: modal's, and a fake's plain method.
     """
 
     @property

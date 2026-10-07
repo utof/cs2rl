@@ -3,9 +3,10 @@
 #
 # preset="default" NOT "basic": the basic preset skips unannotated function
 # bodies, which is ~74% of this repo, so it reported only 4 errors against
-# default's 752. Note "default" is also pyrefly 1.2.0's own default and deleting
-# this line changes nothing; it is kept so this comment has something to attach
-# to, and so a future version bump cannot silently move us.
+# default's 752. Note "default" is also pyrefly's own default (1.2.0, and 1.3.2:
+# measured in #358) and deleting this line changes nothing; it is kept so this
+# comment has something to attach to, and so a future version bump cannot
+# silently move us.
 preset = "default"
 
 # The pre-existing errors are frozen in pyrefly-snapshot.json and compared by

@@ -39,8 +39,11 @@ dev = [
     "pytest-timeout>=2.4.0",
     # Pinned EXACTLY, not ">=". The type gate (scripts/pyrefly_gate.py) freezes
     # the repo's pre-existing errors in pyrefly-snapshot.json under a key made of
-    # exact message strings; a minor-version bump rewrites concise_description
-    # wholesale and turns the next commit into an unreadable wall of diffs.
+    # exact message strings and compares by exact equality. A new version can add,
+    # drop or reword errors, and any of those reds the next commit for a reason
+    # that commit did not cause. 1.2.0 -> 1.3.2 over the 499 errors frozen before
+    # #354: 12 dropped, 2 reworded, none added (#358). Bump on purpose, then
+    # refreeze with `--update` and read the row diff.
     "pyrefly==1.3.2",
     # Enforces the package's layering: the contracts are [tool.importlinter] below,
     # and tests/integration/test_import_layers.py runs them on every suite run. Dev-only (no

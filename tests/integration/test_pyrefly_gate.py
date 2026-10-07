@@ -340,11 +340,12 @@ def test_every_tracked_python_file_is_covered_by_the_config(tmp_path):
     nothing wrong.
     """
     # NOT tmp_path: pytest's basetemp here lives under a dot-directory, and
-    # pyrefly silently skips every project-includes pattern whose absolute path
-    # has a hidden ancestor -- measured, the same tree yields 136 covered files
-    # under /tmp/x and 26 under /tmp/.x. The gate is unaffected because its own
-    # mkdtemp lands in /tmp, but this test materialises its own tree and would
-    # otherwise compare 26 against 135 and blame the config.
+    # pyrefly 1.2.0 silently skipped every project-includes pattern whose absolute
+    # path has a hidden ancestor -- measured, the same tree yielded 136 covered
+    # files under /tmp/x and 26 under /tmp/.x. 1.3.2 does not skip (#358); the
+    # test keeps /tmp so it does not depend on that. The gate is unaffected because
+    # its own mkdtemp lands in /tmp, but this test materialises its own tree and
+    # under 1.2.0 would compare 26 against 135 and blame the config.
     tree = Path(tempfile.mkdtemp(prefix="pyrefly-cov-"))
     try:
         git(REPO, "checkout-index", "-a", f"--prefix={tree}/")
