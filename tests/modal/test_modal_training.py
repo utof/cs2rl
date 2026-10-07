@@ -551,7 +551,7 @@ def test_prebuilt_validation_still_rejects_a_torn_checkpoint(tmp_path, monkeypat
 
     assert not (run_root / "checkpoints" / "dust2_policy.pt.meta.json").exists()
     assert outcome.generation is None
-    assert outcome.reason is not None
+    assert outcome.reason is not None, "the reason is None only when a sidecar was written"
     assert "not weights-only loadable" in outcome.reason
     assert commits == []
 
@@ -566,7 +566,7 @@ def test_publish_reason_names_the_missing_interpreter(tmp_path, monkeypatch):
     outcome, commits = _publish(run_root)
 
     assert not (run_root / "checkpoints" / "dust2_policy.pt.meta.json").exists()
-    assert outcome.reason is not None
+    assert outcome.reason is not None, "the reason is None only when a sidecar was written"
     assert "nonexistent" in outcome.reason
     assert commits == []
 

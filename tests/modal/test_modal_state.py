@@ -52,7 +52,7 @@ def test_status_transitions_are_monotonic_and_attempt_owned(tmp_path):
                                     now=now,
                                     attempt_id="attempt-a",
                                     lock=lock)
-    assert first is not None
+    assert first is not None, "no STATUS yet, so no other attempt owns the run"
     assert first.status is core.Status.PREPARING
     assert first.attempt_id == "attempt-a"
     state.transition_status(run_root,
@@ -70,7 +70,7 @@ def test_status_transitions_are_monotonic_and_attempt_owned(tmp_path):
                                    now=now,
                                    attempt_id="attempt-a",
                                    lock=lock)
-    assert done is not None
+    assert done is not None, "attempt-a owns STATUS"
     assert done.status is core.Status.COMPLETED
     # Idempotent same-terminal write by the original delivery.
     again = state.transition_status(run_root,
@@ -78,7 +78,7 @@ def test_status_transitions_are_monotonic_and_attempt_owned(tmp_path):
                                     now=now,
                                     attempt_id="attempt-a",
                                     lock=lock)
-    assert again is not None
+    assert again is not None, "the owner's same-terminal write returns the current status"
     assert again.status is core.Status.COMPLETED
     with pytest.raises(mrl.ValidationError):
         state.transition_status(run_root,
@@ -177,7 +177,8 @@ def test_blocked_heartbeat_cannot_clobber_completed(tmp_path):
     assert json.loads((run_root / "STATUS.json").read_text())["status"] == "completed"
     assert beat_status
     first_beat = beat_status[0]
-    assert first_beat is not None and first_beat.status is core.Status.COMPLETED
+    assert first_beat is not None, "a1 owns STATUS, so its beat returns a status, not None"
+    assert first_beat.status is core.Status.COMPLETED
 
 
 def test_late_heartbeat_cannot_replace_terminal(tmp_path):
@@ -214,7 +215,7 @@ def test_derive_status_stale_after_five_minutes_does_not_mutate(tmp_path):
     run_root = tmp_path / "run"
     run_root.mkdir()
     written = _advance_to_training(run_root, lock=threading.Lock())
-    assert written is not None
+    assert written is not None, "a1 has owned STATUS since its PREPARING write"
     before = (run_root / "STATUS.json").read_bytes()
     derived = state.derive_status(written, now=_aware(hour=12, minute=5))
     assert derived.stale is True
@@ -372,7 +373,7 @@ def test_concurrent_reserve_run_admits_exactly_one_attempt():
     assert len(losses) == 1
     winner = wins[0]
     claim = registry.get("run:ok-id")
-    assert claim is not None
+    assert claim is not None, "the winning reservation stored a claim"
     assert claim["attempt_id"] == winner
     reservation = json.loads(artifacts.committed[mrl.RUNS_ROOT / "ok-id" /
                                                  mrl.RESERVATION_FILENAME])
@@ -523,7 +524,7 @@ def test_different_attempt_cannot_reach_remote_wrapper():
     with pytest.raises(mrl.ValidationError):
         mrl.reserve_run(registry, artifacts, "ok-id", "attempt-b", now=_aware())
     claim = registry.get("run:ok-id")
-    assert claim is not None
+    assert claim is not None, "attempt-a's reservation stored a claim"
     assert claim["attempt_id"] == "attempt-a"
     # Loser never received a Function delivery, so no attempt:<id> claim exists.
     assert registry.get("attempt:attempt-b") is None
