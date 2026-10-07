@@ -388,6 +388,32 @@ def test_arch_mismatch_raises_naming_both_architectures(env):
         policy_mod.load_state_dict_arch_checked(split_p, legacy_sd, source="snap.pt")
 
 
+def test_renamed_split_state_raises_at_its_readers(env):
+    """#355: the split readers read the policy's flags and modules directly.
+
+    They used fallbacks: with ``aim_log_std_t`` / ``encoder_t`` renamed,
+    ``hasattr`` read a split policy as unsplit and both divergence metrics
+    returned {} without a sign, and with ``tct_split_heads`` gone,
+    ``getattr(policy, "tct_split_heads", False)`` read the policy as unsplit on
+    that axis. Each read must raise now; the fallback back at any of them is red here.
+    """
+    p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True, tct_split_trunk=True)
+    assert train_metrics.compute_head_divergence(p) and train_metrics.compute_trunk_divergence(p)
+    p._parameters["aim_log_std_t_renamed"] = p._parameters.pop("aim_log_std_t")
+    p._modules["encoder_t_renamed"] = p._modules.pop("encoder_t")
+    with pytest.raises(AttributeError, match="aim_log_std_t"):
+        train_metrics.compute_head_divergence(p)
+    with pytest.raises(AttributeError, match="encoder_t"):
+        train_metrics.compute_trunk_divergence(p)
+
+    legacy = policy_mod.build_policy(env, device="cpu")
+    sd = legacy.state_dict()
+    policy_mod.load_state_dict_arch_checked(legacy, sd, source="control")
+    del legacy.tct_split_heads
+    with pytest.raises(AttributeError, match="tct_split_heads"):
+        policy_mod.load_state_dict_arch_checked(legacy, sd, source="renamed")
+
+
 def test_split_checkpoint_round_trips_bitwise(env):
     """Spec §5 test 3 (third clause): split → split is a plain load."""
     a = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)

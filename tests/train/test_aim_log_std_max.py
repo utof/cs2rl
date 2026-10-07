@@ -279,6 +279,28 @@ def test_sigma_param_group_is_not_weight_decayed(simple_map):
                                                   "upward, else this test proves nothing")
 
 
+def test_isolate_needs_the_trainer_scheduler_and_uncompiled_policy():
+    """#355: both are read directly, so a trainer without one raises.
+
+    The function used ``getattr(trainer, "scheduler", None)`` and fell back from
+    ``uncompiled_policy`` to ``trainer.policy``. PufferLib 3.0.0, the exact pin, sets both
+    in PuffeRL.__init__, so a missing one means the trainer changed; skipping the
+    ``base_lrs`` append then leaves the σ group's LR unannealed (the test below).
+    """
+    from types import SimpleNamespace
+
+    from cs2rl.train.loop import isolate_aim_log_std_param_group
+    pol = _policy_with_cap(None)
+
+    def trainer(**attrs):
+        return SimpleNamespace(optimizer=torch.optim.Adam(pol.parameters(), lr=3e-4), **attrs)
+
+    with pytest.raises(AttributeError, match="uncompiled_policy"):
+        isolate_aim_log_std_param_group(trainer(policy=pol))
+    with pytest.raises(AttributeError, match="scheduler"):
+        isolate_aim_log_std_param_group(trainer(uncompiled_policy=pol))
+
+
 def test_sigma_group_anneals_on_the_same_schedule(simple_map):
     """T1(b), scheduler half: adding a param group without extending
     `scheduler.base_lrs` is a SILENT failure — CosineAnnealingLR.get_lr() zips
