@@ -74,7 +74,7 @@ class MapData:
 
     # Optional: reference to the underlying NavGraph (needed for viz/snapshot).
     # None for simple maps.
-    nav_graph: object = field(default=None, repr=False)
+    nav_graph: NavGraph | None = field(default=None, repr=False)
     # Room AABB float32[N,4] x0,y0,x1,y1 for ramp interpolation.
     # make_simple_map fills this from the room tuples. make_cs2_map leaves
     # None so demo_terrain_z stays on centroids_z.

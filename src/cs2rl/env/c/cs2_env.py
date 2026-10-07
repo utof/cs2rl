@@ -11,8 +11,8 @@ import pufferlib
 from cs2rl.env import nav
 from cs2rl.env.c import binding
 from cs2rl.env.config import EnvConfig
-from cs2rl.env.map import make_cs2_map
-from cs2rl.env.nav import N_AGENTS, OBS_DIM, TEAM_SIZE
+from cs2rl.env.map import MapData, make_cs2_map
+from cs2rl.env.nav import N_AGENTS, OBS_DIM, TEAM_SIZE, NavGraph
 from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 
 # ── Viz dataclasses (used by snapshot_state) ─────────────────────────────────
@@ -857,8 +857,8 @@ class Cs2Env(pufferlib.PufferEnv):
             seed=0,
             team_spirit=0.0,
             buf=None,
-            nav_graph=None,
-            map_data=None,
+            nav_graph: NavGraph | None = None,
+            map_data: MapData,
             auto_reset=True,
             include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)
     ):
