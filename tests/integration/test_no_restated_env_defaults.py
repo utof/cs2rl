@@ -523,7 +523,9 @@ def test_the_argparse_probe_can_actually_fail():
     The other two probes are knocked out against their patterns; this one has to
     be knocked out against a parsed tree, which is why the walk lives in a
     helper. Positive, negative and the None-sentinel branch, so "reports 0" is a
-    measurement rather than an assumption.
+    measurement rather than an assumption. The planted default is found both with
+    `dest=` and without it, where the name comes from the first "--" flag (after a
+    short flag, so the walk must step past it).
 
     The planted default is READ from FIELD_DEFAULTS, for both reasons the other
     knock-out gives: a hardcoded literal would keep this test green against a
@@ -543,7 +545,12 @@ def test_the_argparse_probe_can_actually_fail():
     sentinel = textwrap.dedent("""
         parser.add_argument("--pin-pitch", dest="pin_pitch", default=None)
         """)
+    no_dest = textwrap.dedent(f"""
+        parser.add_argument("-c", "{flag}", default={value!r})
+        """)
     assert _argparse_default_offenders(ast.parse(planted),
                                        "<planted>") == [f"<planted>:2  --{name} default={value!r}"]
+    assert _argparse_default_offenders(ast.parse(no_dest),
+                                       "<no-dest>") == [f"<no-dest>:2  --{name} default={value!r}"]
     assert _argparse_default_offenders(ast.parse(derived), "<derived>") == []
     assert _argparse_default_offenders(ast.parse(sentinel), "<sentinel>") == []
