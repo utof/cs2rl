@@ -614,13 +614,19 @@ def _local_literal_bindings(fn):
     `tag_grad_cossim`'s `pg_group_names` — every other non-literal iterable in an
     emitter is a method call (`model.named_parameters()`, `subsets.items()`) or a
     `zip`/`enumerate`, none of which this reaches.
+
+    An annotated `name: T = (...)` binds the same way, as in site_write_targets.
+    Skipped, it left the name unresolved, and the census reported a registry drift
+    that did not exist (#354 review, KO-4).
     """
     counts = _binding_counts(fn)
     values = {}
     for node in ast.walk(fn):
-        if not isinstance(node, ast.Assign):
+        # An AnnAssign without a value (`name: T`) binds no value.
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
             continue
-        for tgt in node.targets:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for tgt in targets:
             if isinstance(tgt, ast.Name):
                 values[tgt.id] = _literal_strings(node.value)
     return {n: tuple(v) for n, v in values.items() if v is not None and counts.get(n) == 1}

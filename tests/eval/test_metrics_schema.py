@@ -623,6 +623,19 @@ def test_a_rebound_local_stops_resolving_instead_of_keeping_its_first_value(rebi
         "value. The family would keep a member list the emitter no longer writes, silently.")
 
 
+def test_an_annotated_literal_local_resolves_like_a_plain_one():
+    """`pg_group_names: tuple[str, ...] = (...)` is an ast.AnnAssign, not an ast.Assign.
+
+    Skipped, the name went unresolved and the census reported tag_grad_cossim's key
+    loop as running over (), a registry drift that did not exist (#354 review, KO-4).
+    """
+    source = _LITERAL_EMITTER.format(extra="    pass")
+    annotated = source.replace("pg_group_names = (", "pg_group_names: tuple[str, ...] = (")
+    assert annotated != source
+    bound = census._local_literal_bindings(ast.parse(annotated).body[0])
+    assert bound.get("pg_group_names") == ("trunk", "policy_heads"), bound
+
+
 @pytest.mark.parametrize("rebind", ("", ) + _REBINDING_FORMS)
 def test_a_rebound_emitter_parameter_stops_resolving_instead_of_using_call_site_values(rebind):
     """`emitter_param_bindings` must drop a parameter the emitter body rebinds.
