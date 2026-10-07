@@ -21,8 +21,8 @@ base commit that predates this file: feed it on stdin from that checkout's root,
 cs2rl's import guard sees the script and the package in one checkout,
 ``python - run --out base.json < /path/to/trainer_equivalence.py``. The base must have
 ``cs2rl.train.compose`` (#92 part 2); older commits built their test trainers in
-``tests/_helpers/trainer_harness.py`` only. All 25 cases ran in 74 s on the development VM
-(2026-10-06).
+``tests/_helpers/trainer_harness.py`` only. All 26 cases ran in 91 s on the development VM
+(2026-10-07).
 
 WHAT IS FINGERPRINTED (``snapshot``):
   - every ``vars(trainer)`` value, minus EXCLUDED (wall clock, handles, and the objects
@@ -39,9 +39,10 @@ WHAT IS FINGERPRINTED (``snapshot``):
 CASES reach the update's branches: default; the noop statue and parked rows; past-policy
 self-play (with and without the action-mask view); TAG; KL early stop; warm-start entropy
 (grace/floor, ramp, hand-off, collapse watch, non-positive h0); the NaN guard (including a
-NaN in the middle of an accumulation window); empty minibatches; value clipping with
-prioritised event replay; the checkpoint/done tail; CPU bf16 autocast (``fp32_*`` is its
-positive control: same case without autocast, its digest must differ).
+NaN in the middle of an accumulation window, and a NaN entropy, whose alpha loss is NaN so
+alpha skips that minibatch's step); empty minibatches; value clipping with prioritised event replay; the
+checkpoint/done tail; CPU bf16 autocast (``fp32_*`` is its positive control: same case
+without autocast, its digest must differ).
 
 PITFALLS:
   - CPU only. Run with ``CUDA_VISIBLE_DEVICES=`` (empty): CUDA runs are seeded but not
@@ -218,7 +219,8 @@ def _patch_loss(mode):
     """Replace trainer._hybrid_ppo_loss; returns the restore callable.
 
     nan_odd: calls 1, 3, 5, ... return a NaN loss. nan_second_of_three: calls 2, 5, 8, ...
-    neg_entropy: the entropy term is replaced by -1.
+    neg_entropy: the entropy term is replaced by -1. nan_entropy_first: call 1 returns a
+    NaN entropy, so that minibatch's alpha loss is NaN too.
     """
     from cs2rl.train import trainer as trainer_module
     real = trainer_module._hybrid_ppo_loss
@@ -233,6 +235,8 @@ def _patch_loss(mode):
             return (out[0] * float("nan"), *out[1:])
         if mode == "neg_entropy":
             return (out[0], out[1] * 0.0 - 1.0, *out[2:])
+        if mode == "nan_entropy_first" and calls["n"] == 1:
+            return (out[0], out[1] * float("nan"), *out[2:])
         return out
 
     trainer_module._hybrid_ppo_loss = patched
@@ -478,6 +482,11 @@ CASES: dict[str, dict[str, Any]] = {
          epochs=2,
          loss_patch="nan_second_of_three",
          hook=_chain(_cfg(target_kl=None), _attrs(accumulate_minibatches=3, total_minibatches=6))),
+    "nan_entropy_alpha_skip":
+    dict(build={},
+         epochs=2,
+         loss_patch="nan_entropy_first",
+         hook=_chain(_cfg(target_kl=None), _attrs(total_minibatches=3))),
                                                                                                     # TAG on a past-policy epoch: tag/selfplay_active reads _selfplay_used_past.
     "tag_selfplay_past":
     dict(build=dict(mgr_p_past=1.0), epochs=2, seed_pool=True, hook=_cfg(**_TAG)),
