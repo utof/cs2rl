@@ -683,20 +683,28 @@ def launch_run(
     artifacts = ModalVolumeIndex(volume)
     mrl.reserve_run(registry, artifacts, request.run_id, nonce, now=stamp)
 
-    uploaded: dict[str, object] = {}
+    # upload() sets these. The resume three stay None when there is nothing to resume.
+    tree: str | None = None
+    source_archive_sha256: str | None = None
+    source_client: PurePosixPath | None = None
+    resume_client: PurePosixPath | None = None
+    resume_digest: str | None = None
+    resume_size: int | None = None
 
     def upload() -> None:
+        nonlocal tree, source_archive_sha256, source_client
+        nonlocal resume_client, resume_digest, resume_size
         with tempfile.TemporaryDirectory(prefix="cs2rl-launch-") as tmp:
             tmp_path = Path(tmp)
             archive = tmp_path / "source.tar.gz"
             provenance = mrl.create_source_bundle(repo, canonical, archive)
+            tree, source_archive_sha256 = provenance.tree, provenance.archive_sha256
             source_client = mrl.SOURCES_ROOT / f"{provenance.archive_sha256}.tar.gz"
             ensure_blob(volume, source_client, archive)
-            resume_client: PurePosixPath | None = None
-            resume_digest: str | None = None
-            resume_size: int | None = None
             if local_ckpt is not None:
-                ensure_blob(volume, local_ckpt.client_path, Path(request.resume.local_checkpoint))
+                local_path = request.resume.local_checkpoint
+                assert local_path is not None, "local_ckpt is validated from this path"
+                ensure_blob(volume, local_ckpt.client_path, Path(local_path))
                 resume_client = local_ckpt.client_path
                 resume_digest = local_ckpt.sha256
                 resume_size = local_ckpt.size
@@ -707,24 +715,20 @@ def launch_run(
                 ensure_blob(volume, resume_client, staged)
                 resume_digest = prior_digest
                 resume_size = len(prior_bytes)
-            uploaded["provenance"] = provenance
-            uploaded["source_client"] = source_client
-            uploaded["resume_client"] = resume_client
-            uploaded["resume_digest"] = resume_digest
-            uploaded["resume_size"] = resume_size
 
     mrl.finish_reservation(registry, artifacts, request.run_id, nonce, upload=upload)
-    provenance = uploaded["provenance"]
+    assert tree is not None and source_archive_sha256 is not None and source_client is not None, (
+        "finish_reservation re-raises unless upload() ran to completion")
     payload = _launch_payload(
         request,
         attempt_id=nonce,
         git_sha=canonical,
-        tree=provenance.tree,
-        source_archive_sha256=provenance.archive_sha256,
-        source_client=uploaded["source_client"],
-        resume_client=uploaded["resume_client"],
-        resume_digest=uploaded["resume_digest"],
-        resume_size=uploaded["resume_size"],
+        tree=tree,
+        source_archive_sha256=source_archive_sha256,
+        source_client=source_client,
+        resume_client=resume_client,
+        resume_digest=resume_digest,
+        resume_size=resume_size,
         modal_version=str(modal.__version__),
         wandb_enabled=secret is not None,
         created_at=stamp.isoformat(),
