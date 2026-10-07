@@ -479,6 +479,24 @@ def _row_tag_cells(row):
     return per_gm, vf_vals
 
 
+def _surviving_tag_pair(vals):
+    """(cross_half, within) for one row's (group, mb) values, or None if a drop rule fires.
+
+    Drops: any of the five needed values missing (_is_missing), or the gnorm_t/gnorm_ct
+    ratio outside NORM_RATIO_BAND (gnorm_ct == 0 counts as an infinite ratio).
+    within = mean(within_t, within_ct).
+    """
+    need = ("cossim_cross_half", "cossim_within_t", "cossim_within_ct", "gnorm_t", "gnorm_ct")
+    if any(_is_missing(vals.get(n)) for n in need):
+        return None
+    gct = vals["gnorm_ct"]
+    ratio = vals["gnorm_t"] / gct if gct else float("inf")
+    if not (NORM_RATIO_BAND[0] <= ratio <= NORM_RATIO_BAND[1]):
+        return None
+    within = 0.5 * (vals["cossim_within_t"] + vals["cossim_within_ct"])
+    return vals["cossim_cross_half"], within
+
+
 class _TagTally(NamedTuple):
     """What _accumulate_tag_rows collects from the rows for tag_summary."""
     acc: dict                          # (group, mb, phase) -> [(cross_half, within)]
@@ -500,25 +518,25 @@ def _accumulate_tag_rows(rows, dead_windows) -> _TagTally:
     rows and (group, mb) values that survive them. Everything fills in row order,
     then key order, and tag_summary bootstraps the cells in that insertion order.
     """
-    acc = {}                                                                               # (group, mb, phase) -> [(cross_half, within)]
-    vf_acc = {}                                                                            # (mb, phase) -> [vf]
-    n_raw = 0                                                                              # rows with any tag measurement, counted BEFORE drops
-    struct_acc = {}                                                                        # (group, mb, phase) -> [(cross_half, within)] on split rows
-    saw_split_key = False                                                                  # any row carried split/active at all
-    saw_trunk_key = False                                                                  # any row carried split/trunk_active at all (backstop)
-    saw_trunk_active = False                                                               # any raw row had split/trunk_active == 1 (footer)
-    heads_cross_all = []                                                                   # every surviving policy_heads cross_half (backstop input)
-    trunk_cross_all = []                                                                   # every surviving trunk cross_half (trunk backstop)
+    acc = {}                                                                   # (group, mb, phase) -> [(cross_half, within)]
+    vf_acc = {}                                                                # (mb, phase) -> [vf]
+    n_raw = 0                                                                  # rows with any tag measurement, counted BEFORE drops
+    struct_acc = {}                                                            # (group, mb, phase) -> [(cross_half, within)] on split rows
+    saw_split_key = False                                                      # any row carried split/active at all
+    saw_trunk_key = False                                                      # any row carried split/trunk_active at all (backstop)
+    saw_trunk_active = False                                                   # any raw row had split/trunk_active == 1 (footer)
+    heads_cross_all = []                                                       # every surviving policy_heads cross_half (backstop input)
+    trunk_cross_all = []                                                       # every surviving trunk cross_half (trunk backstop)
     for row in rows:
         if any(_TAG_KEY.match(k) or _TAG_VF_KEY.match(k) for k in row):
             n_raw += 1
         row_split = bool(row.get(SPLIT_ACTIVE_KEY))
         if SPLIT_ACTIVE_KEY in row:
             saw_split_key = True
-                                                                                           # Footer / backstop scan MUST run before selfplay/NaN/band drops.
-                                                                                           # 0.0 is heads-only (float(hasattr)); only == 1 / == 1.0 counts as
-                                                                                           # trunk-active. KEY in row is the backstop's "key was seen" bit —
-                                                                                           # a present 0.0 must NOT fire the missing-key warning.
+                                                                               # Footer / backstop scan MUST run before selfplay/NaN/band drops.
+                                                                               # 0.0 is heads-only (float(hasattr)); only == 1 / == 1.0 counts as
+                                                                               # trunk-active. KEY in row is the backstop's "key was seen" bit —
+                                                                               # a present 0.0 must NOT fire the missing-key warning.
         if SPLIT_TRUNK_ACTIVE_KEY in row:
             saw_trunk_key = True
         if row.get(SPLIT_TRUNK_ACTIVE_KEY) == 1:
@@ -530,25 +548,19 @@ def _accumulate_tag_rows(rows, dead_windows) -> _TagTally:
         for mb, v in vf_vals:
             vf_acc.setdefault((mb, phase), []).append(v)
         for (group, mb), vals in per_gm.items():
-            need = ("cossim_cross_half", "cossim_within_t", "cossim_within_ct", "gnorm_t",
-                    "gnorm_ct")
-            if any(_is_missing(vals.get(n)) for n in need):
+            pair = _surviving_tag_pair(vals)
+            if pair is None:
                 continue
-            gct = vals["gnorm_ct"]
-            ratio = vals["gnorm_t"] / gct if gct else float("inf")
-            if not (NORM_RATIO_BAND[0] <= ratio <= NORM_RATIO_BAND[1]):
-                continue
-            within = 0.5 * (vals["cossim_within_t"] + vals["cossim_within_ct"])
             if group == "policy_heads":
-                heads_cross_all.append(vals["cossim_cross_half"])
+                heads_cross_all.append(pair[0])
             elif group == "trunk":
-                trunk_cross_all.append(vals["cossim_cross_half"])
-                                                                                           # split/active labels policy_heads only; split/trunk_active
-                                                                                           # labels trunk only. Do not overload either key.
+                trunk_cross_all.append(pair[0])
+                                                                               # split/active labels policy_heads only; split/trunk_active
+                                                                               # labels trunk only. Do not overload either key.
             row_trunk = row.get(SPLIT_TRUNK_ACTIVE_KEY) == 1
             target = struct_acc if ((row_split and group == "policy_heads") or
                                     (row_trunk and group == "trunk")) else acc
-            target.setdefault((group, mb, phase), []).append((vals["cossim_cross_half"], within))
+            target.setdefault((group, mb, phase), []).append(pair)
 
     return _TagTally(acc=acc,
                      struct_acc=struct_acc,
