@@ -12,6 +12,7 @@ from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from . import checkpoint, core, state
 from .checkpoint import iter_metrics_steps, validate_completed_run
@@ -32,6 +33,9 @@ from .core import (
     ValidationError,
 )
 from .state import atomic_write_json, start_heartbeat_worker, stop_heartbeat
+
+if TYPE_CHECKING:
+    from _typeshed import SupportsWrite
 
 
 @dataclass(frozen=True)
@@ -96,8 +100,14 @@ class PublishOutcome:
     reason: str | None = None
 
 
-def _tee_stream(src: object, sinks: Sequence[object]) -> None:
-    """Copy one child stream to every sink. Never slice or cap the payload."""
+def _tee_stream(src: object, sinks: Sequence[SupportsWrite[str] | None]) -> None:
+    """Copy one child stream to every sink. Never slice or cap the payload.
+
+    PITFALL: the `log_sink` that reaches here stays typed `object` upstream.
+    `_run_training_attempt` is a patch-binding campaign consumer, and the
+    campaign's clone of it evaluates its annotations at runtime, where the
+    TYPE_CHECKING-only `SupportsWrite` raises NameError.
+    """
     if src is None:
         return
     read = getattr(src, "read", None)

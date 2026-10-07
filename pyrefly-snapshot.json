@@ -1,4 +1,3 @@
-{"concise_description": "Object of class `object` has no attribute `write`", "name": "missing-attribute", "path": "scripts/modal_runner/training.py", "source_line": "sink.write(text)"}
 {"concise_description": "Unexpected ParamSpec type: `ParamSpec[P]`", "name": "invalid-param-spec", "path": "scripts/run_modal.py", "source_line": "handle = train_remote.with_options(**options).spawn(payload)"}
 {"concise_description": "Generic attribute `_type_` of class `_Pointer` is not visible on the class", "name": "missing-attribute", "path": "src/cs2rl/env/c/cs2_env.py", "source_line": "return \"ptr_\" + _canonical_ctype_name(ctype._type_)"}
 {"concise_description": "Object of class `NoneType` has no attribute `_c_env`", "name": "missing-attribute", "path": "src/cs2rl/policy.py", "source_line": "driver_env._c_env.sd.contents.max_turn_speed,"}
