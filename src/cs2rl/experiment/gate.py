@@ -242,9 +242,9 @@ def incomplete_seeds(arm):
 def evaluate_arm(per_seed):
     """(medians, per-gate ok) for one arm; failed seeds count as 0.0 in every GATES median.
     REPORT_ONLY columns get medians too (same 0.0 rule) but never a verdict;
-    REPORT_EXTRA medians skip failed seeds and seeds lacking the key, and are
-    None when no seed is left. The verdicts read the GATES medians before that
-    merge, which are always floats."""
+    REPORT_EXTRA medians skip failed seeds and seeds whose value is None or
+    missing, and are None when no seed is left. The verdicts read the GATES
+    medians before that merge, which are always floats."""
     gated = {col: _median(per_seed, col) for col in [c for c, _, _ in GATES] + list(REPORT_ONLY)}
     ok = {col: (gated[col] > thr) if op == ">" else (gated[col] >= thr) for col, thr, op in GATES}
     extra = {col: _median_optional(per_seed, col) for col, _, _ in REPORT_EXTRA}

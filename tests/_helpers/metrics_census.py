@@ -1641,7 +1641,8 @@ def reader_derived_column_sources(rel_path="src/cs2rl/experiment/gate.py"):
                 and any(isinstance(t, ast.Name) and t.id == "REPORT_EXTRA" for t in node.targets)):
             continue
         for row in node.value.elts:
-            # Each row is a (column, "kind", (args...)) literal; any other shape fails here.
+            # Rows are (column, "kind", (args...)) literals: a row that is not a tuple or
+            # list, or whose kind is not a str constant, fails here.
             assert isinstance(row, (ast.Tuple, ast.List)), ast.unparse(row)
             kind_node = row.elts[1]
             assert isinstance(kind_node, ast.Constant), ast.unparse(row)
