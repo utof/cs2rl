@@ -197,7 +197,7 @@ def _missing_iterdir_errors() -> tuple[type[BaseException], ...]:
     return tuple(dict.fromkeys(types))
 
 
-def _iterdir_paths(volume: object, path: str) -> list[str]:
+def _iterdir_paths(volume: modal.Volume, path: str) -> list[str]:
     try:
         return [str(entry.path) for entry in volume.iterdir(path, recursive=False)]
     except _missing_iterdir_errors():
@@ -208,7 +208,7 @@ def _iterdir_paths(volume: object, path: str) -> list[str]:
         raise
 
 
-def _volume_has_client_path(volume: object, remote: str) -> bool:
+def _volume_has_client_path(volume: modal.Volume, remote: str) -> bool:
     if remote in _iterdir_paths(volume, remote):
         return True
     parent = str(PurePosixPath(remote).parent)
@@ -216,7 +216,7 @@ def _volume_has_client_path(volume: object, remote: str) -> bool:
     return remote in listed or PurePosixPath(remote).name in listed
 
 
-def _read_volume_file(volume: object, remote: str) -> bytes | None:
+def _read_volume_file(volume: modal.Volume, remote: str) -> bytes | None:
     try:
         chunks = list(volume.read_file(remote))
     except (FileNotFoundError, OSError, KeyError):
@@ -232,7 +232,7 @@ def _require_blob_match(remote: bytes, expected_size: int, expected_digest: str)
 class ModalVolumeIndex:
     """ArtifactIndex over a Modal Volume. Client paths only; never /artifacts."""
 
-    def __init__(self, volume: object):
+    def __init__(self, volume: modal.Volume):
         self._volume = volume
         self._staged: list[tuple[PurePosixPath, bytes]] = []
 
@@ -259,7 +259,7 @@ class ModalVolumeIndex:
 class ModalDictRegistry:
     """Registry over a Modal Dict. put_if_absent is skip_if_exists=True."""
 
-    def __init__(self, mapping: object):
+    def __init__(self, mapping: modal.Dict):
         self._dict = mapping
 
     def put_if_absent(self, key: str, value: Mapping[str, object]) -> bool:
@@ -281,7 +281,7 @@ class ModalDictRegistry:
         self._dict.put(key, dict(value))
 
 
-def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) -> None:
+def ensure_blob(volume: modal.Volume, client_path: PurePosixPath, local_path: Path) -> None:
     """Reuse a digest path after streamed verify, or upload with force=False."""
     remote = _client_volume_path(client_path)
     local_path = Path(local_path)
@@ -335,7 +335,8 @@ _LAUNCH_CHECKPOINT_ERRORS = {
 _UNMAPPED_CHECKPOINT_ERROR = "parent checkpoint failed verification: {reason}"
 
 
-def prior_checkpoint_or_raise(volume: object, parent_id: str, now: datetime) -> tuple[bytes, str]:
+def prior_checkpoint_or_raise(volume: modal.Volume, parent_id: str,
+                              now: datetime) -> tuple[bytes, str]:
     """Validate a --resume-run-id parent and return its (checkpoint bytes, digest).
 
     The launch-side gate: refuses to start a child run unless the parent has
