@@ -3,7 +3,7 @@
 import ctypes
 import hashlib
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import gymnasium
 import numpy as np
@@ -853,6 +853,20 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
 # ── Cs2Env ────────────────────────────────────────────────────────────────────
 
 
+@runtime_checkable
+class _SharedFloat(Protocol):
+    """A float shared across processes, e.g. `multiprocessing.Value("f", x)`.
+
+    Cs2Env's `team_spirit` takes one so train() can change it while the envs run:
+    reset() and step() re-read `.value`. `isinstance(x, _SharedFloat)` is the
+    same duck test as `hasattr(x, "value")`, so a `lock=False` Value (a bare
+    ctypes c_float) passes too. Python 3.12 looks `value` up with
+    inspect.getattr_static, so an object that only fakes it through
+    __getattr__ (a Mock) does not.
+    """
+    value: float
+
+
 class Cs2Env(pufferlib.PufferEnv):
 
     def __init__(
@@ -860,7 +874,7 @@ class Cs2Env(pufferlib.PufferEnv):
             config: EnvConfig,
             *,
             seed=0,
-            team_spirit=0.0,
+            team_spirit: float | _SharedFloat | None = 0.0,
             buf=None,
             nav_graph: NavGraph | None = None,
             map_data: MapData,
@@ -894,9 +908,10 @@ class Cs2Env(pufferlib.PufferEnv):
         self._auto_reset = bool(auto_reset)
         self._uses_external_buffers = buf is not None
 
-        # team_spirit may be float or multiprocessing.Value
-        self._team_spirit_shared = team_spirit if hasattr(team_spirit, "value") else None
-        if self._team_spirit_shared is not None:
+        # team_spirit may be a float, None (0.0) or a shared multiprocessing.Value
+        self._team_spirit_shared: _SharedFloat | None = None
+        if isinstance(team_spirit, _SharedFloat):
+            self._team_spirit_shared = team_spirit
             init_team_spirit = float(team_spirit.value)
         elif team_spirit is None:
             init_team_spirit = 0.0
