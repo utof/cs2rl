@@ -180,10 +180,13 @@ def test_none_r0g_knobs_survive_untouched():
 def test_frozen_and_misspelled_field_is_a_type_error():
     cfg = EnvConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):
+        # The ignore: assigning a frozen field is the point.
         cfg.pin_pitch = 1              # type: ignore[misc]
     with pytest.raises(TypeError, match="rewrad_kill"):
+                                       # The ignore: the misspelt keyword is the point.
         EnvConfig(rewrad_kill=1)       # type: ignore[call-arg]
     with pytest.raises(TypeError, match="rewrad_kill"):
+                                       # The ignore: the misspelt keyword is the point.
         RewardWeights(rewrad_kill=1)   # type: ignore[call-arg]
 
 
