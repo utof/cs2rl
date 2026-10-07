@@ -50,7 +50,7 @@ def _client_path(path: PurePosixPath) -> str:
     return text
 
 
-def read_volume_file(volume: object, remote: str) -> bytes | None:
+def read_volume_file(volume: modal.Volume, remote: str) -> bytes | None:
     """Read a committed Volume object whole, or None if it is not there.
 
     Absent is a normal outcome for every protocol read here (no STATUS.json
@@ -110,7 +110,7 @@ def lookup_volume(modal_module: object | None = None):
 class VolumeIndex:
     """Committed-object reads over a client Volume. Paths via `_client_path`."""
 
-    def __init__(self, volume: object):
+    def __init__(self, volume: modal.Volume):
         self._volume = volume
 
     def read_file(self, path: PurePosixPath) -> bytes | None:
