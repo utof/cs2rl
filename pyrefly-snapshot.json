@@ -37,7 +37,6 @@
 {"concise_description": "Type `object` is not iterable", "name": "not-iterable", "path": "scripts/run_modal.py", "source_line": "thread_caps=[str(item) for item in payload[\"thread_caps\"]],"}
 {"concise_description": "Type `object` is not iterable", "name": "not-iterable", "path": "scripts/run_modal.py", "source_line": "train_args = tuple(str(token) for token in payload[\"train_args\"])"}
 {"concise_description": "Type `object` is not iterable", "name": "not-iterable", "path": "scripts/run_modal.py", "source_line": "training_argv=[str(token) for token in payload[\"training_argv\"]],"}
-{"concise_description": "`*` is not supported between `Tensor` and `Module`", "name": "unsupported-operation", "path": "src/cs2rl/deploy/export_policy.py", "source_line": "mu_aim = torch.tanh(self.aim_mu(h_out)) * self._max_turn_speed"}
 {"concise_description": "Generic attribute `_type_` of class `_Pointer` is not visible on the class", "name": "missing-attribute", "path": "src/cs2rl/env/c/cs2_env.py", "source_line": "return \"ptr_\" + _canonical_ctype_name(ctype._type_)"}
 {"concise_description": "Cannot set item in `None`", "name": "unsupported-operation", "path": "src/cs2rl/eval/baselines.py", "source_line": "self.state[\"done\"] = torch.as_tensor(self.done, device=self.device)"}
 {"concise_description": "Cannot set item in `dict[int, None]`", "name": "unsupported-operation", "path": "src/cs2rl/eval/scripted_expert.py", "source_line": "prev[nbr_area] = cur"}

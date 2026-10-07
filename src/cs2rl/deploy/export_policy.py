@@ -42,6 +42,11 @@ class LSTMPolicyONNXWrapper(nn.Module):
     Outputs (Batch 2): (logits_0, ..., logits_N-1, lstm_h_out, lstm_c_out)
     """
 
+    # Declared for the type checker only: nn.Module.__getattr__ types a buffer as
+    # `Tensor | Module`. A bare annotation creates no class attribute, so the
+    # buffer still exists only when __init__ registers it (always, if aim_mu is set).
+    _max_turn_speed: torch.Tensor
+
     def __init__(
         self,
         encoder: nn.Sequential,
