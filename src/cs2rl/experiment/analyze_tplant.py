@@ -56,8 +56,10 @@ import json
 import math
 import random
 import re
+import statistics
 import sys
 from pathlib import Path
+from typing import Any
 
 BOMB_TIMER_DEFAULT = 640               # ticks; src/cs2rl/env/nav.py BOMB_TIMER — keep in sync
 CAP_DEFAULT = 640                      # ticks; src/cs2rl/env/c/nav_data.h CFG_ROUND_TIME
@@ -473,13 +475,17 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
         for a trunk cell: the heads string must stay exclusive to heads so
         the Batch 7 footer predicate (any cell == STRUCTURAL_VERDICT) does
         not also fire on a trunk-split run.
+
+        `pairs` is never empty: a cell exists only once a pair was appended to
+        it. So the medians here are statistics.median, which raises on empty
+        input, rather than this module's median, which returns None for it.
         """
         diffs = [w - c for c, w in pairs]
-        conflict = median(diffs)
+        conflict = statistics.median(diffs)
         boots = []
         for _ in range(boot_n):
             sample = [diffs[rng.randrange(len(diffs))] for _ in diffs]
-            boots.append(median(sample))
+            boots.append(statistics.median(sample))
         boots.sort()
         ci_low = boots[int(0.025 * boot_n)]
         ci_high = boots[int(0.975 * boot_n) - 1]
@@ -493,15 +499,15 @@ def tag_summary(rows, dead_windows, boot_n=_BOOT_N, seed=0):
             verdict = "no conflict detected"
         return {
             "n_epochs": len(pairs),
-            "median_cross_half": median([c for c, _ in pairs]),
-            "median_within": median([w for _, w in pairs]),
+            "median_cross_half": statistics.median([c for c, _ in pairs]),
+            "median_within": statistics.median([w for _, w in pairs]),
             "conflict": conflict,
             "ci_low": ci_low,
             "ci_high": ci_high,
             "verdict": verdict,
         }
 
-    out = {}
+    out: dict[str, Any] = {}
     for (group, mb, phase), pairs in acc.items():
         out.setdefault(group, {}).setdefault(mb, {})[phase] = _cell(pairs, structural=False)
     # Structural cells are written after the normal ones, so on a contended
