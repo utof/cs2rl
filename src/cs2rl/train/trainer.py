@@ -844,8 +844,8 @@ class Cs2PuffeRL(PuffeRL):
         """Write one chunk into the rollout buffers at each row's current segment slot."""
         cfg = self.config
         if cfg["use_rnn"]:
-            self.lstm_h[env_id.start] = cast(torch.Tensor, step.state["lstm_h"])
-            self.lstm_c[env_id.start] = cast(torch.Tensor, step.state["lstm_c"])
+            self.lstm_h[env_id.start] = step.state["lstm_h"]
+            self.lstm_c[env_id.start] = step.state["lstm_c"]
 
         # These rollout counters are integer tensors. The installed
         # Tensor.item() stub returns a wider scalar union than runtime.
