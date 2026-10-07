@@ -499,7 +499,7 @@ def test_onnx_export_output_order_pinned():
                 output_names=([f"logits_{i}"
                                for i in range(7)] + ["mu_aim", "lstm_h_out", "lstm_c_out"]),
                 opset_version=17,
-                                                                                             # dynamo=False matches cs2rl/deploy/export_policy.py:main(); the
+                                                                                             # dynamo=False matches cs2rl/deploy/export_policy.py:_export_onnx(); the
                                                                                              # dynamo-based exporter pulls in onnxscript which isn't part
                                                                                              # of this project's lockfile.
                 dynamo=False,
