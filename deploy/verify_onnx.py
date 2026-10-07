@@ -163,6 +163,9 @@ def main():
                 step_pass = False
 
         if aim_dim > 0:
+            # Both inference blocks above set the mu outputs on this same aim_dim > 0
+            # branch, and ORT returns a tensor output as an ndarray.
+            assert pt_mu_aim is not None and isinstance(ort_mu_aim, np.ndarray), type(ort_mu_aim)
             mu_diff = float(np.max(np.abs(pt_mu_aim - ort_mu_aim)))
             step_max_diff = max(step_max_diff, mu_diff)
             if mu_diff >= 1e-4:

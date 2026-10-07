@@ -128,6 +128,7 @@ def isolate_aim_log_std_param_group(trainer, weight_decay: float = 0.0):
     opt.add_param_group(new_group)
     sch = getattr(trainer, "scheduler", None)
     if sch is not None and hasattr(sch, "base_lrs"):
+        # KNOWN LIMIT: pyrefly 1.2.0 types dict.get with an untyped default as Any | None; 1.3.2 does not.
         sch.base_lrs.append(float(new_group.get("initial_lr", new_group["lr"])))
         sch._last_lr = [g["lr"] for g in opt.param_groups]
     return len(sigma_params)
@@ -149,6 +150,7 @@ def _kill_reward_is_active(vecenv):
     yet is handled by the non-accumulating alert inside check().
     """
     try:
+        # KNOWN LIMIT: pyrefly 1.2.0 types this getattr (untyped default) as Any | None; 1.3.2 does not.
         driver_env = getattr(vecenv, "driver_env", vecenv)
         return float(driver_env._c_env.sd.contents.reward_kill) != 0.0
     except Exception:
@@ -534,7 +536,7 @@ def _last_metrics_step(metrics_path: Path, run_id: str) -> int | None:
     return last
 
 
-def _resume_full_state(trainer, plan: _RunPlan, outputs: _RunOutputs) -> int:
+def _resume_full_state(trainer, resume_paths: dict, config: dict, outputs: _RunOutputs) -> int:
     """R0-C: restore the trainer from --resume-run and bound it by the last metrics row.
 
     Returns the resumed global step. The bound (check_resume_metrics_bound) is
@@ -542,9 +544,8 @@ def _resume_full_state(trainer, plan: _RunPlan, outputs: _RunOutputs) -> int:
     it assumes BOTH teams participate, so under --opponent noop it is 2× too wide —
     only ever too permissive, never a false alarm; halve it before a noop run resumes.
     """
-    info = load_full_resume(trainer, trainer._self_play_mgr, plan.resume_paths)
+    info = load_full_resume(trainer, trainer._self_play_mgr, resume_paths)
     resumed = info["resumed_from_step"]
-    config = plan.config
     bound = config["batch_size"] * config["n_active_per_team"] // TEAM_SIZE
     last = _last_metrics_step(outputs.metrics_path, outputs.run_id)
     if last is not None:
@@ -754,7 +755,8 @@ def train(args):
     torch.distributions.Distribution.set_default_validate_args(False)
     _load_dotenv()
     plan = _prepare_run(args)
-    full_state = plan.resume_paths is not None
+    resume_paths = plan.resume_paths
+    full_state = resume_paths is not None
     with ExitStack() as run_cleanup:
         outputs = _open_run_outputs(args, run_cleanup)
         # Team spirit; every env reads it at episode start.
@@ -782,7 +784,8 @@ def train(args):
                 _preseed_selfplay_pool(args, trainer, Path(policy_init.source))
             _configure_run_trainer(trainer, outputs.run_id, plan.config)
             _print_opponent_setup(trainer, plan, self_play_enabled)
-            resumed_from_step = _resume_full_state(trainer, plan, outputs) if full_state else None
+            resumed_from_step = (_resume_full_state(trainer, resume_paths, plan.config, outputs)
+                                 if full_state else None)
             eval_hook = _build_eval_hook(args, trainer, eval_cleanup)
             run = _EpochLoop(args=args,
                              trainer=trainer,

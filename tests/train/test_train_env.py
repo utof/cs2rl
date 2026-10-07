@@ -1317,10 +1317,11 @@ def test_hybrid_sample_logits_returns_per_factor_halves():
     """Fix #1: _hybrid_sample_logits returns 6-tuple
     (action, cont_action, log_prob_d, log_prob_c, entropy_d, entropy_c).
 
-    The per-factor halves it returns must equal what the old rebuild
+    The per-factor halves it returns must match what the old rebuild
     pattern (constructing Categorical + Normal a second time at the
-    rollout site) would produce — bit-equivalent because the math is
-    identical and the inputs are deterministic given (logits, action).
+    rollout site) would produce, up to float32 rounding: the formulas and
+    the inputs (deterministic given logits and action) are the same, the
+    op order is not.
 
     This test pins the new contract so a future change that re-summed the
     halves at return time (or worse, dropped an entropy slot) would go red.
@@ -1353,12 +1354,15 @@ def test_hybrid_sample_logits_returns_per_factor_halves():
     assert ent_d.shape == (B, ) and ent_c.shape == (B, )
     assert torch.isfinite(lp_d).all() and torch.isfinite(lp_c).all()
 
-    # Bit-equivalence with the rebuild pattern that the rollout caller
-    # used to do (and which Fix #1 deletes). Same math, same inputs →
-    # same bits. allclose with atol=0 is the strongest assertion.
+    # Equivalence with the rebuild pattern that the rollout caller
+    # used to do (and which Fix #1 deletes). Same formulas in a different
+    # op order, so the float32 results are not the same bits: at this seed
+    # they differ by about 5e-7. allclose's default rtol=1e-5 admits that;
+    # atol=1e-7 alone would not.
     rebuild_lp_d = sum(
         torch.distributions.Categorical(logits=lg).log_prob(action[..., i])
         for i, lg in enumerate(logits_list))
+    assert isinstance(rebuild_lp_d, torch.Tensor)                      # sum() starts at int 0; tensors make it a tensor
     sigma = torch.exp(log_std_aim).expand_as(mu_aim)
     rebuild_lp_c = (torch.distributions.Normal(mu_aim, sigma).log_prob(cont_action).sum(-1))
     assert torch.allclose(lp_d, rebuild_lp_d, atol=1e-7), \
@@ -1477,6 +1481,8 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
                 torch.distributions.Categorical(logits=lg, validate_args=False) for lg in ref_logits
             ]
             ref_logp_d = sum(d.log_prob(mb_actions[..., i]) for i, d in enumerate(ref_dists_d))
+            assert isinstance(ref_logp_d,
+                              torch.Tensor)            # sum() starts at int 0; tensors make it a tensor
             ref_sigma = torch.exp(ref_log_std).expand_as(ref_mu)
             ref_dist_c = torch.distributions.Normal(ref_mu, ref_sigma, validate_args=False)
             ref_logp_c = ref_dist_c.log_prob(mb_cont_actions).sum(-1)
@@ -1934,6 +1940,7 @@ def test_hybrid_sample_logits_respects_masks():
     for h, (lo, hi) in enumerate(_MASK_HEAD_SLICES):
         ref_logits = logits_list[h].masked_fill(~mask[:, lo:hi], float("-inf"))
         ref = ref + torch.distributions.Categorical(logits=ref_logits).log_prob(fixed_action[:, h])
+    assert isinstance(ref, torch.Tensor)                                         # the 0.0 start became a tensor on head 0
     assert torch.allclose(lp_d_eval, ref,
                           atol=1e-5), (f"masked log_prob_d drift vs reference: "
                                        f"{(lp_d_eval - ref).abs().max().item():.2e}")

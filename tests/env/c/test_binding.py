@@ -85,7 +85,7 @@ def test_agentstate_has_punch_fields():
     import ctypes
 
     from cs2rl.env.c.cs2_env import AgentStateC, Dust2EnvC, GameStateC
-    names = [n for n, _ in AgentStateC._fields_]
+    names = [n for n, *_ in AgentStateC._fields_]
     # Adjacency + order, NOT a tail slice. The punch pair stopped being the last
     # two fields when Rung 0 (spec 2026-08-29 §2.1) appended
     # participating/_pad5 after them, and every future appended field would
@@ -94,7 +94,7 @@ def test_agentstate_has_punch_fields():
     # into the middle of the struct; the absolute layout is pinned by the
     # compiler's own offsetof in tests/env/c/test_struct_sizes.py.
     assert names.index("punch_yaw") == names.index("punch_pitch") + 1
-    assert "recoil_enabled" in [n for n, _ in Dust2EnvC._fields_]
+    assert "recoil_enabled" in [n for n, *_ in Dust2EnvC._fields_]
     assert hasattr(AgentStateC, "punch_pitch")
     assert hasattr(AgentStateC, "punch_yaw")
     assert hasattr(Dust2EnvC, "recoil_enabled")
@@ -519,6 +519,8 @@ def test_onnx_export_output_order_pinned():
                 },
             )
             mu = outs[7]
+            assert isinstance(mu,
+                              np.ndarray), f"ORT returned {type(mu).__name__} for a tensor output"
             assert mu.shape == (1, 1), f"mu shape: {mu.shape}"
             assert mu.dtype == np.float32, f"mu dtype: {mu.dtype}"
             # tanh*max_turn_speed bound: a hair of slack absorbs fp32 wobble.

@@ -217,11 +217,12 @@ def test_canonical_names_cover_every_mirror_field_type():
     the whole mirror here makes that a test failure at the point of the change
     rather than an import-time RuntimeError somewhere downstream.
     """
-    prefix_end = [name for name, _ in StaticDataC._fields_].index("wall_list")
-    for name, ctype in StaticDataC._fields_[:prefix_end]:
+    prefix_end = [name for name, *_ in StaticDataC._fields_].index("wall_list")
+    for name, ctype, *_ in StaticDataC._fields_[:prefix_end]:
         canonical = cs2_env._canonical_ctype_name(ctype)
         assert canonical, name
     # The tail is deliberately NOT covered: wall_list is a nested struct with no
     # canonical name in this vocabulary, which is consistent with the hash
     # stopping at the prefix boundary.
-    assert issubclass(dict(StaticDataC._fields_)["wall_list"], ctypes.Structure)
+    field_types = {name: ctype for name, ctype, *_ in StaticDataC._fields_}
+    assert issubclass(field_types["wall_list"], ctypes.Structure)

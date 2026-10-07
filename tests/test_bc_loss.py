@@ -283,15 +283,14 @@ def test_bc_loss_decreases_on_tiny_fit(policy):
     p = copy.deepcopy(policy)
     obs_t, disc_t, cont_t, valid_t = _fake_batch(b=2, t=3, seed=2)
     opt = torch.optim.Adam(p.parameters(), lr=1e-3)
-    first, last = None, None
-    for step in range(60):
+    losses = []
+    for _ in range(60):
         loss, _ = train_bc.bc_loss(p, obs_t, disc_t, cont_t, valid=valid_t)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
-        if step == 0:
-            first = loss.item()
-        last = loss.item()
+        losses.append(loss.item())
+    first, last = losses[0], losses[-1]
     assert last < first - 1.0, f"BC loss barely moved: {first:.3f} → {last:.3f}"
 
 
@@ -402,13 +401,13 @@ def test_load_demos_rejects_schema_mismatch(tmp_path):
     assert len(loaded) == 3
     assert loaded.lengths.tolist() == [3]
 
-    bad_dim = dict(good, OBS_DIM=OBS_DIM + 1)
+    bad_dim = _demo_dict(OBS_DIM=OBS_DIM + 1)
     np.savez(tmp_path / "bad_dim.npz", **bad_dim)
     with pytest.raises(ValueError, match="demo schema"):
         train_bc.load_demos(tmp_path, verbose=False)
     (tmp_path / "bad_dim.npz").unlink()
 
-    bad_map = dict(good, map="de_dust2")
+    bad_map = _demo_dict(map="de_dust2")
     np.savez(tmp_path / "bad_map.npz", **bad_map)
     with pytest.raises(ValueError, match="map"):
         train_bc.load_demos(tmp_path, verbose=False)
@@ -416,8 +415,7 @@ def test_load_demos_rejects_schema_mismatch(tmp_path):
 
     # Δyaw labels above the env's clamp mean the recorded action is not the
     # executed one — the labels would be lies.
-    bad_cont = dict(good)
-    bad_cont["continuous_actions"] = np.full((3, AIM_DIM), 10.0, dtype=np.float32)
+    bad_cont = _demo_dict(continuous_actions=np.full((3, AIM_DIM), 10.0, dtype=np.float32))
     np.savez(tmp_path / "bad_cont.npz", **bad_cont)
     with pytest.raises(ValueError, match="MAX_TURN_SPEED_RAD"):
         train_bc.load_demos(tmp_path, verbose=False)
@@ -431,9 +429,9 @@ def test_load_demos_dedupes_byte_identical_episodes(tmp_path):
     T = 3
     base = _demo_dict(obs=np.ones((T, OBS_DIM), dtype=np.float32))
     np.savez(tmp_path / "a.npz", **base)
-    np.savez(tmp_path / "b.npz", **dict(base, seed=1))                 # identical arrays
-    different = dict(base, seed=2)
-    different["obs"] = np.full((T, OBS_DIM), 2.0, dtype=np.float32)
+    same_arrays = _demo_dict(obs=np.ones((T, OBS_DIM), dtype=np.float32), seed=1)
+    np.savez(tmp_path / "b.npz", **same_arrays)        # identical arrays
+    different = _demo_dict(obs=np.full((T, OBS_DIM), 2.0, dtype=np.float32), seed=2)
     np.savez(tmp_path / "c.npz", **different)
 
     deduped = train_bc.load_demos(tmp_path, dedupe=True, verbose=False)

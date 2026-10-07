@@ -99,7 +99,7 @@ def bfs_area_path(map_data, start_area: int, goal_areas) -> list[int]:
     adjacency = map_data.adjacency
 
     q = deque([int(start_area)])
-    prev = {int(start_area): None}
+    prev: dict[int, int | None] = {int(start_area): None}
     found = None
     while q:
         cur = q.popleft()

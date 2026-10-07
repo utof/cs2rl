@@ -90,6 +90,7 @@ def test_controlled_visible_agents_can_kill():
     env = make_env(auto_reset=False)
     env.reset()
     nav_graph = env.nav_graph
+    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
     id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
 
     # Pair selection uses runtime LoS (see test_reward.py comment for the

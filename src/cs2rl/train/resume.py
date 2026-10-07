@@ -26,6 +26,7 @@ import math
 import os
 import random
 from pathlib import Path
+from typing import Any
 
 import numpy as np
 
@@ -313,7 +314,7 @@ def _rng_state_dict():
     """Snapshot python/numpy/torch(+cuda) RNG states. Env xorshift32 state is
     NOT included (lives in C; see load_full_resume's WARN)."""
     import torch
-    st = {
+    st: dict[str, Any] = {
         "python": random.getstate(),
         "numpy": np.random.get_state(),
         "torch_cpu": torch.get_rng_state()

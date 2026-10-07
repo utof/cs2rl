@@ -141,12 +141,15 @@ def test_unset_is_rejected_by_both_dataclasses():
     adds its first caller.
     """
     with pytest.raises(TypeError, match="reward_symmetrize"):
+        # pyrefly: ignore[bad-argument-type]  UNSET as a value is the point
         EnvConfig(reward_symmetrize=UNSET)
     with pytest.raises(TypeError, match="reward_kill"):
+        # pyrefly: ignore[bad-argument-type]  UNSET as a value is the point
         RewardWeights(reward_kill=UNSET)
     with pytest.raises(TypeError, match="jump_enabled"):
         EnvConfig().replace(jump_enabled=UNSET)
     with pytest.raises(TypeError, match="rewards"):
+        # pyrefly: ignore[bad-argument-type]  UNSET as a value is the point
         EnvConfig(rewards=UNSET)
 
 
@@ -163,6 +166,7 @@ def test_unset_repr_is_the_documented_spelling():
 
 
 def test_flag_knobs_normalise_to_int_bool():
+    # pyrefly: ignore[bad-argument-type]  a float flag is the point: it must normalise to int
     cfg = EnvConfig(pin_pitch=2, crouch_enabled=True, jump_enabled=0.0)
     assert (cfg.pin_pitch, cfg.crouch_enabled, cfg.jump_enabled) == (1, 1, 0)
     assert all(type(v) is int for v in (cfg.pin_pitch, cfg.crouch_enabled, cfg.jump_enabled))
@@ -176,10 +180,13 @@ def test_none_r0g_knobs_survive_untouched():
 def test_frozen_and_misspelled_field_is_a_type_error():
     cfg = EnvConfig()
     with pytest.raises(dataclasses.FrozenInstanceError):
+        # The ignore: assigning a frozen field is the point.
         cfg.pin_pitch = 1              # type: ignore[misc]
     with pytest.raises(TypeError, match="rewrad_kill"):
+                                       # The ignore: the misspelt keyword is the point.
         EnvConfig(rewrad_kill=1)       # type: ignore[call-arg]
     with pytest.raises(TypeError, match="rewrad_kill"):
+                                       # The ignore: the misspelt keyword is the point.
         RewardWeights(rewrad_kill=1)   # type: ignore[call-arg]
 
 

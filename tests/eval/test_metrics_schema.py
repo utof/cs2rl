@@ -349,8 +349,8 @@ def test_knockout_the_three_island_interior_blind_shapes_are_now_reported(tmp_pa
     # The third is caught the other way: `game_metrics` IS declared, so the check
     # above correctly leaves it alone and `census()` has to produce the key. Pin
     # that the census walk now recognises the shape.
-    fn = ast.parse("def f():\n    game_metrics.setdefault('game/probe_sd', 1.0)\n").body[0]
-    targets = census.site_write_targets(fn.body[0].value, {"game_metrics": ""})
+    call = ast.parse("game_metrics.setdefault('game/probe_sd', 1.0)", mode="eval").body
+    targets = census.site_write_targets(call, {"game_metrics": ""})
     assert [census._key_text(k) for _, k, _, _ in targets
             ] == ["game/probe_sd"
                   ], (f"site_write_targets no longer recognises setdefault: {targets}")
@@ -360,6 +360,7 @@ def test_knockout_the_three_island_interior_blind_shapes_are_now_reported(tmp_pa
     ("logs['game/a'] = 1", "game/a"),
     ("logs['game/a'] += 1", "game/a"),
     ("logs = {'game/a': 1}", "game/a"),
+    ("logs: dict = {'game/a': 1}", "game/a"),
     ("logs.update({'game/a': 1})", "game/a"),
     ("logs.setdefault('game/a', 1)", "game/a"),
 ])
@@ -376,6 +377,20 @@ def test_the_census_recognises_each_write_shape_it_claims_to(snippet, expected):
     targets = census.site_write_targets(node, {"logs": ""})
     assert [census._key_text(k) for _, k, _, _ in targets
             ] == [expected], (f"{snippet!r} is not recognised as a write into `logs`: {targets}")
+
+
+@pytest.mark.parametrize("line", ["stats = {'kills': 1}", "stats: dict = {'kills': 1}"])
+def test_the_sweep_sees_a_bare_key_dict_literal_annotated_or_not(tmp_path, line):
+    """A BARE key passes the sweep's predicate only through its container's name.
+
+    Read off the nested literal alone it has no container and is dropped, which is
+    what happened to an annotated binding before `metrics_write_sites` accepted
+    ast.AnnAssign (#354). The unannotated row is the control.
+    """
+    (tmp_path / "helper.py").write_text(f"def helper():\n    {line}\n")
+    sweep = census.metrics_write_sites(src=tmp_path)
+    assert [(w.container, w.key) for w in sweep
+            ] == [("stats", "kills")], (f"{line!r} is not seen as a write into `stats`: {sweep}")
 
 
 def test_dicts_merged_into_island_containers_come_from_island_emitters():
@@ -606,6 +621,19 @@ def test_a_rebound_local_stops_resolving_instead_of_keeping_its_first_value(rebi
     assert "pg_group_names" not in bound, (
         f"`{rebind}` rebinds pg_group_names, but the census still resolves it to its first "
         "value. The family would keep a member list the emitter no longer writes, silently.")
+
+
+def test_an_annotated_literal_local_resolves_like_a_plain_one():
+    """`pg_group_names: tuple[str, ...] = (...)` is an ast.AnnAssign, not an ast.Assign.
+
+    Skipped, the name went unresolved and the census reported tag_grad_cossim's key
+    loop as running over (), a registry drift that did not exist (#354 review, KO-4).
+    """
+    source = _LITERAL_EMITTER.format(extra="    pass")
+    annotated = source.replace("pg_group_names = (", "pg_group_names: tuple[str, ...] = (")
+    assert annotated != source
+    bound = census._local_literal_bindings(ast.parse(annotated).body[0])
+    assert bound.get("pg_group_names") == ("trunk", "policy_heads"), bound
 
 
 @pytest.mark.parametrize("rebind", ("", ) + _REBINDING_FORMS)
@@ -985,13 +1013,10 @@ def test_eval_baselines_imports_eval_keys_from_here_and_not_the_reverse():
     assert imports_from_schema, (
         "src/cs2rl/eval/baselines.py must do `from cs2rl.eval.metrics_schema import "
         "EVAL_KEYS` — the registry is the single authority")
-    assigns = [
-        n for n in tree.body if isinstance(n, ast.Assign) and any(
-            isinstance(t, ast.Name) and t.id == "EVAL_KEYS" for t in n.targets)
-    ]
+    assigns = bindings_of("EVAL_KEYS", tree)
     assert not assigns, (
-        "src/cs2rl/eval/baselines.py still assigns EVAL_KEYS — two authorities for "
-        "the same contract is exactly what the move removed")
+        f"src/cs2rl/eval/baselines.py still binds EVAL_KEYS (line {assigns[0].lineno}) — two "
+        "authorities for the same contract is exactly what the move removed")
 
     schema_tree = ast.parse(
         (REPO_ROOT / "src" / "cs2rl" / "eval" / "metrics_schema.py").read_text())
@@ -1048,6 +1073,44 @@ def test_is_back_edge_sees_every_spelling():
         assert any(is_back_edge(n) for n in ast.walk(ast.parse(code))), code
     for code in fine:
         assert not any(is_back_edge(n) for n in ast.walk(ast.parse(code))), code
+
+
+def bindings_of(name, tree):
+    """Every `ast.Name` node in `tree` that binds `name`, at any depth.
+
+    ast marks a binding target with an `ast.Store` context whatever the statement:
+    `=`, an annotated `name: T = v`, `+=`, a tuple-unpacking target, a for or with
+    target, a walrus, a comprehension variable. A bare annotation `name: T` counts
+    too, although it binds nothing at run time.
+
+    PITFALL: the check this replaced took module-level `ast.Assign` only, so an
+    annotated `EVAL_KEYS: tuple[str, ...] = ...` in baselines.py passed it (#354
+    review, KO-3).
+
+    KNOWN LIMIT: `import x as name`, `def name` and `class name` bind without a Name
+    node, so they are not returned.
+    """
+    return [
+        n for n in ast.walk(tree)
+        if isinstance(n, ast.Name) and n.id == name and isinstance(n.ctx, ast.Store)
+    ]
+
+
+def test_bindings_of_sees_every_spelling():
+    """Positive and negative controls for bindings_of, one parsed snippet each.
+
+    baselines.py binds no EVAL_KEYS today, so the ownership test above is green
+    whether or not bindings_of works; these cases are what show that it does."""
+    bound = ("EVAL_KEYS = ()", "EVAL_KEYS: tuple[str, ...] = tuple(EVAL_KEYS)",
+             "if True:\n    EVAL_KEYS: tuple = ()", "EVAL_KEYS += ('eval/x', )",
+             "EVAL_KEYS, other = (), ()", "x = EVAL_KEYS = ()", "for EVAL_KEYS in ():\n    pass",
+             "(EVAL_KEYS := ())", "EVAL_KEYS: tuple")
+    unbound = ("from cs2rl.eval.metrics_schema import EVAL_KEYS", "x = EVAL_KEYS",
+               "x: tuple = EVAL_KEYS", "EVAL_KEYS_X = ()", "f(EVAL_KEYS)", "del EVAL_KEYS")
+    for code in bound:
+        assert bindings_of("EVAL_KEYS", ast.parse(code)), code
+    for code in unbound:
+        assert not bindings_of("EVAL_KEYS", ast.parse(code)), code
 
 
 def test_metrics_schema_is_in_the_import_lightness_test():

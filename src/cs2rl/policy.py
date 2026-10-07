@@ -307,6 +307,7 @@ def build_policy(vecenv,
     """
     from cs2rl.policy_net import Dust2Policy
 
+    # KNOWN LIMIT: pyrefly 1.2.0 types this getattr (untyped default) as Any | None; 1.3.2 does not.
     driver_env = getattr(vecenv, "driver_env", vecenv)
     obs_dim = (obs_dim_override
                if obs_dim_override is not None else driver_env.single_observation_space.shape[0])
@@ -442,7 +443,8 @@ def _hybrid_sample_logits(
             lp.gather(-1, action[..., i:i + 1]).squeeze(-1)
             for i, lp in enumerate(log_probs_per_head)))
     # Entropy: H = -Σ p log p. log_softmax already gives log p; multiply by
-    # exp(log_softmax) = p. Single pass per head, no extra softmax call.
+    # exp(log_softmax) = p. Single pass per head, no extra softmax call. The cast is
+    # log_prob_d's again: a builtin sum of Tensors types as int | Tensor.
     entropy_d = cast(torch.Tensor, sum(-(lp.exp() * lp).sum(-1) for lp in log_probs_per_head))
 
     # ── Continuous: 1D Gaussian aim head — hand-rolled (Fix #2) ──

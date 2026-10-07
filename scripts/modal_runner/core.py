@@ -17,6 +17,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from types import TracebackType
 from typing import Protocol
 
 VOLUME_NAME = "cs2rl-training-artifacts"
@@ -179,11 +180,20 @@ class Registry(Protocol):
 
 
 class LockLike(Protocol):
+    """A context-manager lock, e.g. threading.Lock.
+
+    __exit__ copies typeshed's parameter types. An implementation must accept
+    every argument the protocol declares, so declaring `object` (or
+    `*exc: object`) rejects threading.Lock, whose __exit__ accepts only
+    `type[BaseException] | None` first (gh#237). The parameters are
+    positional-only because Lock and RLock name them differently.
+    """
 
     def __enter__(self) -> object:
         ...
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, exc_type: type[BaseException] | None, exc: BaseException | None,
+                 tb: TracebackType | None, /) -> None:
         ...
 
 
@@ -263,12 +273,22 @@ class Clock:
 # Moved here from preflight.py in W5 (gh#163): `AttemptContext` holds one, and
 # both preflight and training read that, so it is shared vocabulary now.
 class ReloadingVolume(Protocol):
-    """In-container Volume handle. reload before STATUS writes; commit after them."""
+    """In-container Volume handle. reload before STATUS writes; commit after them.
 
-    def reload(self) -> None:
+    The members are read-only properties that return a callable, not methods.
+    modal's stub declares `Volume.reload` and `Volume.commit` as attributes
+    of a callable Protocol type. pyrefly 1.2.0 checks a protocol method like a
+    read-write attribute, whose type must match exactly, so `modal.Volume`
+    failed the method form. A read-only member accepts any compatible callable:
+    modal's, and a fake's plain method.
+    """
+
+    @property
+    def reload(self) -> Callable[[], None]:
         ...
 
-    def commit(self) -> None:
+    @property
+    def commit(self) -> Callable[[], None]:
         ...
 
 

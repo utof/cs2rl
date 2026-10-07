@@ -210,6 +210,12 @@ MESSAGE_CASES = [
         id="status_missing_field",
     ),
     pytest.param(
+        json.dumps(["not", "a", "mapping"]).encode(),
+        None,
+        r"^corrupt volume status json$",
+        id="status_is_a_list",
+    ),
+    pytest.param(
         None,
         b"{not-json",
         r"^corrupt volume reservation json$",

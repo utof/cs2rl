@@ -128,7 +128,7 @@ def _minimal_values():
     and the test would fail on the missing exception — instead of taking the
     pytest session down with it and reporting nothing.
     """
-    values = {
+    values: dict[str, object] = {
         name: ([] if issubclass(ctype, ctypes.Array) else 0)
         for name, ctype in cs2_env._SD_PACKED_TYPES.items()
     }
@@ -209,10 +209,13 @@ def test_spawn_capacities_are_derived_from_the_mirror():
     `.size`; pinning both spellings here keeps a future "simplification" from
     quietly reintroducing the literals.
     """
-    fields = dict(StaticDataC._fields_)
-    assert cs2_env._T_SPAWN_CAPACITY == fields["t_spawns"]._length_
-    assert cs2_env._CT_SPAWN_CAPACITY == fields["ct_spawns"]._length_
+    fields = {name: ctype for name, ctype, *_ in StaticDataC._fields_}
+    t_spawns, ct_spawns = fields["t_spawns"], fields["ct_spawns"]
+    assert issubclass(t_spawns, ctypes.Array) and issubclass(ct_spawns, ctypes.Array)
+    assert cs2_env._T_SPAWN_CAPACITY == t_spawns._length_
+    assert cs2_env._CT_SPAWN_CAPACITY == ct_spawns._length_
     with pytest.raises(TypeError):
+        # pyrefly: ignore[bad-argument-type]  a field descriptor is not a ctypes type; the TypeError is the point
         ctypes.sizeof(StaticDataC.t_spawns)
 
 

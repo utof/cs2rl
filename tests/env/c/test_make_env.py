@@ -41,11 +41,13 @@ def test_cs2env_rejects_a_non_envconfig_config(simple_map):
     """Cs2Env is the L1 constructor and takes no legacy channel (spec §3): a dict
     that happens to have the right keys must not be accepted as a config."""
     with pytest.raises(TypeError, match="EnvConfig"):
+        # pyrefly: ignore[bad-argument-type]  a dict is not an EnvConfig; the TypeError is the point
         Cs2Env(config={}, map_data=simple_map)
 
 
 def test_unknown_keyword_is_a_type_error_naming_the_key(simple_map):
     with pytest.raises(TypeError, match="rewrad_kill"):
+        # pyrefly: ignore[unexpected-keyword]  the misspelt keyword is the point
         make_env(rewrad_kill=1, map_data=simple_map)
 
 

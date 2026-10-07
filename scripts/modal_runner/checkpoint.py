@@ -8,6 +8,8 @@ import subprocess
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
+from typing import IO
 
 from . import core
 from .core import (
@@ -78,7 +80,7 @@ class CheckpointVerdict:
     digest: str | None
 
 
-def _import_torch() -> object:
+def _import_torch() -> ModuleType:
     """Import torch, or raise ImportError. A seam, not a convenience wrapper.
 
     Tests monkeypatch this to reproduce the container runner's torch-less
@@ -154,7 +156,7 @@ def validate_local_checkpoint(path: Path) -> FileProvenance:
     )
 
 
-def _load_checkpoint_weights(buf: object, **kwargs: object) -> object:
+def _load_checkpoint_weights(buf: IO[bytes], **kwargs: object) -> object:
     """Default `load` for `verify_checkpoint`: weights-only torch.load to CPU.
 
     torch is imported lazily so that importing this module — which the laptop-

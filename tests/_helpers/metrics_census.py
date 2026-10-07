@@ -614,13 +614,19 @@ def _local_literal_bindings(fn):
     `tag_grad_cossim`'s `pg_group_names` — every other non-literal iterable in an
     emitter is a method call (`model.named_parameters()`, `subsets.items()`) or a
     `zip`/`enumerate`, none of which this reaches.
+
+    An annotated `name: T = (...)` binds the same way, as in site_write_targets.
+    Skipped, it left the name unresolved, and the census reported a registry drift
+    that did not exist (#354 review, KO-4).
     """
     counts = _binding_counts(fn)
     values = {}
     for node in ast.walk(fn):
-        if not isinstance(node, ast.Assign):
+        # An AnnAssign without a value (`name: T`) binds no value.
+        if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
             continue
-        for tgt in node.targets:
+        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+        for tgt in targets:
             if isinstance(tgt, ast.Name):
                 values[tgt.id] = _literal_strings(node.value)
     return {n: tuple(v) for n, v in values.items() if v is not None and counts.get(n) == 1}
@@ -644,7 +650,7 @@ def _bind_for(node, env, literals=None):
     elif isinstance(target, ast.Tuple) and isinstance(it, (ast.Tuple, ast.List)):
         # `for name, a, b in (("action_heads", x, y), ...)` — bind position-wise,
         # taking only the slots whose element is a constant in EVERY row.
-        cols = {}
+        cols: dict[str, tuple[str, ...] | None] = {}
         for i, name in enumerate(target.elts):
             if not isinstance(name, ast.Name):
                 continue
@@ -901,9 +907,15 @@ def site_write_targets(node, containers):
     unit test that knocks each of them out cannot drift apart:
 
         c[k] = v / c[k] += v      subscript assignment
-        c = {k: v, ...}           a dict literal bound to a container NAME
+        c = {k: v, ...}           a dict literal bound to a container NAME, with or
+                                  without an annotation (`c: T = {...}`)
         c.update({k: v, ...})     a literal update
         c.setdefault(k, v)        (final review I-3)
+
+    WHY the annotated form. `summary: dict[str, Any] = {...}` in
+    Cs2Env._build_terminal_info (#354) is an ast.AnnAssign, not an ast.Assign;
+    before it was accepted the census silently dropped that dict's six keys and
+    only the registry's reverse check noticed.
 
     WHY setdefault is here at all. It was missing, and the miss was invisible
     twice over: `census()` did not produce the key, so the registry never had to
@@ -918,7 +930,8 @@ def site_write_targets(node, containers):
     tested against a synthetic snippet.
     """
     writes = []
-    if isinstance(node, (ast.Assign, ast.AugAssign)):
+    # An AnnAssign without a value (`c: T`) declares a name and writes nothing.
+    if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
         targets = node.targets if isinstance(node, ast.Assign) else [node.target]
         for tgt in targets:
             if isinstance(tgt, ast.Subscript) and _container_name(tgt.value) in containers:
@@ -1133,7 +1146,7 @@ def metrics_write_sites(src=None):
     missed `metrics[`, which occurs outside the island):
 
       write POSITIONS  ``c[k] = ...`` / ``c[k] += ...``, a dict literal bound to a
-                       name, a bare dict literal anywhere, ``c.update({...})`` and
+                       name (annotated or not), a bare dict literal anywhere, ``c.update({...})`` and
                        ``c.setdefault(k, ...)`` (the last added by final review
                        I-3 — it was a write shape NEITHER walk knew about, so a
                        `setdefault` emission was invisible tree-wide, not just
@@ -1188,7 +1201,7 @@ def metrics_write_sites(src=None):
     containers = {c.split(".")[-1] for s in EMITTER_SITES for c in s.containers}
     found = {}
 
-    def _record(path, qualname, container, key_node, fallback_lineno):
+    def _record(path, qualname, container, key_node, fallback_lineno: int):
         text = _key_text(key_node)
         if text is None or not KEY_SHAPED.match(text.replace("*", "x")):
             return
@@ -1203,7 +1216,10 @@ def metrics_write_sites(src=None):
     def _walk_all(path, node, qualname):
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
             qualname = f"{qualname}.{node.name}" if qualname else node.name
-        if isinstance(node, (ast.Assign, ast.AugAssign)):
+        # The same assignment shapes as site_write_targets. Without AnnAssign a bare-keyed
+        # `stats: dict = {...}` reached _record only as the nested literal, with no
+        # container name, and the bare keys were dropped.
+        if isinstance(node, (ast.Assign, ast.AugAssign, ast.AnnAssign)) and node.value is not None:
             targets = node.targets if isinstance(node, ast.Assign) else [node.target]
             for tgt in targets:
                 if isinstance(tgt, ast.Subscript):
@@ -1344,6 +1360,8 @@ def island_merge_sources():
             elif (isinstance(node, ast.AugAssign) and isinstance(node.op, ast.BitOr)
                   and _container_name(node.target) in site.containers):
                 merged = [node.value]
+            else:
+                continue
             for arg in merged or ():
                 for source in _one_hop_bindings(fn, arg):
                     out.append(
@@ -1380,7 +1398,7 @@ def reader_key_literals(rel_path):
     """
     path = REPO_ROOT / rel_path
     tree = _parse_file(path)
-    candidates = []
+    candidates: list[ast.expr] = []
 
     def _collect_literal(node):
         """A module-level constant table: the `*_KEY` names and REPORT_EXTRA."""
@@ -1629,8 +1647,14 @@ def reader_derived_column_sources(rel_path="src/cs2rl/experiment/gate.py"):
                 and any(isinstance(t, ast.Name) and t.id == "REPORT_EXTRA" for t in node.targets)):
             continue
         for row in node.value.elts:
+            # Rows are (column, "kind", (args...)) literals: a row that is not a tuple or
+            # list, or whose kind is not a str constant, fails here.
+            assert isinstance(row, (ast.Tuple, ast.List)), ast.unparse(row)
+            kind_node = row.elts[1]
+            assert isinstance(kind_node, ast.Constant), ast.unparse(row)
+            assert isinstance(kind_node.value, str), ast.unparse(row)
             col = (_resolve(row.elts[0], env) or (None, ))[0]
-            kind = row.elts[1].value
+            kind = kind_node.value
             keys = set()
             for elt in ast.walk(row.elts[2]):
                 keys |= _named_keys(elt)
@@ -1808,14 +1832,13 @@ def tag_key_axes():
     fn = _find_qualname(_module_ast("train/update.py"), "tag_grad_cossim")
     site = next(s for s in EMITTER_SITES if s.qualname == "tag_grad_cossim")
     literals = _local_literal_bindings(fn)
-    loops = [
-        n for n in ast.walk(fn)
-        if isinstance(n, ast.For) and isinstance(n.target, ast.Name) and any(
-            isinstance(w, ast.Subscript) and _container_name(w.value) == "out" for w in ast.walk(n))
-    ]
+    loops = [(n, n.target.id) for n in ast.walk(fn)
+             if isinstance(n, ast.For) and isinstance(n.target, ast.Name) and any(
+                 isinstance(w, ast.Subscript) and _container_name(w.value) == "out"
+                 for w in ast.walk(n))]
     group = ()
-    for loop in loops:
-        bound = _bind_for(loop, {}, literals).get(loop.target.id)
+    for loop, target in loops:
+        bound = _bind_for(loop, {}, literals).get(target)
         if bound:
             group = tuple(bound)
             break

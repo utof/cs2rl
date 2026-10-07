@@ -142,6 +142,7 @@ def main(argv=None):
     act_buf = np.zeros((10, 7), dtype=np.int32)
     cont_buf = np.zeros((10, 2), dtype=np.float32)
     # Same room quad MapData already published into sd->area_bounds.
+    assert md.area_bounds is not None, "make_simple_map always sets area_bounds"
     bounds = np.ascontiguousarray(md.area_bounds.reshape(-1))
     resource_dir = str(ZIG_OUT / "bin" / "resources").encode()
     human_idx = -1 if args.spectate else 0

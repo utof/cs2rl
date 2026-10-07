@@ -13,7 +13,9 @@ single run, reporting `0 errors`, exit 0.
 
 Measured leave-one-out over this repo's own 752 errors: 488/752 = 64.9% would be
 invisible if they were new. Python's 4-space indents make column collisions
-common, which is why the number is so high.
+common, which is why the number is so high. The repo-wide counts in this module
+(752, 826 and the rates over 752) were measured when the gate was added (0833d5e);
+they are not today's counts.
 
 If you are reading this because a hand-rolled comparison beside a built-in flag
 looks like wheel-reinvention: it is not. Run
@@ -188,14 +190,14 @@ def collect(project: Path, tmp: Path, interp: Path) -> Counter:
         capture_output=True,
         text=True,
                                                                        # NEVER check=True. pyrefly exits 1 whenever errors exist, which is the
-                                                                       # normal case here -- 752 of them.
+                                                                       # normal case while the snapshot is non-empty.
     )
 
     # Surface WARN lines regardless of exit code. "On a non-clean exit" would be
     # meaningless in a tool whose normal exit IS 1, and the single most important
     # thing pyrefly ever puts on stderr -- "Failed to query interpreter ...
     # falling back" -- comes with exit 1 and a full, plausible-looking result set
-    # of 826 errors.
+    # (826 errors when the gate was added).
     if proc.stderr and "WARN" in proc.stderr:
         print(proc.stderr.rstrip(), file=sys.stderr)
 
@@ -306,8 +308,8 @@ def main() -> int:
         # exists() is not enough. A file that exists but is not executable, and
         # one that is executable with a dead shebang, both return True from
         # exists() and both make pyrefly fall back to the default environment --
-        # producing 826 errors (ADDED 328 / REMOVED 254, 270 of them bare
-        # missing-import) with the only explanation on stderr.
+        # producing, when the gate was added, 826 errors (ADDED 328 / REMOVED 254,
+        # 270 of them bare missing-import) with the only explanation on stderr.
         die(f"{interp} is not a working interpreter: {err}")
 
     # --- step 3: refuse an unmerged index -----------------------------------

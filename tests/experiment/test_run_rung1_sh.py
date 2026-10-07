@@ -421,7 +421,9 @@ def test_arm_argv_is_accepted_by_train_py_dump_config(tmp_path, arm):
     import shlex
 
     text = SCRIPT.read_text()
-    common = shlex.split(re.search(r"^COMMON=\((.*?)\)\s*$", text, re.S | re.M).group(1))[1:]
+    common_m = re.search(r"^COMMON=\((.*?)\)\s*$", text, re.S | re.M)
+    assert common_m, "COMMON=( ... ) array not found in run_rung1.sh"
+    common = shlex.split(common_m.group(1))[1:]
     m = re.search(r'run_seed "' + re.escape(arm) + r'\$s" "\$s" (.*?) \\$', text, re.M)
     assert m, f"run_seed line for {arm} not found"
     arm_flags = shlex.split(m.group(1))

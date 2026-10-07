@@ -606,10 +606,11 @@ def test_heartbeat_commits_throughout_blocked_preflight(tmp_path):
 
     volume.commit = recording_commit
     prepared = mrl.prepare_remote_source(**kwargs)
-    assert prepared.heartbeat is not None
-    assert prepared.heartbeat.thread.is_alive()
-    prepared.heartbeat.stop_and_join()
-    assert not prepared.heartbeat.thread.is_alive()
+    heartbeat = prepared.heartbeat
+    assert isinstance(heartbeat, state.HeartbeatWorker)
+    assert heartbeat.thread.is_alive()
+    heartbeat.stop_and_join()
+    assert not heartbeat.thread.is_alive()
     assert len(beat_times) >= 6
     for earlier, later in zip(beat_times, beat_times[1:], strict=False):
         assert later - earlier <= timedelta(seconds=60)

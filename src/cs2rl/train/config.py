@@ -26,6 +26,8 @@ load-bearing) — ``--dump-config`` reaches build_train_config and must still co
 torch/nav import.
 """
 
+from typing import Any
+
 import numpy as np
 
 from cs2rl.env.config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
@@ -503,12 +505,16 @@ def env_config_from_args(args) -> EnvConfig:
     `recoil` is deliberately never read: there is no CLI flag, and inventing one
     here would be new behaviour (tests/env/c/test_recoil.py pins that).
     """
-    weights = {}
+    # dict[str, Any]: `args` is an untyped namespace (argparse, or a harness stand-in),
+    # so getattr yields Any. Without the annotation pyrefly infers `_Unset | Any`
+    # values, because it does not narrow on `v is not UNSET` (an instance sentinel),
+    # and flags every keyword unpacked below.
+    weights: dict[str, Any] = {}
     for name in REWARD_FIELDS:
         v = getattr(args, name, UNSET)
         if v is not UNSET:
             weights[name] = v
-    knobs = {}
+    knobs: dict[str, Any] = {}
     # The historical `or 0` on pin_pitch is subsumed, not dropped: on the CLI
     # that flag stays None until train() resolves it from map flatness, and
     # EnvConfig.__post_init__ runs every flag knob through int(bool(...)), which

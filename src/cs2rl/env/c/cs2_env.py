@@ -3,6 +3,7 @@
 import ctypes
 import hashlib
 from dataclasses import dataclass
+from typing import Any, Protocol, runtime_checkable
 
 import gymnasium
 import numpy as np
@@ -11,8 +12,8 @@ import pufferlib
 from cs2rl.env import nav
 from cs2rl.env.c import binding
 from cs2rl.env.config import EnvConfig
-from cs2rl.env.map import make_cs2_map
-from cs2rl.env.nav import N_AGENTS, OBS_DIM, TEAM_SIZE
+from cs2rl.env.map import MapData, make_cs2_map
+from cs2rl.env.nav import N_AGENTS, OBS_DIM, TEAM_SIZE, NavGraph
 from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 
 # ── Viz dataclasses (used by snapshot_state) ─────────────────────────────────
@@ -545,6 +546,7 @@ def _canonical_ctype_name(ctype):
     from here.
     """
     if issubclass(ctype, ctypes._Pointer):
+        # KNOWN LIMIT: pyrefly 1.2.0 rejects reading the generic `_type_` off `_Pointer`'s class.
         return "ptr_" + _canonical_ctype_name(ctype._type_)
     if issubclass(ctype, ctypes.Array):
         return f"arr_{_canonical_ctype_name(ctype._type_)}_{ctype._length_}"
@@ -589,12 +591,15 @@ def static_data_layout():
     the hash test unable to see a mirror edited at runtime — which is precisely
     how that test's discrimination check proves it is measuring something.
     """
-    names = [name for name, _ in StaticDataC._fields_]
+    # `*_` takes the optional bit width that typeshed allows in a `_fields_` entry.
+    # The prefix has no bitfields: binding.c's SD_LAYOUT_ROW takes offsetof and
+    # sizeof of every field, and C rejects both on a bitfield.
+    names = [name for name, *_ in StaticDataC._fields_]
     # ValueError here means the mirror lost its wall_list field, i.e. there is no
     # prefix boundary left to describe. Better than silently hashing everything.
     prefix_end = names.index("wall_list")
     fields = []
-    for name, ctype in StaticDataC._fields_[:prefix_end]:
+    for name, ctype, *_ in StaticDataC._fields_[:prefix_end]:
         field = getattr(StaticDataC, name)
         fields.append((name, field.offset, field.size, _canonical_ctype_name(ctype)))
     preamble = _static_data_preamble()
@@ -639,7 +644,7 @@ def static_data_layout():
 # stays green. That is what the two-env pigeonhole scheme in
 # tests/env/c/test_struct_sizes.py is for, and why W2 retires none of it.
 
-_SD_PREFIX_END = [_n for _n, _ in StaticDataC._fields_].index("wall_list")
+_SD_PREFIX_END = [_n for _n, *_ in StaticDataC._fields_].index("wall_list")
 
 # The ten pointer fields are NOT packed. C has to end up holding the numpy
 # buffers' own addresses — Cs2Env._refs keeps those alive for the env's lifetime
@@ -648,13 +653,13 @@ _SD_PREFIX_END = [_n for _n, _ in StaticDataC._fields_].index("wall_list")
 # tuple is the ORDER they are passed in: derived from the mirror rather than
 # hand-kept in step with a second list, which is the last place a positional
 # agreement survived after the format string went.
-_SD_POINTER_FIELDS = tuple(_n for _n, _t in StaticDataC._fields_[:_SD_PREFIX_END]
+_SD_POINTER_FIELDS = tuple(_n for _n, _t, *_ in StaticDataC._fields_[:_SD_PREFIX_END]
                            if issubclass(_t, ctypes._Pointer))
 # Everything else in the prefix travels in the buffer: the 56 scalars plus the
 # five inline arrays (delta_x, delta_y, dir_facing, t_spawns, ct_spawns).
 _SD_PACKED_TYPES = {
     _n: _t
-    for _n, _t in StaticDataC._fields_[:_SD_PREFIX_END] if not issubclass(_t, ctypes._Pointer)
+    for _n, _t, *_ in StaticDataC._fields_[:_SD_PREFIX_END] if not issubclass(_t, ctypes._Pointer)
 }
 
 # Inline spawn-array capacities, DERIVED from the mirror. `.size` is the field's
@@ -848,6 +853,20 @@ def symmetrize_rewards(rewards, n_active_per_team=TEAM_SIZE):
 # ── Cs2Env ────────────────────────────────────────────────────────────────────
 
 
+@runtime_checkable
+class _SharedFloat(Protocol):
+    """A float shared across processes, e.g. `multiprocessing.Value("f", x)`.
+
+    Cs2Env's `team_spirit` takes one so train() can change it while the envs run:
+    reset() and step() re-read `.value`. `isinstance(x, _SharedFloat)` is the
+    same duck test as `hasattr(x, "value")`, so a `lock=False` Value (a bare
+    ctypes c_float) passes too. Python 3.12 looks `value` up with
+    inspect.getattr_static, so an object that only fakes it through
+    __getattr__ (a Mock) does not.
+    """
+    value: float
+
+
 class Cs2Env(pufferlib.PufferEnv):
 
     def __init__(
@@ -855,10 +874,10 @@ class Cs2Env(pufferlib.PufferEnv):
             config: EnvConfig,
             *,
             seed=0,
-            team_spirit=0.0,
+            team_spirit: float | _SharedFloat | None = 0.0,
             buf=None,
-            nav_graph=None,
-            map_data=None,
+            nav_graph: NavGraph | None = None,
+            map_data: MapData,
             auto_reset=True,
             include_step_stats_in_info: bool = False,                           # Task 6a (utof/cs2rl#7)
     ):
@@ -889,9 +908,10 @@ class Cs2Env(pufferlib.PufferEnv):
         self._auto_reset = bool(auto_reset)
         self._uses_external_buffers = buf is not None
 
-        # team_spirit may be float or multiprocessing.Value
-        self._team_spirit_shared = team_spirit if hasattr(team_spirit, "value") else None
-        if self._team_spirit_shared is not None:
+        # team_spirit may be a float, None (0.0) or a shared multiprocessing.Value
+        self._team_spirit_shared: _SharedFloat | None = None
+        if isinstance(team_spirit, _SharedFloat):
+            self._team_spirit_shared = team_spirit
             init_team_spirit = float(team_spirit.value)
         elif team_spirit is None:
             init_team_spirit = 0.0
@@ -1246,7 +1266,7 @@ class Cs2Env(pufferlib.PufferEnv):
         self._terminal_rewards = np.empty(N_AGENTS, dtype=np.float32)
         self._terminal_terminals = np.empty(N_AGENTS, dtype=bool)
         self._terminal_truncations = np.empty(N_AGENTS, dtype=bool)
-        self._empty_infos = []
+        self._empty_infos: list[dict[str, Any]] = []
         self._include_step_stats_in_info = bool(include_step_stats_in_info)
         # Spec 2026-08-01 §4.3: Python-layer zero-sum transform, applied at the
         # very end of step(). No StaticDataC field and no C rebuild — the
@@ -1259,7 +1279,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # over the ctypes struct, so the same reference is safe to return each tick.
         if self._include_step_stats_in_info:
             self._step_stats_view = StepStatsView(self._c_env.step_stats)
-            self._nonterminal_infos = [{"step_stats": self._step_stats_view}]
+            self._nonterminal_infos: list[dict[str, Any]] = [{"step_stats": self._step_stats_view}]
         else:
             self._step_stats_view = None
             self._nonterminal_infos = self._empty_infos
@@ -1504,7 +1524,9 @@ class Cs2Env(pufferlib.PufferEnv):
 
     def _build_terminal_info(self):
         stats = self._c_env.episode_stats
-        summary = {
+        # Values are ints and floats; with include_step_stats_in_info, step() also adds
+        # the StepStatsView under "step_stats".
+        summary: dict[str, Any] = {
             "bomb_planted": int(stats.bomb_planted),
             "bomb_defused": int(stats.bomb_defused),
             "kills_t": int(stats.kills_t),

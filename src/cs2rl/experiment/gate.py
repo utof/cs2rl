@@ -62,6 +62,7 @@ import math
 import statistics
 import sys
 from pathlib import Path
+from typing import Any
 
 from cs2rl.experiment.analyze_tplant import dedupe_resume_rows, load_rows
 
@@ -131,7 +132,7 @@ def ratio(rows, num_key, den_key):
     return weighted_sum(rows, num_key) / den if den > 0 else None
 
 
-def _incomplete(reason):
+def _incomplete(reason) -> dict[str, Any]:
     """A seed whose window cannot be judged (run missing / crashed / too short)."""
     return {"fail": reason, "incomplete": True}
 
@@ -168,7 +169,7 @@ def report_extra(window):
     return out
 
 
-def seed_metrics(rows, participating_timesteps):
+def seed_metrics(rows, participating_timesteps) -> dict[str, Any]:
     """Gate columns for one seed, or {"fail": reason[, "incomplete": True]}.
     `incomplete` marks a window that cannot be judged (→ INVALID verdict);
     a plain "fail" is a gate failure on the seed's own merits (→ 0.0 in medians).
@@ -239,13 +240,15 @@ def incomplete_seeds(arm):
 
 
 def evaluate_arm(per_seed):
-    """(medians, per-gate ok) for one arm; failed seeds count as 0.0 everywhere.
+    """(medians, per-gate ok) for one arm; failed seeds count as 0.0 in every GATES median.
     REPORT_ONLY columns get medians too (same 0.0 rule) but never a verdict;
-    REPORT_EXTRA medians skip seeds lacking the key."""
-    med = {col: _median(per_seed, col) for col in [c for c, _, _ in GATES] + list(REPORT_ONLY)}
-    med.update({col: _median_optional(per_seed, col) for col, _, _ in REPORT_EXTRA})
-    ok = {col: (med[col] > thr) if op == ">" else (med[col] >= thr) for col, thr, op in GATES}
-    return med, ok
+    REPORT_EXTRA medians skip failed seeds and seeds whose value is None or
+    missing, and are None when no seed is left. The verdicts read the GATES
+    medians before that merge, which are always floats."""
+    gated = {col: _median(per_seed, col) for col in [c for c, _, _ in GATES] + list(REPORT_ONLY)}
+    ok = {col: (gated[col] > thr) if op == ">" else (gated[col] >= thr) for col, thr, op in GATES}
+    extra = {col: _median_optional(per_seed, col) for col, _, _ in REPORT_EXTRA}
+    return {**gated, **extra}, ok
 
 
 def gate_report(out_root, seeds, neg_seeds, prefix="rung1"):
@@ -261,9 +264,11 @@ def gate_report(out_root, seeds, neg_seeds, prefix="rung1"):
     med, ok = evaluate_arm(list(treat.values()))
     neg_med, _ = evaluate_arm(list(neg.values())) if neg else ({}, {})
     verdict = "PASS" if all(ok.values()) else "FAIL"
+    hit = med["hit_per_facing"]
+    assert hit is not None, "a GATES column: _median returns a float, never None"
     neg_hit = neg_med["hit_per_facing"] if neg else None
     control_ok = neg_hit is None or (neg_hit < NEG_CONTROL_MAX
-                                     and abs(neg_hit - med["hit_per_facing"]) > NEG_CONTROL_MARGIN)
+                                     and abs(neg_hit - hit) > NEG_CONTROL_MARGIN)
     if verdict == "PASS" and not control_ok:
         verdict = "INVALID"
     incomplete = {

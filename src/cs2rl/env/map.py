@@ -33,7 +33,7 @@ class MapData:
     N: int
     area_ids: np.ndarray               # int32[N] — for simple maps, just np.arange(N)
     centroids: np.ndarray              # float32[N, 2] — XY
-    vis_matrix: np.ndarray             # bool[N, N]
+    vis_matrix: np.ndarray | None      # bool[N, N]; None only from make_cs2_map(build_vis=False)
     adjacency: np.ndarray              # bool[N, N]
 
     # Verticality — per-area terrain elevation and ramp flag (spec L1, L8).
@@ -74,7 +74,7 @@ class MapData:
 
     # Optional: reference to the underlying NavGraph (needed for viz/snapshot).
     # None for simple maps.
-    nav_graph: object = field(default=None, repr=False)
+    nav_graph: NavGraph | None = field(default=None, repr=False)
     # Room AABB float32[N,4] x0,y0,x1,y1 for ramp interpolation.
     # make_simple_map fills this from the room tuples. make_cs2_map leaves
     # None so demo_terrain_z stays on centroids_z.
@@ -222,15 +222,14 @@ def make_cs2_map(nav_path: str, cache_path: str, *, build_vis: bool = True) -> M
     if finite_dist.size:
         max_dist = float(finite_dist.max())
         bombsite_dist_scale = 1.0 / max_dist if max_dist > 0 else 0.0
-    # R0-F (#136): scale is computed from the FINITE entries above; only now
-    # replace non-finite hops (area-id gaps + unreachable areas) with 4×max so
-    # closeness = 1 − 4 < 0 → clamps to 0 in C exactly as the old isfinite()
-    # skip did (isfinite folds to true under -ffast-math and leaked inf).
-    # PITFALL: never fill before computing the scale — the sentinel would
-    # shrink it 4× and silently rescale every nav reward. No finite entry
-    # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
-    # scale > 0 handles it.
-    if finite_dist.size:
+        # R0-F (#136): scale is computed from the FINITE entries above; only now
+        # replace non-finite hops (area-id gaps + unreachable areas) with 4×max so
+        # closeness = 1 − 4 < 0 → clamps to 0 in C exactly as the old isfinite()
+        # skip did (isfinite folds to true under -ffast-math and leaked inf).
+        # PITFALL: never fill before computing the scale — the sentinel would
+        # shrink it 4× and silently rescale every nav reward. No finite entry
+        # (bombsites=[]) ⇒ leave the array all-inf and scale 0.0; the C guard on
+        # scale > 0 handles it.
         bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
                                  4.0 * max_dist).astype(np.float32)
 
@@ -516,7 +515,6 @@ def make_simple_map(
         bombsite_dist_scale = 1.0 / mx if mx > 0 else 0.0
                                                                             # R0-F (#136): same sentinel fill as the dust2 path — see comment there.
                                                                             # Scale first (from finite entries), then inf → 4×max (finite, clamps to 0).
-    if finite.size:
         bombsite_dist = np.where(np.isfinite(bombsite_dist), bombsite_dist,
                                  4.0 * mx).astype(np.float32)
 

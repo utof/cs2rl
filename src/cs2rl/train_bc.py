@@ -425,16 +425,12 @@ class DemoSet:
     discrete: np.ndarray                               # int64   [N, ACTION_DIM]
     continuous: np.ndarray                             # float32 [N, AIM_DIM]
     dones: np.ndarray                                  # bool    [N]
-    lengths: np.ndarray = None                         # int64   [E] ticks per episode
+    lengths: np.ndarray                                # int64   [E] ticks per episode
     episodes: list = field(default_factory=list)       # per-kept-episode metadata dicts
     n_files: int = 0                                   # files on disk (pre-dedupe)
     n_duplicates: int = 0                              # byte-identical episodes dropped
 
     def __post_init__(self):
-        if self.lengths is None:
-            # One episode covering everything — the degenerate case a synthetic
-            # test constructs. Real demo sets always pass explicit lengths.
-            self.lengths = np.array([self.obs.shape[0]], dtype=np.int64)
         self.lengths = np.asarray(self.lengths, dtype=np.int64)
         if int(self.lengths.sum()) != self.obs.shape[0]:
             raise ValueError(f"DemoSet: lengths sum to {int(self.lengths.sum())} but there are "

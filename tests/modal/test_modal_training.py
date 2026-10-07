@@ -312,7 +312,7 @@ def _run_attempt_in_thread(kwargs, *, daemon: bool = False):
     its `finished.wait(...)` instead of hanging the session.
     """
     finished = threading.Event()
-    boxed: list[object] = []
+    boxed: list[training.TrainingAttemptResult | Exception] = []
 
     def runner():
         try:
@@ -551,6 +551,7 @@ def test_prebuilt_validation_still_rejects_a_torn_checkpoint(tmp_path, monkeypat
 
     assert not (run_root / "checkpoints" / "dust2_policy.pt.meta.json").exists()
     assert outcome.generation is None
+    assert outcome.reason is not None, "the reason is None only when a sidecar was written"
     assert "not weights-only loadable" in outcome.reason
     assert commits == []
 
@@ -565,6 +566,7 @@ def test_publish_reason_names_the_missing_interpreter(tmp_path, monkeypatch):
     outcome, commits = _publish(run_root)
 
     assert not (run_root / "checkpoints" / "dust2_policy.pt.meta.json").exists()
+    assert outcome.reason is not None, "the reason is None only when a sidecar was written"
     assert "nonexistent" in outcome.reason
     assert commits == []
 
@@ -761,7 +763,7 @@ def _signal_hooks(child, *, release_on=None):
         f"the runner's own process group ({os.getpgrp()}) equals the fake child's pid "
         f"({child.pid}), so the process-group guard in `_signal_process_group` refuses to "
         "signal it by design and this kill-path test cannot run in this session")
-    originals = {signal.SIGINT: object(), signal.SIGTERM: object()}
+    originals: dict[int, object] = {signal.SIGINT: object(), signal.SIGTERM: object()}
     installed: dict[int, object] = dict(originals)
     kills: list[int] = []
     groups: list[int] = []

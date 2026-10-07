@@ -609,6 +609,7 @@ class Cs2PuffeRL(PuffeRL):
         LAST file names the model and carries the epoch checked against the
         sidecar, so a crash leaves a set that resume accepts whole or refuses.
         """
+        assert self.logger is not None, "PuffeRL.__init__ replaces a None logger with NoLogger"
         run_id = self.logger.run_id
         path = Path(self.config["data_dir"]) / run_id
         path.mkdir(parents=True, exist_ok=True)
@@ -843,8 +844,8 @@ class Cs2PuffeRL(PuffeRL):
         """Write one chunk into the rollout buffers at each row's current segment slot."""
         cfg = self.config
         if cfg["use_rnn"]:
-            self.lstm_h[env_id.start] = cast(torch.Tensor, step.state["lstm_h"])
-            self.lstm_c[env_id.start] = cast(torch.Tensor, step.state["lstm_c"])
+            self.lstm_h[env_id.start] = step.state["lstm_h"]
+            self.lstm_c[env_id.start] = step.state["lstm_c"]
 
         # These rollout counters are integer tensors. The installed
         # Tensor.item() stub returns a wider scalar union than runtime.

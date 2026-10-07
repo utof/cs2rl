@@ -13,7 +13,7 @@ auto_reset=True — pinned below).
 import numpy as np
 import pytest
 
-from cs2rl.env.c.cs2_env import make_env, symmetrize_rewards
+from cs2rl.env.c.cs2_env import Cs2Env, make_env, symmetrize_rewards
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.nav import TEAM_SIZE
 from cs2rl.spec.action import (        # definition site — nav/train only re-export, and importing train drags torch into a numpy-only test
@@ -191,7 +191,9 @@ def test_symmetrization_holds_on_the_external_buffer_vecenv_path():
     try:
         # Pin the premise: if this ever goes False the test has quietly
         # regressed into re-testing the buf=None path the others cover.
-        assert plain.driver_env._uses_external_buffers, (
+        driver = plain.driver_env
+        assert isinstance(driver, Cs2Env), f"driver_env is a {type(driver).__name__}"
+        assert driver._uses_external_buffers, (
             "vecenv did not hand the env external buffers — this test no "
             "longer covers the training path it exists for")
         plain.async_reset(seed=4242)

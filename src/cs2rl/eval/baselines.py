@@ -267,6 +267,7 @@ class PolicyActor:
         torch = self.torch
         obs_t = torch.as_tensor(np.ascontiguousarray(obs), device=self.device)
         mask_t = torch.as_tensor(np.ascontiguousarray(env._masks_view), device=self.device) != 0
+        assert self.state is not None, "reset() builds the LSTM state; _episode calls it before act()"
         self.state["done"] = torch.as_tensor(self.done, device=self.device)
         with torch.no_grad():
             logits, mu, log_std, value = self.policy.forward_eval(obs_t, self.state)

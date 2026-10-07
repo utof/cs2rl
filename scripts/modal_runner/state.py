@@ -9,7 +9,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
-from typing import Protocol
+from typing import Any, Protocol
 
 from .core import (
     HEARTBEAT_INTERVAL,
@@ -62,7 +62,13 @@ class RunStatus:
         }
 
     @classmethod
-    def from_dict(cls, payload: Mapping[str, object]) -> RunStatus:
+    def from_dict(cls, payload: Mapping[str, Any]) -> RunStatus:
+        # Any, not object: the values are parsed JSON, and pyrefly rejects int() of an object. The
+        # only checks here: a missing key raises KeyError, and a non-numeric schema_version or an
+        # unknown status raises TypeError or ValueError. int() also accepts numeric strings,
+        # floats and bools, and str() accepts any value, so attempt_id and updated_at are not
+        # checked. derive_run_view_from_bytes reports these errors as corrupt; read_status lets
+        # them propagate.
         return cls(
             schema_version=int(payload["schema_version"]),
             status=Status(str(payload["status"])),
@@ -470,6 +476,8 @@ def derive_run_view_from_bytes(
     if status_bytes is not None:
         try:
             payload = load_volume_json(status_bytes, "corrupt volume status json")
+            if not isinstance(payload, dict):
+                raise TypeError("STATUS.json is not a JSON object")
             return derive_status(RunStatus.from_dict(payload), now=now)
         except (TypeError, ValueError, KeyError) as err:
             raise ValidationError("corrupt volume status json") from err
@@ -477,6 +485,8 @@ def derive_run_view_from_bytes(
         raise ValidationError("no STATUS.json or reservation.json")
     try:
         payload = load_volume_json(reservation_bytes, "corrupt volume reservation json")
+        if not isinstance(payload, dict):
+            raise TypeError("reservation.json is not a JSON object")
         created = _parse_iso8601(str(payload["created_at"]))
     except ValidationError:
         raise

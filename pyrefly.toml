@@ -23,7 +23,7 @@ preset = "default"
 # setup.py is listed explicitly because it is a file, not a directory; it
 # contributes 0 errors, so it is free.
 #
-# NOT ["."], which also yields 752 today and looks equivalent. The only thing
+# NOT ["."], which also yielded 752 when this was written and looks equivalent. The only thing
 # keeping docs/ (a nested git repo containing .py) out of scope is
 # .git/info/exclude, which is LOCAL and never cloned — on a fresh clone ["."]
 # would sweep docs/research/eval/grade.py. Scope must not depend on an uncloned

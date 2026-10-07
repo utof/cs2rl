@@ -77,7 +77,7 @@ def _is_scalar_ctype(ctype):
 # offsetof asserts pin to the C header). Never re-listed by hand: a hand-written
 # copy is the next thing to rot.
 _STATIC_DATA_SCALARS = tuple(
-    (name, ctype) for name, ctype in StaticDataC._fields_ if _is_scalar_ctype(ctype))
+    (name, ctype) for name, ctype, *_ in StaticDataC._fields_ if _is_scalar_ctype(ctype))
 
 # Partition those scalars by whether the env CONFIG can set them. Anything the
 # config exposes is sentinel-testable (test_static_data_scalars_round_trip

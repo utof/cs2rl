@@ -8,6 +8,7 @@ from collections import deque
 import networkx as nx
 import numpy as np
 from awpy import Nav
+from awpy.nav import NavArea
 from shapely.geometry import Point
 from shapely.geometry import Polygon as ShapelyPolygon
 
@@ -111,6 +112,7 @@ def _vis_compute_rows(row_indices: list, pts: list) -> dict:
 
     Returns {i: [bool for j in range(i+1, N)]} using the worker-local _vc.
     """
+    assert _vc is not None, "_vis_worker_init (the pool initializer) runs before any task"
     N = len(pts)
     result = {}
     for i in row_indices:
@@ -146,8 +148,8 @@ class NavGraph:
 
         # ── Load nav data ──────────────────────────────────────────────────
         self.nav = Nav.from_json(nav_path)
-        self.areas: dict[int, object] = self.nav.areas                 # dict[int, NavArea]
-                                                                       # sorted for stable _id_to_idx indices across runs
+        self.areas: dict[int, NavArea] = self.nav.areas
+        # sorted for stable _id_to_idx indices across runs
         self.area_ids: list[int] = sorted(self.areas.keys())
         self.N: int = len(self.area_ids)
         self._id_to_idx: dict[int, int] = {aid: i for i, aid in enumerate(self.area_ids)}
@@ -198,7 +200,7 @@ class NavGraph:
         self._build_pos_grid()
 
         # ── Visibility matrix (built in Task 2) ───────────────────────────
-        self.vis_matrix = None
+        self.vis_matrix: np.ndarray | None = None
 
     # ── Wall segment extraction ────────────────────────────────────────────
 
@@ -315,16 +317,21 @@ class NavGraph:
             f"[NavGraph] Built position grid {W}×{H} (cell={cell_size}u, {coverage:.1%} coverage)")
 
         if cache:
+            # A dict saved as a 0-d object array (what np.save would wrap it in anyway;
+            # same bytes); the cache branch above unwraps it with .item().
             np.save(
                 cache,
-                {
-                    "cell": cell_size,
-                    "x_min": x_min,
-                    "y_min": y_min,
-                    "w": W,
-                    "h": H,
-                    "grid": grid,
-                },
+                np.array(
+                    {
+                        "cell": cell_size,
+                        "x_min": x_min,
+                        "y_min": y_min,
+                        "w": W,
+                        "h": H,
+                        "grid": grid,
+                    },
+                    dtype=object,
+                ),
             )
 
     # ── Public API ────────────────────────────────────────────────────────

@@ -24,13 +24,18 @@ import sys
 import tempfile
 import threading
 import uuid
+from collections.abc import Mapping
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING, NotRequired, TypedDict
 
 import modal
 
 import scripts.modal_runner as mrl
+
+if TYPE_CHECKING:
+    from _typeshed import SupportsWrite
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 CUDA_IMAGE = ("nvidia/cuda:12.8.1-devel-ubuntu22.04@"
@@ -196,7 +201,7 @@ def _missing_iterdir_errors() -> tuple[type[BaseException], ...]:
     return tuple(dict.fromkeys(types))
 
 
-def _iterdir_paths(volume: object, path: str) -> list[str]:
+def _iterdir_paths(volume: modal.Volume, path: str) -> list[str]:
     try:
         return [str(entry.path) for entry in volume.iterdir(path, recursive=False)]
     except _missing_iterdir_errors():
@@ -207,7 +212,7 @@ def _iterdir_paths(volume: object, path: str) -> list[str]:
         raise
 
 
-def _volume_has_client_path(volume: object, remote: str) -> bool:
+def _volume_has_client_path(volume: modal.Volume, remote: str) -> bool:
     if remote in _iterdir_paths(volume, remote):
         return True
     parent = str(PurePosixPath(remote).parent)
@@ -215,7 +220,7 @@ def _volume_has_client_path(volume: object, remote: str) -> bool:
     return remote in listed or PurePosixPath(remote).name in listed
 
 
-def _read_volume_file(volume: object, remote: str) -> bytes | None:
+def _read_volume_file(volume: modal.Volume, remote: str) -> bytes | None:
     try:
         chunks = list(volume.read_file(remote))
     except (FileNotFoundError, OSError, KeyError):
@@ -231,7 +236,7 @@ def _require_blob_match(remote: bytes, expected_size: int, expected_digest: str)
 class ModalVolumeIndex:
     """ArtifactIndex over a Modal Volume. Client paths only; never /artifacts."""
 
-    def __init__(self, volume: object):
+    def __init__(self, volume: modal.Volume):
         self._volume = volume
         self._staged: list[tuple[PurePosixPath, bytes]] = []
 
@@ -258,10 +263,10 @@ class ModalVolumeIndex:
 class ModalDictRegistry:
     """Registry over a Modal Dict. put_if_absent is skip_if_exists=True."""
 
-    def __init__(self, mapping: object):
+    def __init__(self, mapping: modal.Dict):
         self._dict = mapping
 
-    def put_if_absent(self, key: str, value: dict[str, object]) -> bool:
+    def put_if_absent(self, key: str, value: Mapping[str, object]) -> bool:
         return bool(self._dict.put(key, dict(value), skip_if_exists=True))
 
     def get(self, key: str) -> dict[str, object] | None:
@@ -273,14 +278,14 @@ class ModalDictRegistry:
             return None
         return dict(stored)
 
-    def set_existing(self, key: str, value: dict[str, object]) -> None:
+    def set_existing(self, key: str, value: Mapping[str, object]) -> None:
         current = self.get(key)
         if current is None or current.get("attempt_id") != value.get("attempt_id"):
             raise mrl.ValidationError("registry claim is not owned by this attempt")
         self._dict.put(key, dict(value))
 
 
-def ensure_blob(volume: object, client_path: PurePosixPath, local_path: Path) -> None:
+def ensure_blob(volume: modal.Volume, client_path: PurePosixPath, local_path: Path) -> None:
     """Reuse a digest path after streamed verify, or upload with force=False."""
     remote = _client_volume_path(client_path)
     local_path = Path(local_path)
@@ -334,7 +339,8 @@ _LAUNCH_CHECKPOINT_ERRORS = {
 _UNMAPPED_CHECKPOINT_ERROR = "parent checkpoint failed verification: {reason}"
 
 
-def prior_checkpoint_or_raise(volume: object, parent_id: str, now: datetime) -> tuple[bytes, str]:
+def prior_checkpoint_or_raise(volume: modal.Volume, parent_id: str,
+                              now: datetime) -> tuple[bytes, str]:
     """Validate a --resume-run-id parent and return its (checkpoint bytes, digest).
 
     The launch-side gate: refuses to start a child run unless the parent has
@@ -456,6 +462,51 @@ def _require_pinned_image_digest(digest: str) -> str:
     return IMAGE_DIGEST
 
 
+class LaunchPayload(TypedDict):
+    """The JSON-safe dict `launch_run` spawns `train_remote` with; `_launch_payload` builds it.
+
+    A TypedDict is a plain dict at runtime, so the wire payload is unchanged.
+    The receiving side still coerces each read (`int(...)`, `str(...)`) as it
+    did when the payload was typed `dict[str, object]`.
+    """
+
+    run_id: str
+    attempt_id: str
+    git_sha: str
+    tree: str
+    source_archive_sha256: str
+    source_mount_path: str
+    resume_mount_path: str | None
+    resume_sha256: str | None
+    resume_size: int | None
+    resume_source_path: str | None
+    effective_map: str
+    gpu: str
+    cpu_request: int
+    cpu_soft_limit: int
+    memory_request_mib: int
+    memory_hard_limit_mib: int
+    num_envs: int
+    vec_workers: int
+    timeout_minutes: int
+    save_every_seconds: int
+    train_args: list[str]
+    timesteps: int
+    training_argv: list[str]
+    requested_timesteps: int
+    effective_timesteps: int
+    batch_size: int
+    seed: int
+    created_at: str
+    runner_commit: str
+    config_hash: str
+    image_digest: str
+    modal_version: str
+    thread_caps: list[str]
+    resumed_from_run_id: str | None
+    wandb_enabled: NotRequired[bool]
+
+
 def _launch_payload(
     request: mrl.RunRequest,
     *,
@@ -470,10 +521,10 @@ def _launch_payload(
     modal_version: str,
     wandb_enabled: bool,
     created_at: str,
-) -> dict[str, object]:
+) -> LaunchPayload:
     resume_mount = None if resume_client is None else str(mrl.mounted_path(resume_client))
     run_root = mrl.mounted_path(mrl.RUNS_ROOT / request.run_id)
-    payload: dict[str, object] = {
+    payload: LaunchPayload = {
         "run_id": request.run_id,
         "attempt_id": attempt_id,
         "git_sha": git_sha,
@@ -514,7 +565,7 @@ def _launch_payload(
     return payload
 
 
-def build_remote_manifest(payload: dict[str, object]) -> mrl.Manifest:
+def build_remote_manifest(payload: LaunchPayload) -> mrl.Manifest:
     """Materialize the design §5 Manifest from the Function payload."""
     digest = _require_pinned_image_digest(str(payload["image_digest"]))
     requested = int(payload["requested_timesteps"])
@@ -565,7 +616,7 @@ def _remote_run_root(run_id: str) -> Path:
     return mrl.mounted_path(mrl.RUNS_ROOT / run_id)
 
 
-def _request_from_payload(payload: dict[str, object]) -> mrl.RunRequest:
+def _request_from_payload(payload: LaunchPayload) -> mrl.RunRequest:
     train_args = tuple(str(token) for token in payload["train_args"])
     wandb_name = "attached" if payload.get("wandb_enabled") else None
     return mrl.build_run_request(
@@ -584,23 +635,35 @@ def _request_from_payload(payload: dict[str, object]) -> mrl.RunRequest:
     )
 
 
+class _SpawnOptions(TypedDict):
+    """The `Function.with_options` keywords `launch_run` sets.
+
+    `launch_run` unpacks it into `with_options`, so pyrefly checks every key and
+    value against modal's own signature. `volumes` copies the stub's exact dict
+    type, because a dict parameter is invariant and a narrower dict is rejected.
+    """
+
+    gpu: str
+    cpu: tuple[int, int]
+    memory: tuple[int, int]
+    timeout: int
+    volumes: dict[str | PurePosixPath, modal.Volume | modal.CloudBucketMount]
+    secrets: NotRequired[list[modal.Secret]]
+
+
 def launch_run(
     request: mrl.RunRequest,
     *,
     repo: Path,
     app_obj: object | None = None,
-    train_fn: object | None = None,
-    modal_module: object | None = None,
     now: datetime | None = None,
     attempt_id: str | None = None,
-    stdout: object | None = None,
+    stdout: SupportsWrite[str] | None = None,
 ) -> dict[str, object]:
     """Validate locally, then create/claim/upload and invoke the configured Function."""
     repo = Path(repo)
     stamp = now if now is not None else datetime.now(UTC)
     nonce = attempt_id if attempt_id is not None else uuid.uuid4().hex
-    modal_mod = modal if modal_module is None else modal_module
-    train = train_remote if train_fn is None else train_fn
     app_handle = app if app_obj is None else app_obj
     sink = sys.stdout if stdout is None else stdout
 
@@ -612,7 +675,7 @@ def launch_run(
     secret = None
     if request.wandb_secret_name is not None:
         try:
-            secret = modal_mod.Secret.from_name(request.wandb_secret_name)
+            secret = modal.Secret.from_name(request.wandb_secret_name)
         except Exception as err:
             if _is_not_found_error(err):
                 raise mrl.ValidationError("requested W&B Secret is missing") from err
@@ -622,37 +685,43 @@ def launch_run(
     prior_digest: str | None = None
     if request.resume.prior_run_id is not None:
         parent_volume = _lookup_named(
-            modal_mod.Volume,
+            modal.Volume,
             mrl.VOLUME_NAME,
             missing="artifact volume is missing",
         )
         prior_bytes, prior_digest = prior_checkpoint_or_raise(parent_volume,
                                                               request.resume.prior_run_id, stamp)
 
-    modal_mod.Volume.objects.create(mrl.VOLUME_NAME, allow_existing=True)
-    modal_mod.Dict.objects.create(mrl.REGISTRY_NAME, allow_existing=True)
-    volume = _lookup_named(modal_mod.Volume, mrl.VOLUME_NAME, missing="artifact volume is missing")
-    registry_dict = _lookup_named(modal_mod.Dict,
-                                  mrl.REGISTRY_NAME,
-                                  missing="run registry is missing")
+    modal.Volume.objects.create(mrl.VOLUME_NAME, allow_existing=True)
+    modal.Dict.objects.create(mrl.REGISTRY_NAME, allow_existing=True)
+    volume = _lookup_named(modal.Volume, mrl.VOLUME_NAME, missing="artifact volume is missing")
+    registry_dict = _lookup_named(modal.Dict, mrl.REGISTRY_NAME, missing="run registry is missing")
     registry = ModalDictRegistry(registry_dict)
     artifacts = ModalVolumeIndex(volume)
     mrl.reserve_run(registry, artifacts, request.run_id, nonce, now=stamp)
 
-    uploaded: dict[str, object] = {}
+    # upload() sets these. The resume three stay None when there is nothing to resume.
+    tree: str | None = None
+    source_archive_sha256: str | None = None
+    source_client: PurePosixPath | None = None
+    resume_client: PurePosixPath | None = None
+    resume_digest: str | None = None
+    resume_size: int | None = None
 
     def upload() -> None:
+        nonlocal tree, source_archive_sha256, source_client
+        nonlocal resume_client, resume_digest, resume_size
         with tempfile.TemporaryDirectory(prefix="cs2rl-launch-") as tmp:
             tmp_path = Path(tmp)
             archive = tmp_path / "source.tar.gz"
             provenance = mrl.create_source_bundle(repo, canonical, archive)
+            tree, source_archive_sha256 = provenance.tree, provenance.archive_sha256
             source_client = mrl.SOURCES_ROOT / f"{provenance.archive_sha256}.tar.gz"
             ensure_blob(volume, source_client, archive)
-            resume_client: PurePosixPath | None = None
-            resume_digest: str | None = None
-            resume_size: int | None = None
             if local_ckpt is not None:
-                ensure_blob(volume, local_ckpt.client_path, Path(request.resume.local_checkpoint))
+                local_path = request.resume.local_checkpoint
+                assert local_path is not None, "local_ckpt is validated from this path"
+                ensure_blob(volume, local_ckpt.client_path, Path(local_path))
                 resume_client = local_ckpt.client_path
                 resume_digest = local_ckpt.sha256
                 resume_size = local_ckpt.size
@@ -663,30 +732,26 @@ def launch_run(
                 ensure_blob(volume, resume_client, staged)
                 resume_digest = prior_digest
                 resume_size = len(prior_bytes)
-            uploaded["provenance"] = provenance
-            uploaded["source_client"] = source_client
-            uploaded["resume_client"] = resume_client
-            uploaded["resume_digest"] = resume_digest
-            uploaded["resume_size"] = resume_size
 
     mrl.finish_reservation(registry, artifacts, request.run_id, nonce, upload=upload)
-    provenance = uploaded["provenance"]
+    assert tree is not None and source_archive_sha256 is not None and source_client is not None, (
+        "finish_reservation re-raises unless upload() ran to completion")
     payload = _launch_payload(
         request,
         attempt_id=nonce,
         git_sha=canonical,
-        tree=provenance.tree,
-        source_archive_sha256=provenance.archive_sha256,
-        source_client=uploaded["source_client"],
-        resume_client=uploaded["resume_client"],
-        resume_digest=uploaded["resume_digest"],
-        resume_size=uploaded["resume_size"],
-        modal_version=str(modal_mod.__version__),
+        tree=tree,
+        source_archive_sha256=source_archive_sha256,
+        source_client=source_client,
+        resume_client=resume_client,
+        resume_digest=resume_digest,
+        resume_size=resume_size,
+        modal_version=str(modal.__version__),
         wandb_enabled=secret is not None,
         created_at=stamp.isoformat(),
     )
 
-    options: dict[str, object] = {
+    options: _SpawnOptions = {
         "gpu": request.gpu,
         "cpu": request.cpu_request_limit,
         "memory": request.memory_request_limit,
@@ -705,7 +770,8 @@ def launch_run(
     # own Function CLI uses spawn when --detach is set. spawn() returns a
     # FunctionCall handle and does not wait, so the local entrypoint can exit
     # without owning the GPU input.
-    handle = train.with_options(**options).spawn(payload)
+    # KNOWN LIMIT: pyrefly 1.2.0 rejects the ParamSpec in modal's spawn stub; 1.3.2 accepts it.
+    handle = train_remote.with_options(**options).spawn(payload)
     function_call_id = getattr(handle, "object_id", None)
     print(f"function_call_id={function_call_id}", file=sink)
     return {
@@ -721,7 +787,7 @@ def launch_run(
     single_use_containers=True,
     include_source=False,
 )
-def train_remote(payload: dict[str, object]) -> dict[str, object]:
+def train_remote(payload: LaunchPayload) -> dict[str, object]:
     """Own the delivery claim before preparation; invoked via with_options(...).spawn.
 
     A duplicate must return before parsing the request, preparing source or

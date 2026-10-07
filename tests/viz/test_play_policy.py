@@ -70,6 +70,7 @@ def test_mark_done_is_torch_float_tensor():
     from cs2rl.policy import init_policy_state
     policy = _TinyPol()
     st = init_policy_state(policy, "cpu")
+    assert st is not None, "a policy gets a state dict"
     terms = np.zeros(10, dtype=np.bool_)
     truncs = np.zeros(10, dtype=np.bool_)
     terms[0] = True
@@ -85,6 +86,7 @@ def test_reset_round_zeros_hidden():
     from cs2rl.policy import init_policy_state
     policy = _TinyPol()
     st = init_policy_state(policy, "cpu")
+    assert st is not None, "a policy gets a state dict"
     st["lstm_h"] += 3
 
     class _Env:
@@ -93,6 +95,7 @@ def test_reset_round_zeros_hidden():
             return None, None
 
     st2 = play_reset_round(_Env(), policy, "cpu")
+    assert st2 is not None, "a policy gets a state dict"
     assert torch.count_nonzero(st2["lstm_h"]) == 0
 
 

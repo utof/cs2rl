@@ -3,8 +3,10 @@
 WHY THREE PROBES. A default can be written down in three shapes and each is
 invisible to the other two probes:
 
-  1. `name = value` / `"name": value` / `name: int = value` — a line regex sees
-     it. Phase A's narrower regex missed the dict-entry and annotated shapes.
+  1. `name = value` / `"name": value` / `name: <annotation> = value`, a
+     parameter default included — a line regex sees it. Phase A's narrower regex
+     missed the dict-entry and annotated shapes, and until the #354 review it took
+     only a bare int/float/bool annotation, so `name: float | None = value` passed.
   2. `add_argument("--flag", dest="name", default=value)` — `dest=` and
      `default=` sit on different lines, so no line regex can pair them; an ast
      walk of the add_argument calls can.
@@ -159,9 +161,19 @@ def _hits(pattern_for):
 
 
 def _line_pattern(name, value):
-    # `["']?` so dict entries match; the annotation alternation so `: int = 5`
-    # matches — with `float` alone every `: int =` default is invisible, which is
-    # exactly the harness signature's four knobs.
+    # `["']?` so dict entries match. After a `:` (never after `=`), an optional
+    # one-line annotation: a run of identifier characters, `.`, `|`, quotes and
+    # spaces, plus bracketed parts, so `float | None`, `Optional[float]`, `"float"`
+    # and `Union[float, None]` all match. It may hold a comma only inside brackets.
+    # Each restriction is load-bearing (measured): with a comma allowed outside
+    # brackets, `name: 1, other=<default>` is a hit, and with the annotation also
+    # taken after `=`, so is `name=1 and other=<default>`. Both pair the name with
+    # another key's value, and both are pinned misses in
+    # test_the_line_probe_reads_through_any_one_line_annotation. The looser
+    # `[^=\n]+` also hits two lines in src/cs2rl/experiment/oracle_statue.py, each
+    # pairing `pin_pitch=1` with a crouch flag's 0. KNOWN LIMIT: a nested
+    # bracket (`Optional[dict[str, float]]`) is not matched, an unlikely
+    # annotation for a scalar default.
     #
     # The trailing `(?![\w.])` is the value's RIGHT EDGE. Without it the literal
     # is only a prefix: `pin_pitch=0` also matched `pin_pitch=0.5`, and
@@ -172,8 +184,9 @@ def _line_pattern(name, value):
     # restatement of `1`. That trade is deliberate — a spelling nobody in this
     # tree uses, against a wrong count nobody would notice. Adding the boundary
     # left all three probe counts unchanged (9 / 1 / 0, same hit lines).
-    return (rf'["\']?{re.escape(name)}["\']?\s*[:=]\s*'
-            rf'(?:(?:int|float|bool)\s*=\s*)?{re.escape(repr(value))}(?![\w.])')
+    annotation = r'(?:[\w.|\'" ]|\[[^\]=\n]*\])+?'
+    return (rf'["\']?{re.escape(name)}["\']?\s*(?:=|:(?:\s*{annotation}\s*=)?)\s*'
+            rf'{re.escape(repr(value))}(?![\w.])')
 
 
 def _getattr_pattern(name, value):
@@ -247,8 +260,9 @@ def _argparse_default_offenders(tree, label):
         dest = dest.value if isinstance(dest, ast.Constant) else None
         if dest is None:
             for a in node.args:
-                if isinstance(a, ast.Constant) and str(a.value).startswith("--"):
-                    dest = a.value[2:].replace("-", "_")
+                flag = a.value if isinstance(a, ast.Constant) else None
+                if isinstance(flag, str) and flag.startswith("--"):
+                    dest = flag[2:].replace("-", "_")
                     break
         if dest not in FIELD_DEFAULTS or "default" not in kw:
             continue
@@ -366,6 +380,31 @@ def test_the_probes_can_actually_fail(probe):
 
     assert re.search(pattern(name, value), plant(value))
     assert not re.search(pattern(name, value), plant(other))
+
+
+def test_the_line_probe_reads_through_any_one_line_annotation():
+    """Knock-out for the annotation part of _line_pattern, both directions.
+
+    Hits: the shapes a bare int/float/bool alternation missed (#354 review KO-2
+    planted `reward_kill: float | None = <default>` in src/ and every probe stayed
+    green). Misses: lines where the default belongs to another key, which a looser
+    annotation (`[^=\\n]+`, a comma outside brackets, or one taken after `=`) would
+    pair with the name.
+    Name and value come out of FIELD_DEFAULTS, as in the knock-out above.
+    """
+    name = "reward_kill"
+    value = FIELD_DEFAULTS[name]
+    other = value + 1
+    pattern = _line_pattern(name, value)
+    hits = (f"{name}: float | None = {value!r}", f"{name}: Optional[float] = {value!r}",
+            f'{name}: "float" = {value!r}', f"{name}: Union[float, None] = {value!r}",
+            f"self.{name}: typing.Optional[float] = {value!r}",
+            f"def f(x, {name}: float | None = {value!r}) -> None:")
+    misses = (f"{name}: float | None = {other!r}", f"{name}: float | None",
+              f"{name}={other!r}, unrelated={value!r}", f"{name}: {other!r}, unrelated={value!r}",
+              f"{name}={other!r} and unrelated={value!r}", f"{name} = foo(scale={value!r})")
+    assert [s for s in hits if not re.search(pattern, s)] == []
+    assert [s for s in misses if re.search(pattern, s)] == []
 
 
 @pytest.mark.parametrize("probe", ["line", "getattr"])
@@ -522,7 +561,9 @@ def test_the_argparse_probe_can_actually_fail():
     The other two probes are knocked out against their patterns; this one has to
     be knocked out against a parsed tree, which is why the walk lives in a
     helper. Positive, negative and the None-sentinel branch, so "reports 0" is a
-    measurement rather than an assumption.
+    measurement rather than an assumption. The planted default is found both with
+    `dest=` and without it, where the name comes from the first "--" flag (after a
+    short flag, so the walk must step past it).
 
     The planted default is READ from FIELD_DEFAULTS, for both reasons the other
     knock-out gives: a hardcoded literal would keep this test green against a
@@ -542,7 +583,12 @@ def test_the_argparse_probe_can_actually_fail():
     sentinel = textwrap.dedent("""
         parser.add_argument("--pin-pitch", dest="pin_pitch", default=None)
         """)
+    no_dest = textwrap.dedent(f"""
+        parser.add_argument("-c", "{flag}", default={value!r})
+        """)
     assert _argparse_default_offenders(ast.parse(planted),
                                        "<planted>") == [f"<planted>:2  --{name} default={value!r}"]
+    assert _argparse_default_offenders(ast.parse(no_dest),
+                                       "<no-dest>") == [f"<no-dest>:2  --{name} default={value!r}"]
     assert _argparse_default_offenders(ast.parse(derived), "<derived>") == []
     assert _argparse_default_offenders(ast.parse(sentinel), "<sentinel>") == []

@@ -26,30 +26,16 @@ from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
 from tests.conftest import REPO_ROOT
 
 
-def _arena_env(**kw):
+def _arena_env(n_active_per_team=1):
+    """The arena duel env these tests play on; BaselineEvaluator needs auto_reset=False."""
     from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
-    base = dict(n_active_per_team=1,
-                pin_pitch=1,
-                crouch_enabled=0,
-                round_time=160,
-                auto_reset=False,
-                seed=11)
-    base.update(kw)
-    typed = {
-        k: base.pop(k)
-        for k in ("auto_reset", "seed", "buf", "include_step_stats_in_info", "team_spirit",
-                  "config") if k in base
-    }
-    config = typed["config"] if "config" in typed else EnvConfig(**base)
-    return make_env(map_data=make_arena_duel_map(),
-                    config=config,
-                    auto_reset=typed["auto_reset"],
-                    seed=typed["seed"],
-                    buf=typed.get("buf", None),
-                    include_step_stats_in_info=typed.get("include_step_stats_in_info", False),
-                    team_spirit=typed.get("team_spirit", 0.0))
+    config = EnvConfig(n_active_per_team=n_active_per_team,
+                       pin_pitch=1,
+                       crouch_enabled=0,
+                       round_time=160)
+    return make_env(map_data=make_arena_duel_map(), config=config, auto_reset=False, seed=11)
 
 
 def test_oracle_beats_random():
@@ -148,7 +134,7 @@ def test_eval_keys_and_selfplay_receives_elimination_only_rate():
 
 
 @pytest.mark.training
-def test_policy_actor_from_live_policy_fills_all_rows(simple_map):
+def test_policy_actor_from_live_policy_fills_all_rows(simple_map, monkeypatch):
     from cs2rl.eval.baselines import BaselineEvaluator, PolicyActor
     from tests._helpers.trainer_harness import _build_trainer_for_test
     trainer, cleanup = _build_trainer_for_test(num_envs=16, map_data=simple_map)
@@ -168,7 +154,7 @@ def test_policy_actor_from_live_policy_fills_all_rows(simple_map):
             c[:] = 0.123
             return a, c
 
-        opp.act = tagged
+        monkeypatch.setattr(opp, "act", tagged)
         seen = {}
         orig_step = env.step
 
@@ -176,7 +162,7 @@ def test_policy_actor_from_live_policy_fills_all_rows(simple_map):
             seen["cont"] = cont.copy()
             return orig_step(act, cont)
 
-        env.step = spy
+        monkeypatch.setattr(env, "step", spy)
         out = ev.run_pair(pa, opp)
         assert set(out) >= {"win", "win_as_t", "win_as_ct", "kills_per_episode"}
         # last episode was side=1 (policy on CT rows 5-9): T rows carry the opponent tag,

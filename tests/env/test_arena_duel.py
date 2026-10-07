@@ -100,6 +100,7 @@ def test_preset_geometry():
     assert all(md.centroids[i][0] == 150 for i in md.t_spawn_areas)
     assert all(md.centroids[i][0] == 350 for i in md.ct_spawn_areas)
     assert md.bombsite_dist_scale == 0.0 and not md.bombsite_mask.any()
+    assert md.vis_matrix is not None
     assert md.vis_matrix.all()                         # flat, no walls
     assert (md.adjacency.sum(1) >= 4).all()            # self + ≥3 neighbours (corner) — no isolated cell
     assert ARENA_DUEL_V1["cell_size"] == 20.0
@@ -306,8 +307,10 @@ def test_build_map_data_names():
     from cs2rl.train.envs import MAP_NAMES, build_map_data
     assert MAP_NAMES == ("simple", "dust2", "arena-duel")
     assert build_map_data("dust2") is None             # make_env(None) loads the nav map
-    assert build_map_data("arena-duel").N == 24
-    assert build_map_data("simple").N == 17
+    arena, simple = build_map_data("arena-duel"), build_map_data("simple")
+    assert arena is not None and simple is not None, "only dust2 maps to None"
+    assert arena.N == 24
+    assert simple.N == 17
     with pytest.raises(ValueError):
         build_map_data("nope")
 
