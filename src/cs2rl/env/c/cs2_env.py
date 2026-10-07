@@ -545,6 +545,7 @@ def _canonical_ctype_name(ctype):
     from here.
     """
     if issubclass(ctype, ctypes._Pointer):
+        # KNOWN LIMIT: pyrefly 1.2.0 rejects reading the generic `_type_` off `_Pointer`'s class.
         return "ptr_" + _canonical_ctype_name(ctype._type_)
     if issubclass(ctype, ctypes.Array):
         return f"arr_{_canonical_ctype_name(ctype._type_)}_{ctype._length_}"
@@ -589,12 +590,15 @@ def static_data_layout():
     the hash test unable to see a mirror edited at runtime — which is precisely
     how that test's discrimination check proves it is measuring something.
     """
-    names = [name for name, _ in StaticDataC._fields_]
+    # `*_` takes the optional bit width that typeshed allows in a `_fields_` entry.
+    # The prefix has no bitfields: binding.c's SD_LAYOUT_ROW takes offsetof and
+    # sizeof of every field, and C rejects both on a bitfield.
+    names = [name for name, *_ in StaticDataC._fields_]
     # ValueError here means the mirror lost its wall_list field, i.e. there is no
     # prefix boundary left to describe. Better than silently hashing everything.
     prefix_end = names.index("wall_list")
     fields = []
-    for name, ctype in StaticDataC._fields_[:prefix_end]:
+    for name, ctype, *_ in StaticDataC._fields_[:prefix_end]:
         field = getattr(StaticDataC, name)
         fields.append((name, field.offset, field.size, _canonical_ctype_name(ctype)))
     preamble = _static_data_preamble()
@@ -639,7 +643,7 @@ def static_data_layout():
 # stays green. That is what the two-env pigeonhole scheme in
 # tests/env/c/test_struct_sizes.py is for, and why W2 retires none of it.
 
-_SD_PREFIX_END = [_n for _n, _ in StaticDataC._fields_].index("wall_list")
+_SD_PREFIX_END = [_n for _n, *_ in StaticDataC._fields_].index("wall_list")
 
 # The ten pointer fields are NOT packed. C has to end up holding the numpy
 # buffers' own addresses — Cs2Env._refs keeps those alive for the env's lifetime
@@ -648,13 +652,13 @@ _SD_PREFIX_END = [_n for _n, _ in StaticDataC._fields_].index("wall_list")
 # tuple is the ORDER they are passed in: derived from the mirror rather than
 # hand-kept in step with a second list, which is the last place a positional
 # agreement survived after the format string went.
-_SD_POINTER_FIELDS = tuple(_n for _n, _t in StaticDataC._fields_[:_SD_PREFIX_END]
+_SD_POINTER_FIELDS = tuple(_n for _n, _t, *_ in StaticDataC._fields_[:_SD_PREFIX_END]
                            if issubclass(_t, ctypes._Pointer))
 # Everything else in the prefix travels in the buffer: the 56 scalars plus the
 # five inline arrays (delta_x, delta_y, dir_facing, t_spawns, ct_spawns).
 _SD_PACKED_TYPES = {
     _n: _t
-    for _n, _t in StaticDataC._fields_[:_SD_PREFIX_END] if not issubclass(_t, ctypes._Pointer)
+    for _n, _t, *_ in StaticDataC._fields_[:_SD_PREFIX_END] if not issubclass(_t, ctypes._Pointer)
 }
 
 # Inline spawn-array capacities, DERIVED from the mirror. `.size` is the field's
