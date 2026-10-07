@@ -106,7 +106,7 @@ class StaticDataC(ctypes.Structure):
         ("area_ids", ctypes.POINTER(ctypes.c_int32)),
         ("bombsite_mask", ctypes.POINTER(ctypes.c_int8)),
         ("bombsite_by_idx", ctypes.POINTER(ctypes.c_int8)),
-        # is_ramp: MapData bool is converted to int8 in Cs2Env.__init__ before passing
+        # is_ramp: MapData bool is converted to int8 by _map_arrays before passing
         ("is_ramp", ctypes.POINTER(ctypes.c_int8)),                    # int8[N] — 1=ramp/stairs
         ("bombsite_dist", ctypes.POINTER(ctypes.c_float)),
         ("grid_w", ctypes.c_int),
@@ -867,6 +867,169 @@ class _SharedFloat(Protocol):
     value: float
 
 
+def _resolve_team_spirit(
+        team_spirit: float | _SharedFloat | None) -> tuple[_SharedFloat | None, float]:
+    """Split Cs2Env's `team_spirit` argument into (shared handle, initial value).
+
+    team_spirit may be a float, None (0.0) or a shared multiprocessing.Value. A
+    shared Value is kept so reset() and step() can re-read it; its current value
+    is the one binding.init receives.
+    """
+    if isinstance(team_spirit, _SharedFloat):
+        return team_spirit, float(team_spirit.value)
+    if team_spirit is None:
+        return None, 0.0
+    return None, float(team_spirit)
+
+
+def _map_arrays(md: MapData) -> dict[str, np.ndarray]:
+    """The contiguous, C-typed arrays Cs2Env hands to binding.init, built from `md`.
+
+    Keyed by the StaticData field each one fills; the ten pointer fields use their C
+    field names. Insertion order is the order of Cs2Env._refs.
+
+    PITFALL: every value is a NEW array (flatten() always copies, is_ramp's
+    astype to int8 copies, the spawn and delta arrays are built here), so nothing
+    else holds them. The caller must keep every value alive for the env's lifetime
+    (Cs2Env._refs), or the C pointers dangle.
+    """
+
+    def _arr(a, dtype):
+        return np.ascontiguousarray(a.astype(dtype, copy=False).flatten())
+
+    vis_matrix = _arr(md.vis_matrix, np.int8)
+    raster_grid = _arr(md.grid, np.int32)
+    adjacency = _arr(md.adjacency, np.int8)
+    centroid_xy = _arr(md.centroids, np.float32)
+    # T2 (verticality): centroids_z must be float32 (C side reads as float*).
+    # _arr coerces dtype via astype, but if MapData ever passes the wrong dtype
+    # we want a loud error here, not silent coercion poisoning the C pointer.
+    centroids_z = _arr(md.centroids_z, np.float32)
+    if centroids_z.dtype != np.float32:
+        raise TypeError(f"centroids_z float32 conversion failed: dtype={centroids_z.dtype}; "
+                        "this would dangle the C-side sd->centroids_z pointer")
+    area_ids = _arr(md.area_ids, np.int32)
+    bombsite_mask = _arr(md.bombsite_mask, np.int8)
+    bombsite_by_idx = _arr(md.bombsite_by_idx, np.int8)
+    # T2 (verticality): is_ramp is bool in MapData but C reads int8*.
+    # Convert explicitly — numpy bool layout is platform-dependent.
+    # Pitfall: do NOT pass md.is_ramp directly — bool dtype may not
+    # be 1-byte on all platforms; int8 is guaranteed portable.
+    # np.ascontiguousarray guards against stride surprises post-astype.
+    is_ramp_int8 = np.ascontiguousarray(md.is_ramp.astype(np.int8))
+    if is_ramp_int8.dtype != np.int8 or is_ramp_int8.itemsize != 1:
+        raise ValueError(f"is_ramp int8 conversion failed: dtype={is_ramp_int8.dtype}, "
+                         f"itemsize={is_ramp_int8.itemsize}; "
+                         "this would dangle the C-side sd->is_ramp pointer")
+    bombsite_dist = _arr(md.bombsite_dist, np.float32)
+
+    id2idx = {int(aid): i for i, aid in enumerate(md.area_ids)}
+    return {
+        "vis_matrix": vis_matrix,
+        "raster_grid": raster_grid,
+        "adjacency": adjacency,
+        "centroid_xy": centroid_xy,
+        "centroids_z": centroids_z,
+        "area_ids": area_ids,
+        "bombsite_mask": bombsite_mask,
+        "bombsite_by_idx": bombsite_by_idx,
+        "is_ramp": is_ramp_int8,
+        "bombsite_dist": bombsite_dist,
+        "t_spawns": np.array([id2idx[a] for a in md.t_spawn_areas], dtype=np.int32),
+        "ct_spawns": np.array([id2idx[a] for a in md.ct_spawn_areas], dtype=np.int32),
+        "delta_x": np.array([float(nav._DELTA_VECTORS[k][0]) for k in range(9)], dtype=np.float32),
+        "delta_y": np.array([float(nav._DELTA_VECTORS[k][1]) for k in range(9)], dtype=np.float32),
+        "dir_facing": np.array([float(nav._DIR_FACING[k]) for k in range(9)], dtype=np.float32),
+    }
+
+
+def _pointer_arrays(arrays: dict[str, np.ndarray]) -> dict[str, np.ndarray]:
+    """The ten arrays binding.init takes as pointers, keyed by C field name.
+
+    Cs2Env._init_native unpacks them through _SD_POINTER_FIELDS, so the ORDER they
+    reach binding.init is derived from StaticDataC rather than kept in step by hand.
+    T2's centroids_z (after centroid_xy) and is_ramp (after bombsite_by_idx) are
+    the reason that used to be fragile: an insertion in the middle of the struct
+    silently handed one array's buffer to the next field's pointer. The names are
+    listed here by hand on purpose, and checked against StaticDataC below.
+    """
+    pointer_arrays = {
+        name: arrays[name]
+        for name in ("vis_matrix", "raster_grid", "adjacency", "centroid_xy", "centroids_z",
+                     "area_ids", "bombsite_mask", "bombsite_by_idx", "is_ramp", "bombsite_dist")
+    }
+    if set(pointer_arrays) != set(_SD_POINTER_FIELDS):
+        raise RuntimeError(
+            "the pointer arguments to binding.init and StaticDataC's pointer fields disagree: "
+            f"no array for {sorted(set(_SD_POINTER_FIELDS) - set(pointer_arrays))}, "
+            f"not a pointer field {sorted(set(pointer_arrays) - set(_SD_POINTER_FIELDS))}")
+    return pointer_arrays
+
+
+def _resolve_sim_knobs(config: EnvConfig) -> tuple[int, float, float]:
+    """(round_time, laser_range, max_turn_speed): the R0-G knobs, None resolved and validated.
+
+    Rung 0 R0-G: env knobs. None ⇒ the env/nav.py constant, so demo/test/
+    deploy callers that never pass them keep today's values byte-for-byte
+    (sim fingerprints at defaults must not move). Validated here, not in
+    C, for the same reason as n_active_per_team (see Cs2Env.__init__): a C
+    assert kills a forked Puffer worker silently. round_time is rejected (not
+    truncated) when non-integral — int(2.5) would run a different episode
+    length than the config recorded.
+
+    WHICH OF THESE CHECKS IS THE ONLY ONE (#165): a NON-None value
+    arriving here has already passed the identical check in
+    EnvConfig.__post_init__ (round_time integral and > 0; laser_range and
+    max_turn_speed > 0, NaN rejected) and round_time is already an int —
+    Cs2Env.__init__ type-checks `config` as an EnvConfig before calling this —
+    which makes those repeats a second line of defence. What this function is
+    the ONLY line of defence for is the env/nav.py constant substituted when a
+    knob is None: env/config.py may not import nav (its stdlib-only import
+    budget), so nothing checks ROUND_TIME / LASER_RANGE / MAX_TURN_SPEED_RAD
+    until here.
+
+    PITFALL: laser_range_sq is derived from the resolved laser_range in
+    Cs2Env._static_data_values; never accept it as a separate kwarg or the range
+    check and the damage falloff would disagree.
+    """
+    round_time = config.round_time
+    laser_range = config.laser_range
+    max_turn_speed = config.max_turn_speed
+    if round_time is None:
+        round_time = nav.ROUND_TIME
+    if int(round_time) != round_time:
+        raise ValueError(f"round_time must be an integer tick count, got {round_time!r}")
+    round_time = int(round_time)
+    laser_range = float(nav.LASER_RANGE if laser_range is None else laser_range)
+    max_turn_speed = float(nav.MAX_TURN_SPEED_RAD if max_turn_speed is None else max_turn_speed)
+    if round_time <= 0:
+        raise ValueError(f"round_time must be > 0, got {round_time}")
+    if not laser_range > 0.0:          # `not >` also rejects NaN
+        raise ValueError(f"laser_range must be > 0, got {laser_range}")
+    if not max_turn_speed > 0.0:
+        raise ValueError(f"max_turn_speed must be > 0, got {max_turn_speed}")
+    return round_time, laser_range, max_turn_speed
+
+
+def _check_spawn_capacity(md: MapData) -> tuple[int, int]:
+    """(T spawn count, CT spawn count), after checking both fit StaticData's inline arrays.
+
+    Fixed-size packing turned over-capacity from a C-side buffer overrun (the old
+    `memcpy(sd->t_spawns, ..., n * sizeof(int32_t))` copied whatever it was told
+    to) into silent truncation, so it needs an error of its own. Capacities come
+    from the mirror — see _T_SPAWN_CAPACITY.
+    """
+    n_t_spawns = len(md.t_spawn_areas)
+    n_ct_spawns = len(md.ct_spawn_areas)
+    if n_t_spawns > _T_SPAWN_CAPACITY:
+        raise ValueError(f"map has {n_t_spawns} T spawn areas but StaticData.t_spawns holds "
+                         f"{_T_SPAWN_CAPACITY}")
+    if n_ct_spawns > _CT_SPAWN_CAPACITY:
+        raise ValueError(f"map has {n_ct_spawns} CT spawn areas but StaticData.ct_spawns "
+                         f"holds {_CT_SPAWN_CAPACITY}")
+    return n_t_spawns, n_ct_spawns
+
+
 class Cs2Env(pufferlib.PufferEnv):
 
     def __init__(
@@ -886,15 +1049,19 @@ class Cs2Env(pufferlib.PufferEnv):
         `config` (spec 2026-09-03 §2.1) is the ONLY source of reward weights and
         sim knobs; it is validated on construction, so by the time it reaches
         here every non-None value is in range and every flag is 0/1. The None
-        R0-G knobs are resolved to the env/nav.py constant BELOW and re-validated
-        there — that resolved-value check is deliberately kept (spec §2.1).
-        The keyword-only inputs describe this instance, not the dynamics, and
-        config.json does not record them (spec §2.2).
+        R0-G knobs are resolved to the env/nav.py constant in _resolve_sim_knobs
+        and re-validated there — that resolved-value check is deliberately kept
+        (spec §2.1). The keyword-only inputs describe this instance, not the
+        dynamics, and config.json does not record them (spec §2.2).
+
+        Order: map arrays (_map_arrays, kept alive in self._refs), the Rung 0
+        flags, the R0-G knobs, the spawn-capacity check, then the C env
+        (_static_data_values packs StaticData, _init_native calls binding.init),
+        then the Python-side views and per-step scratch.
         """
         if not isinstance(config, EnvConfig):
             raise TypeError(f"config must be an EnvConfig, got {type(config).__name__}")
         self.config = config
-        rw = config.rewards
         self.single_observation_space = gymnasium.spaces.Box(low=-5.0,
                                                              high=5.0,
                                                              shape=(OBS_DIM, ),
@@ -907,82 +1074,15 @@ class Cs2Env(pufferlib.PufferEnv):
         self.map_data = map_data
         self._auto_reset = bool(auto_reset)
         self._uses_external_buffers = buf is not None
+        self._team_spirit_shared, init_team_spirit = _resolve_team_spirit(team_spirit)
 
-        # team_spirit may be a float, None (0.0) or a shared multiprocessing.Value
-        self._team_spirit_shared: _SharedFloat | None = None
-        if isinstance(team_spirit, _SharedFloat):
-            self._team_spirit_shared = team_spirit
-            init_team_spirit = float(team_spirit.value)
-        elif team_spirit is None:
-            init_team_spirit = 0.0
-        else:
-            init_team_spirit = float(team_spirit)
-
-        md = map_data
-
-        def _arr(a, dtype):
-            return np.ascontiguousarray(a.astype(dtype, copy=False).flatten())
-
-        vis_matrix = _arr(md.vis_matrix, np.int8)
-        raster_grid = _arr(md.grid, np.int32)
-        adjacency = _arr(md.adjacency, np.int8)
-        centroid_xy = _arr(md.centroids, np.float32)
-        # T2 (verticality): centroids_z must be float32 (C side reads as float*).
-        # _arr coerces dtype via astype, but if MapData ever passes the wrong dtype
-        # we want a loud error here, not silent coercion poisoning the C pointer.
-        centroids_z = _arr(md.centroids_z, np.float32)
-        if centroids_z.dtype != np.float32:
-            raise TypeError(f"centroids_z float32 conversion failed: dtype={centroids_z.dtype}; "
-                            "this would dangle the C-side sd->centroids_z pointer")
-        area_ids = _arr(md.area_ids, np.int32)
-        bombsite_mask = _arr(md.bombsite_mask, np.int8)
-        bombsite_by_idx = _arr(md.bombsite_by_idx, np.int8)
-        # T2 (verticality): is_ramp is bool in MapData but C reads int8*.
-        # Convert explicitly — numpy bool layout is platform-dependent.
-        # Pitfall: do NOT pass md.is_ramp directly — bool dtype may not
-        # be 1-byte on all platforms; int8 is guaranteed portable.
-        # np.ascontiguousarray guards against stride surprises post-astype.
-        is_ramp_int8 = np.ascontiguousarray(md.is_ramp.astype(np.int8))
-        if is_ramp_int8.dtype != np.int8 or is_ramp_int8.itemsize != 1:
-            raise ValueError(f"is_ramp int8 conversion failed: dtype={is_ramp_int8.dtype}, "
-                             f"itemsize={is_ramp_int8.itemsize}; "
-                             "this would dangle the C-side sd->is_ramp pointer")
-        bombsite_dist = _arr(md.bombsite_dist, np.float32)
-
-        inv_x = 2.0 / (md.x_max - md.x_min)
-        inv_y = 2.0 / (md.y_max - md.y_min)
-        x_off = (md.x_max + md.x_min) / (md.x_max - md.x_min)
-        y_off = (md.y_max + md.y_min) / (md.y_max - md.y_min)
-
-        id2idx = {int(aid): i for i, aid in enumerate(md.area_ids)}
-        t_spawns = np.array([id2idx[a] for a in md.t_spawn_areas], dtype=np.int32)
-        ct_spawns = np.array([id2idx[a] for a in md.ct_spawn_areas], dtype=np.int32)
-        delta_x = np.array([float(nav._DELTA_VECTORS[k][0]) for k in range(9)], dtype=np.float32)
-        delta_y = np.array([float(nav._DELTA_VECTORS[k][1]) for k in range(9)], dtype=np.float32)
-        dir_facing = np.array([float(nav._DIR_FACING[k]) for k in range(9)], dtype=np.float32)
-
-        # Keep refs alive — prevents GC of backing numpy arrays.
-        # T2 (verticality): centroids_z and is_ramp_int8 added here so the C pointers
-        # sd->centroids_z and sd->is_ramp remain valid for the env's lifetime.
-        # is_ramp_int8 is a NEW array (result of .astype); it would be collected
-        # immediately if not held here — the C pointer would then dangle.
-        self._refs = [
-            vis_matrix,
-            raster_grid,
-            adjacency,
-            centroid_xy,
-            centroids_z,
-            area_ids,
-            bombsite_mask,
-            bombsite_by_idx,
-            is_ramp_int8,
-            bombsite_dist,
-            t_spawns,
-            ct_spawns,
-            delta_x,
-            delta_y,
-            dir_facing,
-        ]
+        arrays = _map_arrays(map_data)
+        # Keep refs alive — prevents GC of backing numpy arrays. Every array
+        # _map_arrays returns is held here for the env's lifetime, so the C
+        # pointers sd->centroids_z, sd->is_ramp and the rest stay valid.
+        # is_ramp's int8 copy is a NEW array (result of .astype); it would be
+        # collected immediately if not held here — the C pointer would then dangle.
+        self._refs = list(arrays.values())
 
         # Rung 0 (spec 2026-08-29 §2.1): these are validated BEFORE binding.init,
         # in Python, and since #165 that validation lives in
@@ -998,58 +1098,36 @@ class Cs2Env(pufferlib.PufferEnv):
         self.pin_pitch = config.pin_pitch
         self.crouch_enabled = config.crouch_enabled
         self.jump_enabled = config.jump_enabled
+        self._round_time, self._laser_range, self._max_turn_speed = _resolve_sim_knobs(config)
+        n_t_spawns, n_ct_spawns = _check_spawn_capacity(map_data)
 
-        # Rung 0 R0-G: env knobs. None ⇒ the env/nav.py constant, so demo/test/
-        # deploy callers that never pass them keep today's values byte-for-byte
-        # (sim fingerprints at defaults must not move). Validated here, not in
-        # C, for the same reason as n_active_per_team above: a C assert kills a
-        # forked Puffer worker silently. round_time is rejected (not truncated)
-        # when non-integral — int(2.5) would run a different episode length
-        # than the config recorded.
-        # WHICH OF THESE CHECKS IS THE ONLY ONE (#165): a NON-None value
-        # arriving here has already passed the identical check in
-        # EnvConfig.__post_init__ (round_time integral and > 0; laser_range and
-        # max_turn_speed > 0, NaN rejected) and round_time is already an int —
-        # `config` is type-checked as an EnvConfig at the top of __init__, so
-        # that holds for every caller — which makes those repeats a second line
-        # of defence. What this block is the ONLY line of defence for is the
-        # env/nav.py constant substituted when a knob is None: env/config.py may not
-        # import nav (its stdlib-only import budget), so nothing checks
-        # ROUND_TIME / LASER_RANGE / MAX_TURN_SPEED_RAD until here.
-        # PITFALL: laser_range_sq is derived from _laser_range below; never
-        # accept it as a separate kwarg or the range check and the damage
-        # falloff would disagree.
-        round_time = config.round_time
-        laser_range = config.laser_range
-        max_turn_speed = config.max_turn_speed
-        if round_time is None:
-            round_time = nav.ROUND_TIME
-        if int(round_time) != round_time:
-            raise ValueError(f"round_time must be an integer tick count, got {round_time!r}")
-        self._round_time = int(round_time)
-        self._laser_range = float(nav.LASER_RANGE if laser_range is None else laser_range)
-        self._max_turn_speed = float(nav.MAX_TURN_SPEED_RAD if max_turn_speed is
-                                     None else max_turn_speed)
-        if self._round_time <= 0:
-            raise ValueError(f"round_time must be > 0, got {self._round_time}")
-        if not self._laser_range > 0.0:                # `not >` also rejects NaN
-            raise ValueError(f"laser_range must be > 0, got {self._laser_range}")
-        if not self._max_turn_speed > 0.0:
-            raise ValueError(f"max_turn_speed must be > 0, got {self._max_turn_speed}")
+        self._init_native(self._static_data_values(map_data, arrays, n_t_spawns, n_ct_spawns),
+                          _pointer_arrays(arrays), seed, init_team_spirit)
 
-        # Spawn counts must fit the inline arrays. Fixed-size packing turned
-        # over-capacity from a C-side buffer overrun (the old
-        # `memcpy(sd->t_spawns, ..., n * sizeof(int32_t))` copied whatever it
-        # was told to) into silent truncation, so it needs an error of its own.
-        # Capacities come from the mirror — see _T_SPAWN_CAPACITY.
-        n_t_spawns = len(md.t_spawn_areas)
-        n_ct_spawns = len(md.ct_spawn_areas)
-        if n_t_spawns > _T_SPAWN_CAPACITY:
-            raise ValueError(f"map has {n_t_spawns} T spawn areas but StaticData.t_spawns holds "
-                             f"{_T_SPAWN_CAPACITY}")
-        if n_ct_spawns > _CT_SPAWN_CAPACITY:
-            raise ValueError(f"map has {n_ct_spawns} CT spawn areas but StaticData.ct_spawns "
-                             f"holds {_CT_SPAWN_CAPACITY}")
+        # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
+        # (that call carries the StaticData prefix and this flag lives on
+        # Dust2Env, so there is no slot for it). env_init memsets Dust2Env so
+        # this starts 0; env_reset memsets GameState only, so the flag survives
+        # reset. Train / Modal stay off unless a later card passes recoil=True
+        # into make_env.
+        self._c_env.recoil_enabled = 1 if config.recoil else 0
+        self._attach_area_bounds(map_data)
+        self._bind_buffer_views()
+        self._init_step_scratch(include_step_stats_in_info)
+
+    def _static_data_values(self, md: MapData, arrays: dict[str, np.ndarray], n_t_spawns: int,
+                            n_ct_spawns: int) -> dict[str, Any]:
+        """The value of every packed StaticData field, keyed by C field name.
+
+        Reads the Rung 0 flags and the resolved R0-G knobs off self, so
+        Cs2Env.__init__ sets those first; the map geometry comes from `md` and the
+        five content-copied arrays from `arrays` (_map_arrays).
+        """
+        rw = self.config.rewards
+        inv_x = 2.0 / (md.x_max - md.x_min)
+        inv_y = 2.0 / (md.y_max - md.y_min)
+        x_off = (md.x_max + md.x_min) / (md.x_max - md.x_min)
+        y_off = (md.y_max + md.y_min) / (md.y_max - md.y_min)
 
         # One named assignment per packed StaticData field, listed in
         # cs2_types.h declaration order so this block and StaticDataC._fields_
@@ -1092,15 +1170,15 @@ class Cs2Env(pufferlib.PufferEnv):
             "gunshot_radius_sq": float(nav.GUNSHOT_RADIUS * nav.GUNSHOT_RADIUS),
             "enemy_memory_ticks": int(nav.ENEMY_MEMORY_TICKS),
             "stale_memory_tick": int(nav.STALE_MEMORY_TICK),
-            "pbrs_gamma": float(config.pbrs_gamma),
+            "pbrs_gamma": float(self.config.pbrs_gamma),
             # The five content-copied arrays. Slots past the sequence length stay
             # zero — see the tail-semantics note in _pack_static_data.
-            "delta_x": delta_x,
-            "delta_y": delta_y,
-            "dir_facing": dir_facing,
-            "t_spawns": t_spawns,
+            "delta_x": arrays["delta_x"],
+            "delta_y": arrays["delta_y"],
+            "dir_facing": arrays["dir_facing"],
+            "t_spawns": arrays["t_spawns"],
             "n_t_spawns": n_t_spawns,
-            "ct_spawns": ct_spawns,
+            "ct_spawns": arrays["ct_spawns"],
             "n_ct_spawns": n_ct_spawns,
             "max_turn_speed": float(self._max_turn_speed),                      # R0-G knob
             "reward_win": float(rw.reward_win),                                    # legacy symmetric
@@ -1132,32 +1210,11 @@ class Cs2Env(pufferlib.PufferEnv):
             "jump_enabled": self.jump_enabled,                                  # Rung 1a
         }
         # fmt: on
+        return static_data
 
-        # The ten pointer fields, keyed by C field name and unpacked through
-        # _SD_POINTER_FIELDS below so the ORDER they reach binding.init is
-        # derived from StaticDataC rather than kept in step by hand. T2's
-        # centroids_z (after centroid_xy) and is_ramp (after bombsite_by_idx)
-        # are the reason that used to be fragile: an insertion in the middle of
-        # the struct silently handed one array's buffer to the next field's
-        # pointer.
-        pointer_arrays = {
-            "vis_matrix": vis_matrix,
-            "raster_grid": raster_grid,
-            "adjacency": adjacency,
-            "centroid_xy": centroid_xy,
-            "centroids_z": centroids_z,
-            "area_ids": area_ids,
-            "bombsite_mask": bombsite_mask,
-            "bombsite_by_idx": bombsite_by_idx,
-            "is_ramp": is_ramp_int8,
-            "bombsite_dist": bombsite_dist,
-        }
-        if set(pointer_arrays) != set(_SD_POINTER_FIELDS):
-            raise RuntimeError(
-                "the pointer arguments to binding.init and StaticDataC's pointer fields disagree: "
-                f"no array for {sorted(set(_SD_POINTER_FIELDS) - set(pointer_arrays))}, "
-                f"not a pointer field {sorted(set(pointer_arrays) - set(_SD_POINTER_FIELDS))}")
-
+    def _init_native(self, static_data: dict[str, Any], pointer_arrays: dict[str, np.ndarray], seed,
+                     init_team_spirit: float) -> None:
+        """binding.init, the ctypes overlay of the C env, and the C-side Rung 0 check."""
         # seed and team_spirit are not StaticData fields — env_init takes them
         # directly — so they keep argument slots. The layout hash is Python's own
         # (derived from StaticDataC, the same declaration the buffer was packed
@@ -1187,16 +1244,10 @@ class Cs2Env(pufferlib.PufferEnv):
             raise RuntimeError(
                 f"C StaticData.n_active_per_team is {_sc['n_active_per_team']}, expected "
                 f"{self.n_active_per_team} — the buffer C copied and the `static_data` mapping "
-                "packed above disagree")
+                "Cs2Env._static_data_values packed disagree")
 
-        # Sim recoil v1 (#120): write AFTER the overlay, not via binding.init
-        # (that call carries the StaticData prefix and this flag lives on
-        # Dust2Env, so there is no slot for it). env_init memsets Dust2Env so
-        # this starts 0; env_reset memsets GameState only, so the flag survives
-        # reset. Train / Modal stay off unless a later card passes recoil=True
-        # into make_env.
-        self._c_env.recoil_enabled = 1 if config.recoil else 0
-
+    def _attach_area_bounds(self, md: MapData) -> None:
+        """Point sd->area_bounds at the map's room AABBs, when the map has them."""
         # Room AABB for ramp interpolation. Not a binding.init arg (it is a
         # pointer into a Python-owned buffer, not a scalar). make_simple_map fills area_bounds from SIMPLE_ROOMS;
         # make_cs2_map leaves None so interpolation stays centroids_z.
@@ -1208,7 +1259,8 @@ class Cs2Env(pufferlib.PufferEnv):
             self._refs.append(ab)
             self._c_env.sd.contents.area_bounds = ab.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
 
-        # Zero-copy NumPy views into C buffers
+    def _bind_buffer_views(self) -> None:
+        """Zero-copy NumPy views into the C env's buffers, and PufferEnv's slots onto them."""
         obs_ptr, rew_ptr, term_ptr, trunc_ptr = binding.get_buffers(self._capsule)
         masks_ptr = binding.get_masks(self._capsule)
         self._masks_view = np.frombuffer(
@@ -1232,6 +1284,8 @@ class Cs2Env(pufferlib.PufferEnv):
             self.terminals = self._term_view
             self.truncations = self._trunc_view
 
+    def _init_step_scratch(self, include_step_stats_in_info: bool) -> None:
+        """Per-step scratch buffers, the shared-memory view slots and the info lists."""
         self._actions_shape = (N_AGENTS, ACTION_DIM)
         self._actions_scratch = np.zeros(self._actions_shape, dtype=np.int32)
         # Batch 3: continuous-aim Δyaw scratch buffer (N_AGENTS, AIM_DIM=1) float32.
@@ -1271,7 +1325,7 @@ class Cs2Env(pufferlib.PufferEnv):
         # Spec 2026-08-01 §4.3: Python-layer zero-sum transform, applied at the
         # very end of step(). No StaticDataC field and no C rebuild — the
         # binding cannot be rebuilt on this box (issue #101).
-        self._reward_symmetrize = bool(config.reward_symmetrize)
+        self._reward_symmetrize = bool(self.config.reward_symmetrize)
         # Task 6a: optional per-tick step_stats view in info (see utof/cs2rl#7).
         # Zero cost when flag is off; constructed once at init when flag is on.
         # _nonterminal_infos is a pre-built list[dict] reused every non-terminal
