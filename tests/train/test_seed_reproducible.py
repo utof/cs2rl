@@ -135,6 +135,7 @@ def test_serial_vecenv_envs_get_distinct_rng_streams(simple_map):
                                    num_envs=n,
                                    backend=pufferlib.vector.Serial)
     try:
+        assert isinstance(vecenv, pufferlib.vector.Serial)
         rngs = {e._c_env.rng for e in vecenv.envs}
         assert len(rngs) == n and 0 not in rngs, rngs
         assert rngs == {_mix(env_seed_base(3) + i) for i in range(n)}

@@ -37,6 +37,7 @@ def _make(num_envs=16, seed=3):
                           win_threshold=0.6,
                           phase_length=50)
     trainer, cleanup = _build_trainer_for_test(num_envs=num_envs, seed=seed, self_play_mgr=mgr)
+    assert trainer.logger is not None, "PuffeRL.__init__ replaces a None logger with NoLogger"
     trainer.logger.run_id = "rid-test"
     return trainer, mgr, cleanup
 
@@ -60,7 +61,7 @@ def _snapshot(trainer, mgr):
                                                                                    # RNG STATES (not fresh draws — a draw-based compare is one stray
                                                                                    # torch.randn away from flaky).
         "py_random": random.getstate(),
-        "np_random": np.random.get_state()[1].tobytes(),
+        "np_random": np.random.get_state(legacy=False)["state"]["key"].tobytes(),
         "torch_random": torch.get_rng_state().numpy().tobytes(),
         "warmstart": {
             k: getattr(trainer, k)

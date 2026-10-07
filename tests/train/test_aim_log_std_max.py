@@ -337,7 +337,9 @@ def test_raw_key_reports_a_sigma_pushed_past_the_cap():
     # and from here σ is frozen — which is precisely what the raw key exposes
     pol.zero_grad(set_to_none=True)
     (-pol.get_action_and_value(obs)[3].sum()).backward()
-    assert float(pol.aim_log_std.grad.abs().max()) == 0.0
+    grad = pol.aim_log_std.grad
+    assert grad is not None, "backward() reached aim_log_std"
+    assert float(grad.abs().max()) == 0.0
 
 
 @pytest.mark.parametrize("split", [False, True], ids=["legacy", "split"])

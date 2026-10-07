@@ -1355,10 +1355,11 @@ def test_hybrid_sample_logits_returns_per_factor_halves():
 
     # Bit-equivalence with the rebuild pattern that the rollout caller
     # used to do (and which Fix #1 deletes). Same math, same inputs →
-    # same bits. allclose with atol=0 is the strongest assertion.
+    # same bits, checked with allclose at atol=1e-7.
     rebuild_lp_d = sum(
         torch.distributions.Categorical(logits=lg).log_prob(action[..., i])
         for i, lg in enumerate(logits_list))
+    assert isinstance(rebuild_lp_d, torch.Tensor)                      # sum() starts at int 0; tensors make it a tensor
     sigma = torch.exp(log_std_aim).expand_as(mu_aim)
     rebuild_lp_c = (torch.distributions.Normal(mu_aim, sigma).log_prob(cont_action).sum(-1))
     assert torch.allclose(lp_d, rebuild_lp_d, atol=1e-7), \
@@ -1477,6 +1478,8 @@ def test_hybrid_ppo_loss_matches_torch_distributions_reference():
                 torch.distributions.Categorical(logits=lg, validate_args=False) for lg in ref_logits
             ]
             ref_logp_d = sum(d.log_prob(mb_actions[..., i]) for i, d in enumerate(ref_dists_d))
+            assert isinstance(ref_logp_d,
+                              torch.Tensor)            # sum() starts at int 0; tensors make it a tensor
             ref_sigma = torch.exp(ref_log_std).expand_as(ref_mu)
             ref_dist_c = torch.distributions.Normal(ref_mu, ref_sigma, validate_args=False)
             ref_logp_c = ref_dist_c.log_prob(mb_cont_actions).sum(-1)
@@ -1934,6 +1937,7 @@ def test_hybrid_sample_logits_respects_masks():
     for h, (lo, hi) in enumerate(_MASK_HEAD_SLICES):
         ref_logits = logits_list[h].masked_fill(~mask[:, lo:hi], float("-inf"))
         ref = ref + torch.distributions.Categorical(logits=ref_logits).log_prob(fixed_action[:, h])
+    assert isinstance(ref, torch.Tensor)                                         # the 0.0 start became a tensor on head 0
     assert torch.allclose(lp_d_eval, ref,
                           atol=1e-5), (f"masked log_prob_d drift vs reference: "
                                        f"{(lp_d_eval - ref).abs().max().item():.2e}")

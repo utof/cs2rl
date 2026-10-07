@@ -283,15 +283,14 @@ def test_bc_loss_decreases_on_tiny_fit(policy):
     p = copy.deepcopy(policy)
     obs_t, disc_t, cont_t, valid_t = _fake_batch(b=2, t=3, seed=2)
     opt = torch.optim.Adam(p.parameters(), lr=1e-3)
-    first, last = None, None
-    for step in range(60):
+    losses = []
+    for _ in range(60):
         loss, _ = train_bc.bc_loss(p, obs_t, disc_t, cont_t, valid=valid_t)
         opt.zero_grad(set_to_none=True)
         loss.backward()
         opt.step()
-        if step == 0:
-            first = loss.item()
-        last = loss.item()
+        losses.append(loss.item())
+    first, last = losses[0], losses[-1]
     assert last < first - 1.0, f"BC loss barely moved: {first:.3f} → {last:.3f}"
 
 
@@ -369,6 +368,8 @@ def test_build_bc_policy_is_reproducible_under_seed():
 # ── demo provenance ────────────────────────────────────────────────────────
 
 
+# KNOWN LIMIT: numpy's savez stub has a keyword `allow_pickle: bool`, so `np.savez(path, **d)` of
+# this mixed-value dict is a snapshot row: a checker cannot rule out that key in a `**` dict.
 def _demo_dict(**overrides):
     """Minimal spec-§7-shaped demo payload; overrides patch individual keys."""
     T = 3

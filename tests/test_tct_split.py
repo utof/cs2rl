@@ -436,7 +436,7 @@ def test_resolve_resume_split_infers_and_never_narrows(env, tmp_path):
                                                             trunk_flag=False)
     assert heads is True, "split checkpoint must be detected without the flag"
     assert trunk is False, "heads-split fixtures have no encoder_t.0.weight"
-    assert "aim_log_std_t" in sd, "the sniffed dict must be returned for reuse"
+    assert sd is not None and "aim_log_std_t" in sd, "the sniffed dict must be returned for reuse"
     heads, trunk, _sd, _ = train_resume.resolve_resume_split(str(split_pt),
                                                              heads_flag=True,
                                                              trunk_flag=False)
@@ -658,7 +658,9 @@ def test_head_divergence_exceeds_the_decay_aware_null(env):
         p = policy_mod.build_policy(env, device="cpu", tct_split_heads=True)
         with torch.no_grad():          # identical seeded gap in both arms
             p.aim_mu_ct.bias.add_(0.05)
-            p.action_heads_ct[0].bias.add_(0.05)
+            head0_ct = p.action_heads_ct[0]
+            assert isinstance(head0_ct, torch.nn.Linear)
+            head0_ct.bias.add_(0.05)
         opt = torch.optim.Adam(p.parameters(), lr=1e-3, weight_decay=1e-4)
         x = _obs(8, 8, seed=1)
         adv = (torch.cat([torch.ones(8), -torch.ones(8)]) if asymmetric else torch.zeros(16))

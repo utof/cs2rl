@@ -268,6 +268,7 @@ def _ratio_c_after_rollout(pin_pitch, map_data, num_envs=8):
         trainer.evaluate()
         assert trainer._selfplay_used_past
         past = mgr.load_past_policy(trainer.config["device"], trainer.vecenv)
+        assert past is not None, "the pool holds the snapshot added above"
         assert torch.equal(past.aim_dim_mask, trainer.policy.aim_dim_mask)
         assert past.aim_log_std_max == trainer.policy.aim_log_std_max
         idx = torch.arange(trainer.segments)
