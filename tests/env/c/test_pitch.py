@@ -9,6 +9,13 @@ T4 (obs slots), T5 (3D combat). Each test_X is tagged with the task that owns it
 import numpy as np
 import pytest
 
+from tests._helpers.scenario import (
+    assert_state_consistent,
+    place_agent,
+    ready_to_fire,
+    zero_actions,
+)
+
 # ── T1 tests ──────────────────────────────────────────────────────────────
 
 
@@ -43,19 +50,6 @@ def test_pitch_initialized_to_zero():
 # ── T2 tests ──────────────────────────────────────────────────────────────
 
 
-def _zero_actions():
-    """Helper: zero discrete + continuous actions for all 10 agents (AIM_DIM=2).
-
-    Returns (discrete_actions, continuous_actions) ready to feed env.step().
-    discrete_actions: int32 (10, ACTION_DIM); continuous_actions: float32 (10, AIM_DIM).
-    """
-    from cs2rl.spec import action as spec
-    return (
-        np.zeros((10, spec.ACTION_DIM), dtype=np.int32),
-        np.zeros((10, spec.AIM_DIM), dtype=np.float32),
-    )
-
-
 def test_pitch_consumed_from_continuous_actions():
     """T2 (v1c, gh #36 fix B-3): continuous_actions[:, 1] becomes ABSOLUTE pitch.
 
@@ -75,7 +69,7 @@ def test_pitch_consumed_from_continuous_actions():
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         cont[0, 1] = 0.05                                              # +0.05 rad pitch up (small, well below max_turn_speed)
         env.step(actions, cont)
         assert env._c_env.game.agents[0].pitch == pytest.approx(
@@ -101,7 +95,7 @@ def test_pitch_clamps_at_pi_over_2_up():
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         cont[0, 1] = 100.0                                             # massive positive absolute pitch target — bounded clamp fires
         for _ in range(100):
             env.step(actions, cont)
@@ -138,7 +132,7 @@ def test_welford_pitch_accumulates():
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map(), include_step_stats_in_info=True)
     try:
         obs, info = env.reset(seed=42)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         cont[:, 1] = 0.1               # +0.1 absolute pitch target for every alive agent
         for _ in range(5):
             obs, rew, term, trunc, info = env.step(actions, cont)
@@ -213,7 +207,7 @@ def test_obs_pitch_sin_cos_populated():
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         cont[0, 1] = 0.5               # ~28.6° absolute pitch (v1c semantics)
         env.step(actions, cont)
         obs = env.observations[0]
@@ -227,31 +221,21 @@ def test_obs_pitch_sin_cos_populated():
 # ── T5 tests ──────────────────────────────────────────────────────────────
 
 
-def _setup_3d_hit_scenario(env, sx, sy, sz, shooter_area_idx, tx, ty, tz, target_area_idx):
-    """Helper: place agent[0] (T) and agent[5] (CT) at given positions with
-    correct yaw, ready to shoot.
+def _setup_3d_hit_scenario(env, shooter, target):
+    """Place agent[0] (T) at `shooter` and agent[5] (CT) at `target`, standing on the floor,
+    agent 0 facing agent 5 and ready to shoot.
 
     Args:
         env: Cs2Env instance (already reset).
-        sx, sy, sz: shooter position in world units.
-        shooter_area_idx: nav area_idx for shooter position. MUST match (sx, sy, sz)
-            so that the vis_matrix check (build_vis_matrix uses area_idx, NOT x/y)
-            gates correctly. Pitfall: env.reset() places agents at spawn positions;
-            if we only set x/y/z without updating area_idx, the combat vis check
-            will use the OLD area_idx from the spawn position. Always keep in sync.
-        tx, ty, tz: target position in world units.
-        target_area_idx: nav area_idx for target position (same sync requirement).
+        shooter, target: (x, y) world positions. area_idx and z come from the sim
+            (scenario.place_agent): the area that holds the point and its floor, which
+            on a ramp (is_ramp=1, e.g. 13/14/16 in make_simple_map) is the interpolated
+            surface the ground-snap writes, not centroids_z (the ramp's top).
 
-    RAMP PITFALL: sz/tz are only honoured on FLAT areas. On a ramp area
-    (is_ramp=1, e.g. 13/14/16 in make_simple_map) the ground-snap in
-    cs2_movement.h::process_movement overwrites z with the interpolated surface
-    z of the ramp quad on the very next env.step, before combat resolves. Never
-    compute a pitch from an sz you passed here for a ramp — step once without
-    firing and read the settled `agents[i].z` back instead. See
-    test_3d_hit_pitch_down_from_ramp.
-
-    Resets fire_cd / reload_ticks / switch_ticks / is_crouching / is_airborne
-    on both agents so a single shot can fire immediately. Sets target HP=100.
+    Clears is_crouching on both agents and agent 0's three weapon timers
+    (scenario.ready_to_fire), so a single shot can fire immediately. Agent 5 must still
+    have full HP (single shot below the kill threshold): asserted, not written.
+    Returns the (shooter, target) agents.
 
     PITCH NOTE (v1c, gh #36 fix B-3): pitch is ABSOLUTE per env_step. This helper
     no longer accepts `shooter_pitch` because writing `g.agents[0].pitch = X`
@@ -260,28 +244,22 @@ def _setup_3d_hit_scenario(env, sx, sy, sz, shooter_area_idx, tx, ty, tz, target
     buffer they pass to env.step (e.g., `cont[0, 1] = pitch`).
     """
     import math
-    g = env._c_env.game
-    g.agents[0].x, g.agents[0].y, g.agents[0].z = sx, sy, sz
-    g.agents[0].area_idx = shooter_area_idx            # must match position for vis check
-    g.agents[0].facing = math.atan2(ty - sy, tx - sx)
-    g.agents[0].is_crouching = 0
-    g.agents[0].is_airborne = 0
-    g.agents[0].fire_cd = 0
-    g.agents[0].reload_ticks = 0
-    g.agents[0].switch_ticks = 0
-    g.agents[5].x, g.agents[5].y, g.agents[5].z = tx, ty, tz
-    g.agents[5].area_idx = target_area_idx             # must match position for vis check
-    g.agents[5].is_crouching = 0
-    g.agents[5].is_airborne = 0
-    g.agents[5].hp = 100                               # need full hp so single shot is below kill threshold
+    s = place_agent(env, 0, *shooter)
+    t = place_agent(env, 5, *target)
+    s.facing = math.atan2(t.y - s.y, t.x - s.x)
+    s.is_crouching = t.is_crouching = 0
+    ready_to_fire(env, 0)
+    assert t.hp == 100, f"target hp {t.hp}: a single shot must stay below the kill threshold"
+    assert_state_consistent(env)
+    return s, t
 
 
 def test_3d_hit_at_correct_pitch_elevated_target():
     """T5: shooter at z=0, target at z=64 (elevated), correct pitch → hit (HP drops).
 
     Map geometry (make_simple_map): area 5 (x=575, y=352, z=0) and area 6
-    (x=960, y=304, z=64) are mutually visible. Using area centroids ensures
-    vis_matrix[5][6] = True so the combat visibility gate passes.
+    (x=960, y=304, z=64) are mutually visible: combat visibility is the position
+    raycast (build_vis_matrix -> line_of_sight_2d), clear between these two points.
     v1b geometry (gh #36 fix A): eye_z = 0 + 48 = 48; torso_z = 64 + 48 = 112;
     Δz = 64; dist_2d ≈ 388 → required pitch = atan2(64, 388) ≈ 0.164 rad ≈ 9.4°.
     (Pre-v1b had eye=64/torso=32 giving Δz=32 → 0.082 rad, but that broke
@@ -289,8 +267,8 @@ def test_3d_hit_at_correct_pitch_elevated_target():
     Why this exists: validates that the 3D hit-test gates ON correct pitch alignment
     when there's a vertical offset. Without 3D geometry, this would either always
     hit (2D logic ignoring z) or always miss (broken implementation).
-    Pitfall: area_idx MUST be set to match the new x/y/z — the combat code uses
-    area_idx for vis_matrix lookup, not raw coordinates."""
+    The helper derives each area_idx and z from the position (scenario.place_agent),
+    so the placed agents cannot disagree with where the sim says they stand."""
     import math
 
     from cs2rl.env.c.cs2_env import Cs2Env
@@ -308,16 +286,8 @@ def test_3d_hit_at_correct_pitch_elevated_target():
         torso_z = tz + 48.0                            # TORSO_OFFSET_STAND (v1b: equal to EYE_HEIGHT_STAND)
         rz = torso_z - eye_z
         dist_2d = math.sqrt(rx * rx + ry * ry)
-        pitch = math.atan2(rz, dist_2d)                # ~0.082 rad: correct 3D pitch
-        _setup_3d_hit_scenario(env,
-                               sx=sx,
-                               sy=sy,
-                               sz=sz,
-                               shooter_area_idx=5,
-                               tx=tx,
-                               ty=ty,
-                               tz=tz,
-                               target_area_idx=6)
+        pitch = math.atan2(rz, dist_2d)                # ~0.164 rad: correct 3D pitch
+        _setup_3d_hit_scenario(env, (sx, sy), (tx, ty))
         hp_before = env._c_env.game.agents[5].hp
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1                              # HEAD_SHOOT
@@ -352,15 +322,8 @@ def test_3d_miss_at_zero_pitch_elevated_target():
         # Same area 5→6 geometry, but pitch=0 (wrong — horizontal, not upward)
         sx, sy, sz = 575.0, 352.0, 0.0
         tx, ty, tz = 960.0, 304.0, 64.0
-        _setup_3d_hit_scenario(env,
-                               sx=sx,
-                               sy=sy,
-                               sz=sz,
-                               shooter_area_idx=5,
-                               tx=tx,
-                               ty=ty,
-                               tz=tz,
-                               target_area_idx=6)
+        shooter, target = _setup_3d_hit_scenario(env, (sx, sy), (tx, ty))
+        assert (shooter.z, target.z) == (sz, tz), "the 64u rise is this test's premise"
         hp_before = env._c_env.game.agents[5].hp
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1
@@ -429,18 +392,10 @@ def test_3d_hit_pitch_down_from_ramp():
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
 
-        # Settle step: put the shooter on the ramp and step with NO shoot action
-        # so the ground-snap resolves the true interpolated surface z for us.
-        # sz here is only a seed value — process_movement overwrites it.
-        _setup_3d_hit_scenario(env,
-                               sx=sx,
-                               sy=sy,
-                               sz=64.0,
-                               shooter_area_idx=13,
-                               tx=tx,
-                               ty=ty,
-                               tz=tz,
-                               target_area_idx=5)
+        # Settle step: the helper stands the shooter on the ramp's interpolated
+        # surface (scenario.place_agent); a step with NO shoot action lets the
+        # ground-snap confirm it, and the pitch is derived from the z read back.
+        _setup_3d_hit_scenario(env, (sx, sy), (tx, ty))
         env.step(actions, cont)
         ramp_z = env._c_env.game.agents[0].z
         assert env._c_env.game.agents[0].area_idx == 13, "shooter left the ramp"
@@ -456,16 +411,8 @@ def test_3d_hit_pitch_down_from_ramp():
         pitch = math.atan2(rz, dist_2d)                # ~-0.15 rad at the ramp midpoint
         assert pitch < 0.0, f"expected a downward pitch, got {pitch}"
 
-        # Fire step: re-arm (fire_cd=0, target hp=100) at the settled ramp z.
-        _setup_3d_hit_scenario(env,
-                               sx=sx,
-                               sy=sy,
-                               sz=ramp_z,
-                               shooter_area_idx=13,
-                               tx=tx,
-                               ty=ty,
-                               tz=tz,
-                               target_area_idx=5)
+        # Fire step: re-arm (clear the weapon timers; target hp is still 100) at the ramp z.
+        _setup_3d_hit_scenario(env, (sx, sy), (tx, ty))
         hp_before = env._c_env.game.agents[5].hp
         actions[0, 1] = 1
         cont[0, 1] = pitch             # v1c: pitch is absolute, set via cont
@@ -505,15 +452,7 @@ def test_3d_perp_perfectly_aligned_no_nan():
         rz = torso_z - eye_z
         dist_2d = math.sqrt(rx * rx + ry * ry)
         pitch = math.atan2(rz, dist_2d)                # perfect 3D alignment → perp = 0
-        _setup_3d_hit_scenario(env,
-                               sx=sx,
-                               sy=sy,
-                               sz=sz,
-                               shooter_area_idx=5,
-                               tx=tx,
-                               ty=ty,
-                               tz=tz,
-                               target_area_idx=6)
+        _setup_3d_hit_scenario(env, (sx, sy), (tx, ty))
         actions = np.zeros((10, spec.ACTION_DIM), dtype=np.int32)
         actions[0, 1] = 1
         cont = np.zeros((10, spec.AIM_DIM), dtype=np.float32)
@@ -543,7 +482,7 @@ def test_pitch_clamps_at_pi_over_2_down():
     env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
     try:
         env.reset(seed=42)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         cont[0, 1] = -100.0                                            # massive negative absolute pitch target
         for _ in range(100):
             env.step(actions, cont)
@@ -572,7 +511,7 @@ def test_pinned_pitch_stays_zero_across_ticks_and_default_moves():
         try:
             env.reset(seed=42)
             for _ in range(5):
-                act, cont = _zero_actions()
+                act, cont = zero_actions()
                 cont[:, 1] = rng.uniform(-0.7, 0.7, size=10).astype(np.float32)
                 env.step(act, cont)
             pitches = [env._c_env.game.agents[i].pitch for i in range(10)]
