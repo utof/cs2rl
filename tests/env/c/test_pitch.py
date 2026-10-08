@@ -11,6 +11,7 @@ import pytest
 
 from tests._helpers.scenario import (
     assert_state_consistent,
+    face,
     place_agent,
     ready_to_fire,
     zero_actions,
@@ -243,10 +244,9 @@ def _setup_3d_hit_scenario(env, shooter, target):
     the very next env.step. Callers must set pitch via the continuous_actions
     buffer they pass to env.step (e.g., `cont[0, 1] = pitch`).
     """
-    import math
     s = place_agent(env, 0, *shooter)
     t = place_agent(env, 5, *target)
-    s.facing = math.atan2(t.y - s.y, t.x - s.x)
+    face(env, 0, 5)
     s.is_crouching = t.is_crouching = 0
     ready_to_fire(env, 0)
     assert t.hp == 100, f"target hp {t.hp}: a single shot must stay below the kill threshold"

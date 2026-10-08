@@ -552,7 +552,8 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
     # One survivor per alive team (agent 0 = T, agent 5 = CT); kill everyone else.
     kill_all_but(env, *(i for team, i in ((0, 0), (1, 5)) if team in alive_teams))
     # Set round-end state: written raw on purpose, the scenario's terminal flags
-    # (compute_rewards reads them; no invariant couples them to the agents).
+    # (compute_rewards reads them; scenario.py has no rule for them, and a pre-set
+    # round_over skips the sim's own end checks).
     g.winner = winner
     if bomb_planted:
         _set_planted_bomb(env,

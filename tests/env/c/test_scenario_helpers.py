@@ -321,6 +321,7 @@ def test_visible_area_pair_is_a_sim_sighting_and_face_aims_a_kill():
         env.step(act, cont)
         assert env._c_env.step_stats.mutual_vis_pair_ticks == 1
         assert (ct.alive, ct.hp) == (0, 0)
+        assert state_violations(env) == []
         with pytest.raises(AssertionError, match="no area pair"):
             scenario.visible_area_pair(env, min_dist=1e9, max_dist=2e9)
     finally:

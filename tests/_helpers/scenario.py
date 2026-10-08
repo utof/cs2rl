@@ -13,11 +13,12 @@ The helpers own those couplings, and every rule comes from the sim, never from a
   * clip limits: `binding.weapon_defs` (cs2_weapons.h's WEAPON_DEFS);
   * the bomb carrier: `Cs2Env.give_bomb` (#164), or `setup_bomb_carrier` in
     cs2rl.eval.scripted_expert when the role bit and the knife go with it.
-`assert_state_consistent` checks the same invariants over a whole state; call it after a
-hand-built setup, before the step under test.
+`assert_state_consistent` checks over a whole state: area vs position, alive vs hp, team,
+participating and the parked state, weapon slot and ammo limits (not z or the bomb carrier);
+call it after a hand-built setup, before the step under test.
 
-What stays a raw write: a field no invariant here couples (facing, has_kit, armor, a live
-agent's hp above 0, round_over and winner, the StaticData clocks); a planted bomb through
+What stays a raw write: a field no invariant here couples (e.g. facing, has_kit, armor, a
+live agent's hp above 0, round_over and winner, the StaticData clocks); a planted bomb through
 the BombState table, which `binding.step` checks; and a deliberately impossible state whose
 rejection a test pins.
 
@@ -67,7 +68,7 @@ def place_agent(env, idx, x, y, *, z=None, airborne=False):
     Raises ValueError off the mesh, for a dead or parked agent, and for an airborne z that
     is not above the floor. Returns the agent.
     KNOWN LIMIT: the hull is not checked; a point within the hull radius of a wall
-    (cs2_movement.h AGENT_HULL_RADIUS) is placeable though walking cannot reach it.
+    (AGENT_HULL_RADIUS, cs2_types.h) is placeable though walking cannot reach it.
     """
     a = _agent(env, idx)
     area, floor = ground_at(env, x, y)
@@ -139,7 +140,7 @@ def place_duel(env, facing0=0.0):
 
     Agent 0 keeps its spawn spot and gets `facing0`; facing 0 aims it dead-on at agent 5.
     Returns zero (discrete, continuous) actions with agent 0's SHOOT set (head 1). Was
-    `_place_duel`, forked verbatim in test_pitch_pin and test_stepstats_export, which
+    `_place_duel`, forked in test_pitch_pin and test_stepstats_export, which
     copied agent 0's area_idx onto agent 5 instead of deriving it.
     """
     import math
@@ -154,8 +155,8 @@ def place_duel(env, facing0=0.0):
 
 def visible_area_pair(env, *, min_dist, max_dist, first=400, window=200):
     """The first (area_a, area_b) whose centroids are strictly between min_dist and max_dist
-    apart with line of sight, scanning each area index a < `first` against the `window`
-    areas after it.
+    apart with line of sight, scanning each area index a < `first` against the `window` - 1
+    areas after it (a+1 .. a+window-1).
 
     Line of sight is MapData.line_of_sight_2d, the Python mirror of cs2_combat.h's raycast
     that build_vis_matrix runs on positions (not the centroid-baked vis_matrix). Raises

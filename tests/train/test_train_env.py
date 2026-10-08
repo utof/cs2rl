@@ -2153,6 +2153,10 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
         obs_view = env._obs_view
         enemy_base = OBS_BLOCKS["enemy"][0]
         observer = g.agents[0]         # T slot 0; enemies are 5-9
+        agents = g.agents
+
+        def _dist(a, b):
+            return ((a.x - b.x)**2 + (a.y - b.y)**2)**0.5
 
         def slot_flags():
             """(can_see, alive) per enemy obs slot of agent 0."""
@@ -2171,10 +2175,12 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
         # it stole slot 0. Enemies 7-9 stay at the CT spawn, out of sight.
         place_agent(env, 6, 162.5, -10.875)
         assert_state_consistent(env)
+        assert _dist(observer, agents[6]) < _dist(observer, agents[5]), "enemy 6 must be closer"
 
         acts = np.zeros((10, 7), dtype=np.int64)
         env.step(acts)
         flags = slot_flags()
+        assert sum(cs for cs, _ in flags) == 1, f"exactly one enemy is visible: {flags}"
         assert flags[0] == (1, 1), (
             f"slot 0 must hold the VISIBLE enemy (can_see=1); got slots {flags} — "
             f"a closer invisible enemy outranked it (F10 leak)")
@@ -2185,7 +2191,10 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
         # slot 0 stays the visible one.
         for spot in ((168.743, -6.26), (155.477, -10.184), (182.5, -4.808)):
             place_agent(env, 6, *spot)
+            assert _dist(observer, agents[6]) < _dist(
+                observer, agents[5]), (f"enemy 6 at {spot} must be closer than enemy 5")
             env.step(acts)
+            assert sum(cs for cs, _ in slot_flags()) == 1, f"enemy 6 at {spot} became visible"
             assert slot_flags()[0] == (1, 1), (
                 f"invisible enemy at {spot} reordered the slots — rank leak")
     finally:

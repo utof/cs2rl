@@ -309,8 +309,8 @@ def test_plant_on_round_deadline_and_same_tick_resolution(bomb_env, resolution):
 
 
 # ── Rejection of hand-assembled states ──────────────────────────────────────
-# These tests write raw fields ON PURPOSE (#170): the states are deliberately impossible,
-# or (valid_planted) the positive control of the check that rejects the others.
+# Most of these tests write raw fields ON PURPOSE (#170): the states are deliberately
+# impossible, or (valid_planted) the positive control of the check that rejects the others.
 
 
 @pytest.mark.parametrize('name', [
