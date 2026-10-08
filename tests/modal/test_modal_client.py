@@ -1314,8 +1314,76 @@ def test_launch_payload_includes_design_contract_fields(fake_modal, tmp_path):
     assert payload["vec_workers"] == 8
     assert payload["thread_caps"] == _expected_thread_caps()
     assert payload["resumed_from_run_id"] is None
+    for key in ("nav_mesh_path", "nav_mesh_sha256"):
+        assert payload[key] is None, key               # dust2's nav mesh only (#270)
     assert all(
         isinstance(value, (str, int, float, bool, list, type(None))) for value in payload.values())
+
+
+class _StopAtPrepare(Exception):
+    """Raised by a patched prepare once it has recorded what train_remote handed it."""
+
+
+def test_dust2_launch_ships_the_nav_mesh_and_the_container_gets_it(fake_modal, tmp_path,
+                                                                   monkeypatch):
+    """A dust2 launch uploads the nav mesh by digest; train_remote hands it to prepare.
+
+    Client half: the blob lands under inputs/sha256/ with its suffix, and the payload names
+    its mount path and digest. Container half: the in-process spawn runs train_remote,
+    whose prepare receives the same values as a RemoteNavMesh (#270).
+    """
+    module = _import_run_modal()
+    fake_modal.invoke_remote = True
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    nav_file = tmp_path / "awpy" / "de_dust2.json"
+    nav_file.parent.mkdir()
+    nav_file.write_text('{"areas": {}}')
+    monkeypatch.setattr(module, "_local_nav_mesh", lambda: nav_file)
+    captured: dict[str, object] = {}
+
+    def prepare_records_then_stops(**kwargs):
+        captured.update(kwargs)
+        raise _StopAtPrepare
+
+    monkeypatch.setattr(mrl, "prepare_remote_source", prepare_records_then_stops)
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha, map="dust2"))
+    with pytest.raises(_StopAtPrepare):
+        module.launch_run(request,
+                          repo=repo,
+                          app_obj=module.app,
+                          now=_aware(),
+                          stdout=_capture_stdout())
+    nav_sha = mrl.sha256_bytes(nav_file.read_bytes())
+    files = fake_modal.volumes[mrl.VOLUME_NAME].files
+    assert files[f"inputs/sha256/{nav_sha}.json"] == nav_file.read_bytes()
+    assert not any(name.endswith(".tri") for name in files)
+    payload = fake_modal.configured_spawn_calls[0][1][0]
+    expected = mrl.RemoteNavMesh(path=Path(f"/artifacts/inputs/sha256/{nav_sha}.json"),
+                                 sha256=nav_sha)
+    assert (payload["nav_mesh_path"], payload["nav_mesh_sha256"]) == (str(expected.path), nav_sha)
+    assert captured["nav_mesh"] == expected
+
+
+def test_dust2_launch_without_a_local_nav_mesh_fails_before_any_volume_write(
+        fake_modal, tmp_path, monkeypatch):
+    """The client reads nav's own path; a missing mesh stops the launch first.
+
+    Runs the real `_local_nav_mesh`, which reads `nav.NAV_PATH` at call time, pointed
+    at an absent file. The error names it and the #330 workaround, and no Volume or Dict
+    was created.
+    """
+    from cs2rl.env import nav
+
+    monkeypatch.setattr(nav, "NAV_PATH", str(tmp_path / "absent.json"))
+    module = _import_run_modal()
+    repo = _init_source_repo(tmp_path)
+    sha = _git(repo, "rev-parse", "HEAD")
+    request = module.resolve_launch_request(**_valid_launch_sentinels(git_sha=sha, map="dust2"))
+    with pytest.raises(mrl.ValidationError, match=r"absent\.json.*#330"):
+        module.launch_run(request, repo=repo, app_obj=module.app, stdout=_capture_stdout())
+    assert fake_modal.volume_creates == []
+    assert fake_modal.dict_creates == []
 
 
 def test_build_remote_manifest_records_contract_and_rejects_digest_drift(fake_modal, tmp_path):

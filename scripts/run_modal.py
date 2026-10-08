@@ -15,6 +15,10 @@ PITFALLS:
     only on the configured variant.
   * Launch via with_options(...).spawn(), never .remote(). SYNC remote inputs
     are cancelled when the local client dies, even under `modal run --detach`.
+  * The image has no awpy data. A `--map dust2` launch uploads the nav mesh
+    this machine's dust2 env reads (`nav.NAV_PATH`) as a content-addressed input,
+    and the container points CS2RL_NAV_PATH at it (#270). No other awpy file is shipped:
+    dust2 envs do not build the visibility matrix, which is what read the .tri.
 """
 from __future__ import annotations
 
@@ -228,6 +232,25 @@ def _read_volume_file(volume: modal.Volume, remote: str) -> bytes | None:
     return b"".join(chunks)
 
 
+def _local_nav_mesh() -> Path:
+    """The nav mesh a local dust2 run on this machine reads; a dust2 launch ships it.
+
+    Read from `cs2rl.env.nav`, so CS2RL_NAV_PATH picks it here as it does for a local
+    run. Imported only here, on a dust2 launch: importing nav loads awpy, networkx and
+    shapely (7.6 s in one measured import, #270), and the container never runs this
+    function (its interpreter has no cs2rl).
+    """
+    from cs2rl.env import nav
+
+    path = Path(nav.NAV_PATH)
+    if not path.is_file():
+        raise mrl.ValidationError(
+            f"--map dust2 ships this machine's awpy nav mesh; missing: {path} "
+            "(`awpy get navs`; if awpy's host refuses it, copy the file from a machine "
+            "that has it: README troubleshooting, #330)")
+    return path
+
+
 def _require_blob_match(remote: bytes, expected_size: int, expected_digest: str) -> None:
     if len(remote) != expected_size or mrl.sha256_bytes(remote) != expected_digest:
         raise mrl.ValidationError("remote blob does not match local size/hash")
@@ -307,6 +330,18 @@ def ensure_blob(volume: modal.Volume, client_path: PurePosixPath, local_path: Pa
             raise mrl.ValidationError(
                 f"concurrent blob create left no readable object: {remote}") from None
         _require_blob_match(existing, expected_size, expected_digest)
+
+
+def _upload_nav_mesh(volume: modal.Volume, local: Path) -> mrl.RemoteNavMesh:
+    """Upload dust2's nav mesh under `inputs/sha256/` and return the container's view of it.
+
+    Content-addressed like a resume checkpoint: `ensure_blob` reuses a blob whose bytes
+    match.
+    """
+    digest = mrl.sha256_bytes(local.read_bytes())
+    client = mrl.INPUTS_ROOT / "sha256" / f"{digest}{local.suffix}"
+    ensure_blob(volume, client, local)
+    return mrl.RemoteNavMesh(path=mrl.mounted_path(client), sha256=digest)
 
 
 # Launch's private vocabulary: one `CheckpointVerdict.reason` token -> the
@@ -480,6 +515,10 @@ class LaunchPayload(TypedDict):
     resume_sha256: str | None
     resume_size: int | None
     resume_source_path: str | None
+    # dust2's nav mesh on the mount and its digest (`_upload_nav_mesh`); None on every
+    # other map.
+    nav_mesh_path: str | None
+    nav_mesh_sha256: str | None
     effective_map: str
     gpu: str
     cpu_request: int
@@ -518,6 +557,7 @@ def _launch_payload(
     resume_client: PurePosixPath | None,
     resume_digest: str | None,
     resume_size: int | None,
+    nav_mesh: mrl.RemoteNavMesh | None,
     modal_version: str,
     wandb_enabled: bool,
     created_at: str,
@@ -535,6 +575,8 @@ def _launch_payload(
         "resume_sha256": resume_digest,
         "resume_size": resume_size,
         "resume_source_path": resume_mount,
+        "nav_mesh_path": None if nav_mesh is None else str(nav_mesh.path),
+        "nav_mesh_sha256": None if nav_mesh is None else nav_mesh.sha256,
         "effective_map": request.effective_map,
         "gpu": request.gpu,
         "cpu_request": request.cpu_cores,
@@ -671,6 +713,7 @@ def launch_run(
     local_ckpt = None
     if request.resume.local_checkpoint is not None:
         local_ckpt = mrl.validate_local_checkpoint(request.resume.local_checkpoint)
+    local_nav = _local_nav_mesh() if request.effective_map == "dust2" else None
 
     secret = None
     if request.wandb_secret_name is not None:
@@ -700,17 +743,19 @@ def launch_run(
     artifacts = ModalVolumeIndex(volume)
     mrl.reserve_run(registry, artifacts, request.run_id, nonce, now=stamp)
 
-    # upload() sets these. The resume three stay None when there is nothing to resume.
+    # upload() sets these. The resume three stay None when there is nothing to resume,
+    # nav_mesh on every map but dust2.
     tree: str | None = None
     source_archive_sha256: str | None = None
     source_client: PurePosixPath | None = None
     resume_client: PurePosixPath | None = None
     resume_digest: str | None = None
     resume_size: int | None = None
+    nav_mesh: mrl.RemoteNavMesh | None = None
 
     def upload() -> None:
         nonlocal tree, source_archive_sha256, source_client
-        nonlocal resume_client, resume_digest, resume_size
+        nonlocal resume_client, resume_digest, resume_size, nav_mesh
         with tempfile.TemporaryDirectory(prefix="cs2rl-launch-") as tmp:
             tmp_path = Path(tmp)
             archive = tmp_path / "source.tar.gz"
@@ -732,6 +777,8 @@ def launch_run(
                 ensure_blob(volume, resume_client, staged)
                 resume_digest = prior_digest
                 resume_size = len(prior_bytes)
+            if local_nav is not None:
+                nav_mesh = _upload_nav_mesh(volume, local_nav)
 
     mrl.finish_reservation(registry, artifacts, request.run_id, nonce, upload=upload)
     assert tree is not None and source_archive_sha256 is not None and source_client is not None, (
@@ -746,6 +793,7 @@ def launch_run(
         resume_client=resume_client,
         resume_digest=resume_digest,
         resume_size=resume_size,
+        nav_mesh=nav_mesh,
         modal_version=str(modal.__version__),
         wandb_enabled=secret is not None,
         created_at=stamp.isoformat(),
@@ -808,6 +856,9 @@ def train_remote(payload: LaunchPayload) -> dict[str, object]:
                                  volume=volume)
     resume = payload.get("resume_mount_path")
     resume_sha = payload.get("resume_sha256")
+    # KNOWN LIMIT: the container trusts the payload's nav_mesh_path; it is checked against the
+    # payload's own digest, and the payload has one author.
+    nav_mesh_path = payload.get("nav_mesh_path")
     manifest = build_remote_manifest(payload)
     prepared = mrl.prepare_remote_source(
         attempt=attempt,
@@ -820,6 +871,8 @@ def train_remote(payload: LaunchPayload) -> dict[str, object]:
         ),
         resume=None if resume is None else mrl.RemoteResume(
             path=Path(str(resume)), sha256=None if resume_sha is None else str(resume_sha)),
+        nav_mesh=None if nav_mesh_path is None else mrl.RemoteNavMesh(
+            path=Path(str(nav_mesh_path)), sha256=str(payload["nav_mesh_sha256"])),
         wandb_api_key=os.environ.get("WANDB_API_KEY") if payload.get("wandb_enabled") else None,
         manifest=manifest,
     )

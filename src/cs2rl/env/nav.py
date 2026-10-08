@@ -528,9 +528,10 @@ NAV_PATH = _resolve_nav_path()
 # The vis cache sits at the PACKAGE root, src/cs2rl/vis_cache.npy, anchored on the cs2rl
 # package and never on this file: when #205 moved nav into env/, a `__file__`-relative path
 # silently moved the cache with it. A moved path is a cold cache, and a cold cache on dust2
-# rebuilds the grid, then the vis matrix through a cpu_count() worker pool (~900 MB each,
-# orphaned on a kill). *.npy is gitignored, so a stray copy anywhere is invisible to git
-# status. tests/integration/test_path_constants_exist.py pins this location.
+# rebuilds the grid; a build_vis=True load (not an env, #270) then also rebuilds the vis
+# matrix through a cpu_count() worker pool (~900 MB each, orphaned on a kill). *.npy is
+# gitignored, so a stray copy anywhere is invisible to git status.
+# tests/integration/test_path_constants_exist.py pins this location.
 # PITFALL: not importlib.resources.files("cs2rl"). It promises only a Traversable, whose str()
 # is a filesystem path for a regular on-disk package but not under zipimport or for a namespace
 # package, and it is framed as read-only package data, not a writable cache.
