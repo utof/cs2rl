@@ -992,7 +992,7 @@ def test_obs_dim_constant_consistency():
     """
     from cs2rl.env import nav
     from cs2rl.train import config as train_config
-    assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
+    assert nav.OBS_DIM == spec_obs.OBS_DIM
     # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal (train_shared
     # must stay free of the nav import), so it needs a drift guard —
     # it divides the participating-step budget and builds the per-row

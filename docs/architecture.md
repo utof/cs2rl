@@ -29,7 +29,11 @@ guides describe where new code goes. Tests mirror the owning package;
 ## Contracts at seams
 
 - The C header authors obs/action layouts; Python specs are generated from it.
-  The ctypes layout hash checks struct declarations, not every positional binding argument.
+  The ctypes layout hash checks struct declarations, not values. The StaticData
+  pointer arguments of `binding.init` are positional: C assigns them by walking
+  `SD_PREFIX_FIELDS` and Python passes them in `StaticDataC` pointer order, so
+  neither side keeps its own list; `test_pointer_fields_receive_their_own_arrays`
+  reads each stored address back and checks it against its array.
 - Frozen `EnvConfig` and `RewardWeights` own env defaults. Runtime inputs such
   as seed, buffers and map data are supplied separately by the env factory.
 - `HybridAimVecEnv` carries continuous aim beside discrete actions; `Cs2PuffeRL`

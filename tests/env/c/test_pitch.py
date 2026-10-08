@@ -9,6 +9,8 @@ T4 (obs slots), T5 (3D combat). Each test_X is tagged with the task that owns it
 import numpy as np
 import pytest
 
+from cs2rl.spec.obs import OBS_DIM
+
 # ── T1 tests ──────────────────────────────────────────────────────────────
 
 
@@ -21,7 +23,7 @@ def test_aim_dim_bumped_to_2():
 def test_obs_dim_bumped_to_110():
     """T1 (re-pinned Batch 6 Task 2.5): nav.OBS_DIM tracks the C-side OBS_DIM."""
     from cs2rl.env import nav
-    assert nav.OBS_DIM == 110
+    assert nav.OBS_DIM == OBS_DIM
 
 
 def test_pitch_initialized_to_zero():
@@ -245,7 +247,7 @@ def test_obs_dim_is_110_in_runtime():
         env.reset(seed=42)
         actions, cont = _zero_actions()
         env.step(actions, cont)
-        assert env.observations.shape[1] == 110
+        assert env.observations.shape[1] == OBS_DIM
     finally:
         if hasattr(env, "close"):
             env.close()

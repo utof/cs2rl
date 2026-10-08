@@ -5,7 +5,7 @@ import math
 import numpy as np
 import pytest
 
-from cs2rl.env.c.cs2_env import OBS_DIM, make_env
+from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 
 ALPHA = math.exp(-1.0 / 16.0 / 0.08)
@@ -141,10 +141,6 @@ def test_miss_still_increments(make_map):
     acts[0, 1] = 1
     env.step(acts, cont)
     assert env._c_env.game.agents[0].punch_pitch == pytest.approx(0.045, abs=1e-6)
-
-
-def test_obs_dim_unchanged():
-    assert OBS_DIM == 110
 
 
 def test_recoil_is_not_reachable_from_the_cli():

@@ -47,6 +47,9 @@ static void capsule_destructor(PyObject* cap) {
  * as a precondition, and moving 200 lines up would separate that machinery
  * from the doc block that explains it. */
 static int sd_layout_digest(char out_hex[65], PyObject* fields);
+/* Likewise defined next to the SD_PREFIX_FIELDS walk: py_init hands it the
+ * positional arguments that follow the four scalars and it stores them. */
+static int sd_bind_pointers(StaticData* sd, PyObject* args, Py_ssize_t first);
 
 /* ── binding.init(...) -> PyCapsule ──
  *
@@ -60,7 +63,8 @@ static int sd_layout_digest(char out_hex[65], PyObject* fields);
  * `seed` and `team_spirit` are NOT StaticData fields (env_init takes them
  * directly), so they keep argument slots.
  *
- * The TEN pointer fields also keep argument slots and are never packed: C must
+ * The TEN pointer fields also keep argument slots and are never packed (they
+ * are the arguments after team_spirit, in StaticData's pointer-field order): C must
  * end up holding the numpy buffers' own addresses — kept alive for the env's
  * lifetime by Cs2Env._refs — and an address packed into a transient bytes
  * object would dangle the moment that object was collected.
@@ -107,41 +111,33 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     const char* buffer;
     Py_ssize_t  buffer_len;
     const char* layout_hash;
-    /* These ten are in StaticData's pointer-field order (cs2_types.h), which is
-     * also StaticDataC's — T2 put centroids_z straight after centroid_xy and
-     * is_ramp straight after bombsite_by_idx, and getting that wrong hands
-     * area_ids' buffer to the is_ramp pointer with nothing complaining.
-     *
-     * The layout hash does NOT cover this: it describes the struct, not the
-     * call. What covers it is that cs2_env.py DERIVES the order it passes them
-     * in from StaticDataC (_SD_POINTER_FIELDS), so only this list is
-     * hand-written, and a pointer field inserted mid-struct shifts the caller
-     * automatically. Keep it that way: re-hardcoding the order on the Python
-     * side would put the positional footgun back. */
-    PyObject *   vis_matrix_o, *raster_grid_o, *adjacency_o, *centroid_xy_o;
-    PyObject *   centroids_z_o, *area_ids_o, *bombsite_mask_o, *bombsite_by_idx_o;
-    PyObject *   is_ramp_o, *bombsite_dist_o;
+    /* The ten pointer arguments are NOT named here. Which argument fills which
+     * StaticData field is decided by sd_bind_pointers, which walks the same
+     * SD_PREFIX_FIELDS table the layout hash is built from: the Nth pointer row
+     * receives the Nth argument after team_spirit. cs2_env.py passes them in
+     * StaticDataC's pointer order (_SD_POINTER_FIELDS), and the hash already
+     * proves StaticDataC and SD_PREFIX_FIELDS list the same rows in the same
+     * order, so no second hand-written list exists to fall out of step. */
+    PyObject*    head;
     unsigned int seed;
     float        team_spirit;
 
-    if (!PyArg_ParseTuple(args,
-                          "y#sIfOOOOOOOOOO",
-                          &buffer,
-                          &buffer_len,
-                          &layout_hash,
-                          &seed,
-                          &team_spirit,
-                          &vis_matrix_o,
-                          &raster_grid_o,
-                          &adjacency_o,
-                          &centroid_xy_o,
-                          &centroids_z_o, /* T2: terrain z per area (float32[N]) */
-                          &area_ids_o,
-                          &bombsite_mask_o,
-                          &bombsite_by_idx_o,
-                          &is_ramp_o, /* T2: ramp flag per area (int8[N]) */
-                          &bombsite_dist_o))
+    /* "y#sIf" parses the leading four only; PyArg_ParseTuple would reject the
+     * pointer arguments as surplus, so parse a slice and leave them to
+     * sd_bind_pointers (which checks the count). */
+    if (PyTuple_GET_SIZE(args) < 4) {
+        PyErr_SetString(PyExc_TypeError, "init() takes at least 4 arguments");
         return NULL;
+    }
+    head = PyTuple_GetSlice(args, 0, 4);
+    if (!head)
+        return NULL;
+    if (!PyArg_ParseTuple(head, "y#sIf", &buffer, &buffer_len, &layout_hash, &seed, &team_spirit)) {
+        Py_DECREF(head);
+        return NULL;
+    }
+    /* buffer and layout_hash borrow from args' items, which outlive `head`. */
+    Py_DECREF(head);
 
     /* Precondition 1 — the incoming hash must be CONSUMED, not just accepted.
      * A parameter nothing compares is the same defect as a layout table nothing
@@ -196,16 +192,10 @@ static PyObject* py_init(PyObject* self, PyObject* args) {
     /* Step two: the ten borrowed pointers, AFTER the copy that would have
      * NULLed them. Python keeps every one of these arrays alive in Cs2Env._refs
      * for the env's lifetime; C never frees them. */
-    sd->vis_matrix      = (int8_t*)PyArray_DATA((PyArrayObject*)vis_matrix_o);
-    sd->raster_grid     = (int32_t*)PyArray_DATA((PyArrayObject*)raster_grid_o);
-    sd->adjacency       = (int8_t*)PyArray_DATA((PyArrayObject*)adjacency_o);
-    sd->centroid_xy     = (float*)PyArray_DATA((PyArrayObject*)centroid_xy_o);
-    sd->centroids_z     = (float*)PyArray_DATA((PyArrayObject*)centroids_z_o);
-    sd->area_ids        = (int32_t*)PyArray_DATA((PyArrayObject*)area_ids_o);
-    sd->bombsite_mask   = (int8_t*)PyArray_DATA((PyArrayObject*)bombsite_mask_o);
-    sd->bombsite_by_idx = (int8_t*)PyArray_DATA((PyArrayObject*)bombsite_by_idx_o);
-    sd->is_ramp         = (int8_t*)PyArray_DATA((PyArrayObject*)is_ramp_o);
-    sd->bombsite_dist   = (float*)PyArray_DATA((PyArrayObject*)bombsite_dist_o);
+    if (sd_bind_pointers(sd, args, 4) != 0) {
+        free(benv);
+        return NULL;
+    }
 
     env_init(&benv->env, sd, (uint32_t)seed, team_spirit);
 
@@ -627,6 +617,56 @@ static int sd_layout_digest(char out_hex[65], PyObject* fields) {
 #undef SD_LAYOUT_ROW
 
     cs2_sha256_final_hex(&h, out_hex);
+    return 0;
+}
+
+/* Does this C type spelling (from an SD_PREFIX_FIELDS row) end in `*`? */
+static int sd_type_is_pointer(const char* c_type) {
+    size_t n = strlen(c_type);
+    while (n > 0 && c_type[n - 1] == ' ')
+        n--;
+    return n > 0 && c_type[n - 1] == '*';
+}
+
+/* Store args[first..] into StaticData's pointer fields: the Nth row of
+ * SD_PREFIX_FIELDS whose type is a pointer receives the Nth argument. This is
+ * the ONLY place the argument order is defined, and it is derived from the
+ * table, so a reorder of the struct moves it with it. Python derives its own
+ * passing order from StaticDataC (_SD_POINTER_FIELDS); the layout hash proves
+ * both describe the same rows in the same order, and
+ * tests/env/c/test_static_data_layout.py reads the stored addresses back.
+ *
+ * The arguments are taken on trust as numpy arrays (see py_init). The count is
+ * checked before anything is written. The slot is filled with memcpy of a
+ * void*, not a typed store, because the field types differ (int8_t*, int32_t*,
+ * float*). Returns 0, or -1 with an exception set. */
+static int sd_bind_pointers(StaticData* sd, PyObject* args, Py_ssize_t first) {
+    Py_ssize_t expected = 0;
+    Py_ssize_t k        = 0;
+
+#define SD_COUNT_PTR(ctype, f, is_array)                                                           \
+    if (sd_type_is_pointer(#ctype))                                                                \
+        expected++;
+    SD_PREFIX_FIELDS(SD_COUNT_PTR)
+#undef SD_COUNT_PTR
+
+    if (PyTuple_GET_SIZE(args) != first + expected) {
+        PyErr_Format(PyExc_TypeError,
+                     "init() takes %zd pointer arguments (one per pointer field of StaticData), "
+                     "got %zd",
+                     expected,
+                     PyTuple_GET_SIZE(args) - first);
+        return -1;
+    }
+
+#define SD_STORE_PTR(ctype, f, is_array)                                                           \
+    if (sd_type_is_pointer(#ctype)) {                                                              \
+        void* p = PyArray_DATA((PyArrayObject*)PyTuple_GET_ITEM(args, first + k));                 \
+        memcpy((char*)sd + offsetof(StaticData, f), &p, sizeof(p));                                \
+        k++;                                                                                       \
+    }
+    SD_PREFIX_FIELDS(SD_STORE_PTR)
+#undef SD_STORE_PTR
     return 0;
 }
 
