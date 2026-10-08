@@ -591,7 +591,8 @@ def test_reward_components_logged_in_terminal_info():
 # We set game state (winner, the bomb's phase and countdown, round_over, alive
 # agents) directly via ctypes, then call env.step() with all-zero actions.
 # The bomb part is written by _set_planted_bomb as a state from the BombState
-# table in cs2_types.h; binding.step rejects any other hand-written bomb state.
+# table in cs2_types.h; binding.step raises on a hand-written bomb state that
+# breaks that table (bomb_state_error, cs2_bomb.h).
 # All other reward weights (kill, death, pbrs, survival, shot, inaction) are
 # zeroed so step_stats.reward_win reflects only the win-magnitude path.
 #
@@ -655,10 +656,11 @@ def _set_planted_bomb(env, ticks_left, *, phase=BombPhase.PLANTED, agent=-1, pro
     """Hand-write a planted bomb on the map's first bombsite area.
 
     Writes one state of the BombState table (cs2_types.h): binding.step runs
-    bomb_state_error (cs2_bomb.h) before stepping and raises on anything the
-    sim could not reach, so a typo here fails loudly instead of testing an
-    impossible state. The position stays (0, 0, 0), as raw-planted states
-    always had here; nothing these tests assert reads it.
+    bomb_state_error (cs2_bomb.h) before stepping and raises on a state that
+    breaks the table, so most typos in phase, agent, progress or area fail
+    loudly instead of testing an impossible state. The position stays
+    (0, 0, 0), as raw-planted states always had here; nothing these tests
+    assert reads it.
     """
     b = env._c_env.game.bomb
     b.phase, b.agent, b.progress = phase, agent, progress
