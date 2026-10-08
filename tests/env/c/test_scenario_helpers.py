@@ -327,6 +327,21 @@ def test_visible_area_pair_is_a_sim_sighting_and_face_aims_a_kill():
         env.close()
 
 
+def test_place_duel_derives_the_second_agents_area():
+    """On dust2 (seed 0) 40u east of agent 0's spawn is another area: place_duel stands agent
+    5 in it, where the forked `_place_duel` copied agent 0's area_idx onto it."""
+    env = make_env(seed=0, auto_reset=False)
+    try:
+        act, cont = scenario.place_duel(env)
+        a0, a5 = env._c_env.game.agents[0], env._c_env.game.agents[5]
+        assert (a5.x, a5.y) == (a0.x + 40.0, a0.y)
+        assert a5.area_idx == ground_at(env, a5.x, a5.y)[0] != a0.area_idx
+        assert state_violations(env) == []
+        assert act[0, 1] == 1 and act.sum() == 1 and not cont.any()
+    finally:
+        env.close()
+
+
 def test_zero_actions_shapes():
     """One row per agent, ACTION_DIM int32 discrete heads and AIM_DIM float32 continuous."""
     act, cont = zero_actions()

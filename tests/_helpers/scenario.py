@@ -134,6 +134,24 @@ def face(env, idx, other):
     return a
 
 
+def place_duel(env, facing0=0.0):
+    """Reset, then stand agent 5 (CT) 40u east of agent 0 (T), at rest, facing back at it.
+
+    Agent 0 keeps its spawn spot and gets `facing0`; facing 0 aims it dead-on at agent 5.
+    Returns zero (discrete, continuous) actions with agent 0's SHOOT set (head 1). Was
+    `_place_duel`, forked verbatim in test_pitch_pin and test_stepstats_export, which
+    copied agent 0's area_idx onto agent 5 instead of deriving it.
+    """
+    import math
+    env.reset()
+    a0 = env._c_env.game.agents[0]
+    a0.facing = facing0
+    place_agent(env, 5, a0.x + 40.0, a0.y).facing = math.pi
+    act, cont = zero_actions()
+    act[0, 1] = 1
+    return act, cont
+
+
 def visible_area_pair(env, *, min_dist, max_dist, first=400, window=200):
     """The first (area_a, area_b) whose centroids are strictly between min_dist and max_dist
     apart with line of sight, scanning each area index a < `first` against the `window`
