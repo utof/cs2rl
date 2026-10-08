@@ -115,6 +115,46 @@ def kill_agent(env, idx):
     return a
 
 
+def kill_all_but(env, *keep):
+    """kill_agent every live agent whose index is not in `keep`; returns the killed indices."""
+    killed = [i for i in range(N_AGENTS) if i not in keep and env._c_env.game.agents[i].alive]
+    for i in killed:
+        kill_agent(env, i)
+    return killed
+
+
+def face(env, idx, other):
+    """Turn agent `idx` to face agent `other` in the xy plane (facing = atan2 of the offset).
+
+    Only the yaw: pitch is absolute per step (v1c), set through the continuous buffer.
+    """
+    import math
+    a, b = env._c_env.game.agents[idx], env._c_env.game.agents[other]
+    a.facing = math.atan2(b.y - a.y, b.x - a.x)
+    return a
+
+
+def visible_area_pair(env, *, min_dist, max_dist, first=400, window=200):
+    """The first (area_a, area_b) whose centroids are strictly between min_dist and max_dist
+    apart with line of sight, scanning each area index a < `first` against the `window`
+    areas after it.
+
+    Line of sight is MapData.line_of_sight_2d, the Python mirror of cs2_combat.h's raycast
+    that build_vis_matrix runs on positions (not the centroid-baked vis_matrix). Raises
+    AssertionError when no pair qualifies.
+    """
+    md = env.map_data
+    for a in range(min(first, md.N)):
+        ax, ay = area_centroid(env, a)
+        for b in range(a + 1, min(a + window, md.N)):
+            bx, by = area_centroid(env, b)
+            if not min_dist < ((bx - ax)**2 + (by - ay)**2)**0.5 < max_dist:
+                continue
+            if md.line_of_sight_2d(ax, ay, bx, by):
+                return a, b
+    raise AssertionError(f"no area pair {min_dist}..{max_dist} apart with line of sight")
+
+
 def weapon_defs():
     """cs2_weapons.h's WEAPON_DEFS, one dict per weapon slot (binding.weapon_defs)."""
     return binding.weapon_defs()

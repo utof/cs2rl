@@ -282,6 +282,51 @@ def test_kill_agent_writes_the_combat_kill_and_the_sim_drops_the_bomb():
         env.close()
 
 
+def test_kill_all_but_kills_only_the_live_others():
+    """Parked slots are left alone (they are not alive) and the kept agents stay alive."""
+    env = make_env(seed=1,
+                   auto_reset=False,
+                   map_data=make_simple_map(),
+                   config=EnvConfig(n_active_per_team=2))
+    try:
+        env.reset()
+        assert scenario.kill_all_but(env, 0, 5) == [1, 6]
+        assert [env._c_env.game.agents[i].alive
+                for i in range(10)] == [1, 0, 0, 0, 0, 1, 0, 0, 0, 0]
+        assert state_violations(env) == []
+    finally:
+        env.close()
+
+
+def test_visible_area_pair_is_a_sim_sighting_and_face_aims_a_kill():
+    """The pair is in sight by the sim's own raycast, and face turns the shooter onto it.
+
+    visible_area_pair judges sight with MapData.line_of_sight_2d, the Python mirror of the
+    raycast build_vis_matrix runs on positions; the step's mutual_vis_pair_ticks counts the
+    sim's verdict for the one live T/CT pair. A 1-hp target shot at pitch 0 on dust2's flat
+    floor dies only if face pointed the shot at it.
+    """
+    env = make_env(auto_reset=False)
+    try:
+        env.reset()
+        area_t, area_ct = scenario.visible_area_pair(env, min_dist=50, max_dist=1500)
+        scenario.kill_all_but(env, 0, 5)
+        place_in_area(env, 0, area_t)
+        ct = place_in_area(env, 5, area_ct)
+        ct.hp, ct.armor = 1, 0
+        scenario.face(env, 0, 5)
+        assert state_violations(env) == []
+        act, cont = zero_actions()
+        act[0, 1] = 1
+        env.step(act, cont)
+        assert env._c_env.step_stats.mutual_vis_pair_ticks == 1
+        assert (ct.alive, ct.hp) == (0, 0)
+        with pytest.raises(AssertionError, match="no area pair"):
+            scenario.visible_area_pair(env, min_dist=1e9, max_dist=2e9)
+    finally:
+        env.close()
+
+
 def test_zero_actions_shapes():
     """One row per agent, ACTION_DIM int32 discrete heads and AIM_DIM float32 continuous."""
     act, cont = zero_actions()
