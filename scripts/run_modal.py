@@ -17,7 +17,7 @@ PITFALLS:
     are cancelled when the local client dies, even under `modal run --detach`.
   * The image has no awpy data. A `--map dust2` launch uploads the nav mesh
     this machine's dust2 env reads (`nav.NAV_PATH`) as a content-addressed input,
-    and the container points CS2RL_NAV_PATH at it (#270). Nothing else is shipped:
+    and the container points CS2RL_NAV_PATH at it (#270). No other awpy file is shipped:
     dust2 envs do not build the visibility matrix, which is what read the .tri.
 """
 from __future__ import annotations

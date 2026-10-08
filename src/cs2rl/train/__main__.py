@@ -355,9 +355,9 @@ if __name__ == "__main__":
     # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)
     # therefore needs the dust2 nav mesh (nav.NAV_PATH) where the dump runs. The
     # Modal runner runs it in the container, on the mesh the launch uploaded
-    # (scripts/run_modal.py, #270). It does NOT need the vis cache: every dust2
-    # load skips the vis matrix, which the sim does not read (make_cs2_map,
-    # build_vis=False; #270).
+    # (scripts/run_modal.py, #270). It does NOT need the vis cache: dust2's env
+    # loads (pin_pitch_for_map, make_env) skip the vis matrix, which the sim does
+    # not read (make_cs2_map, build_vis=False; #270).
     if args.map is None:
         args.map = "dust2" if args.dust2 else "simple"
     args.map_data = build_map_data(args.map)
