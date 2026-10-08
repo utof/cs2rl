@@ -18,7 +18,7 @@ and its sha256. The two operands come from different places on purpose:
              cs2_types.h, evaluated by the compiler that laid the struct out.
     Python — ctypes introspection of StaticDataC and nothing else.
 
-If either side is ever reworked to read the other, every test in this file keeps
+If either side is ever reworked to read the other, every hash test in this file keeps
 passing while comparing nothing. That is the failure mode to watch for in review.
 
 HONEST SCOPE. This compares DECLARATIONS, so it cannot see a value-routing
@@ -43,6 +43,37 @@ from cs2rl.env.c.cs2_env import StaticDataC
 # this builds for: the pointer fields. Used as the ceiling on a legitimate
 # padding gap between two consecutive table entries.
 _MAX_ALIGN = 8
+
+
+def test_pointer_fields_receive_their_own_arrays(simple_map):
+    """Every pointer field of the built StaticData holds ITS array's address.
+
+    The layout hash compares declarations and cannot see which array a pointer
+    field was handed: py_init takes the arrays positionally, so two swapped
+    arguments keep every size, offset and type identical. (Swapping two pointer
+    rows in only the table or only the mirror does change the hash and is caught
+    there.) This reads the addresses C stored back through
+    the ctypes overlay and compares them with the arrays Cs2Env built, by name.
+    The arrays are told apart by address, not by value: Cs2Env._refs holds the
+    exact objects whose buffers C borrowed.
+
+    KNOWN LIMIT: the expected array for each name comes from _map_arrays, so a
+    mis-keyed entry there (vis_matrix and adjacency swapped) is outside this
+    test's scope; no such by-name mis-key has happened here.
+    """
+    env = cs2_env.make_env(map_data=simple_map)
+    try:
+        sd = env._c_env.sd.contents
+        names = list(cs2_env._map_arrays(simple_map))
+        # _refs starts with _map_arrays' arrays in insertion order; later entries
+        # (e.g. area_bounds) are appended after them.
+        arrays = dict(zip(names, env._refs[:len(names)], strict=True))
+        assert cs2_env._SD_POINTER_FIELDS, "no pointer fields found: the test would compare nothing"
+        for name in cs2_env._SD_POINTER_FIELDS:
+            stored = ctypes.cast(getattr(sd, name), ctypes.c_void_p).value
+            assert stored == arrays[name].ctypes.data, f"sd->{name} does not point at its array"
+    finally:
+        env.close()
 
 
 def _c():

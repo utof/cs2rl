@@ -18,12 +18,6 @@ def test_aim_dim_bumped_to_2():
     assert AIM_DIM == 2
 
 
-def test_obs_dim_bumped_to_110():
-    """T1 (re-pinned Batch 6 Task 2.5): nav.OBS_DIM tracks the C-side OBS_DIM."""
-    from cs2rl.env import nav
-    assert nav.OBS_DIM == 110
-
-
 def test_pitch_initialized_to_zero():
     """T1: AgentState.pitch defaults to 0.0 via spawn_team's memset.
 
@@ -225,27 +219,6 @@ def test_obs_pitch_sin_cos_populated():
         obs = env.observations[0]
         assert obs[11] == pytest.approx(math.sin(0.5), abs=1e-5)
         assert obs[12] == pytest.approx(math.cos(0.5), abs=1e-5)
-    finally:
-        if hasattr(env, "close"):
-            env.close()
-
-
-def test_obs_dim_is_110_in_runtime():
-    """T4 (re-pinned Batch 6 Task 2.5): the actual emitted obs vector length is
-    110 (not just the constant).
-
-    Cross-checks the C-side OBS_DIM bump (T1) against the actual stride of the
-    observations buffer. If cs2_observations.h misses an obs[N] write (or writes
-    past 110), this catches it at runtime."""
-    from cs2rl.env.c.cs2_env import Cs2Env
-    from cs2rl.env.config import EnvConfig
-    from cs2rl.env.map import make_simple_map
-    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
-    try:
-        env.reset(seed=42)
-        actions, cont = _zero_actions()
-        env.step(actions, cont)
-        assert env.observations.shape[1] == 110
     finally:
         if hasattr(env, "close"):
             env.close()

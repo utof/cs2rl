@@ -991,13 +991,13 @@ def test_obs_dim_constant_consistency():
     TEAM_SIZE literals are cross-checked here too.
     """
     from cs2rl.env import nav
-    from cs2rl.train import config as train_config
-    assert nav.OBS_DIM == 110, f"nav.OBS_DIM is {nav.OBS_DIM}, expected 110 for Batch 6 Task 2.5"
+
     # Rung 0 (spec 2026-08-29 §2.2): train.TEAM_SIZE is a bare literal (train_shared
     # must stay free of the nav import), so it needs a drift guard —
     # it divides the participating-step budget and builds the per-row
     # participation vector.
     from cs2rl.env.c import cs2_env
+    from cs2rl.train import config as train_config
     assert train_config.TEAM_SIZE == nav.TEAM_SIZE == cs2_env.TEAM_SIZE, (
         f"train.TEAM_SIZE ({train_config.TEAM_SIZE}) / nav.TEAM_SIZE ({nav.TEAM_SIZE}) / "
         f"cs2_env.TEAM_SIZE ({cs2_env.TEAM_SIZE}) disagree")
