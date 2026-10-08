@@ -59,7 +59,10 @@ def test_pointer_fields_receive_their_own_arrays(simple_map):
     env = cs2_env.make_env(map_data=simple_map)
     try:
         sd = env._c_env.sd.contents
-        arrays = dict(zip(cs2_env._map_arrays(simple_map), env._refs, strict=True))
+        names = list(cs2_env._map_arrays(simple_map))
+        # _refs starts with _map_arrays' arrays in insertion order; later entries
+        # (e.g. area_bounds) are appended after them.
+        arrays = dict(zip(names, env._refs[:len(names)], strict=True))
         assert cs2_env._SD_POINTER_FIELDS, "no pointer fields found: the test would compare nothing"
         for name in cs2_env._SD_POINTER_FIELDS:
             stored = ctypes.cast(getattr(sd, name), ctypes.c_void_p).value
