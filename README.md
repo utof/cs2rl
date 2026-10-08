@@ -27,9 +27,11 @@ uv run python -m pytest tests/env/c/test_struct_sizes.py -q -n 0   # one test fi
 
 `--smoke` builds a dust2 env, steps it 20,000 times with all-zero actions, checks that every
 observation and reward is finite, and prints steps/sec. It reads `~/.awpy/navs/de_dust2.json`
-(or the file `CS2RL_NAV_PATH` names). The first dust2 load has no cache yet: it writes
-`vis_cache*.npy` into `src/cs2rl/`, and the visibility half reads `~/.awpy/tris/de_dust2.tri`
-with one worker process per CPU core, at about 900 MB each. Later runs load the cache.
+(or the file `CS2RL_NAV_PATH` names). The first dust2 load writes its position-grid cache into
+`src/cs2rl/`, in about half a second. Envs skip the visibility matrix, which the sim does not
+read (#270). A `make_cs2_map(build_vis=True)` call (the deploy export, some tests) still builds
+it when `vis_cache.npy` is missing, from `~/.awpy/tris/de_dust2.tri` with one worker process
+per CPU core at about 900 MB each, and caches it in `vis_cache.npy`.
 
 Normal validation uses the fast selection on two workers:
 
