@@ -210,7 +210,7 @@ static void env_reset(Dust2Env* env) {
 
     bomb_give(g, bomb_carrier);
     /* Batch 2: round-fixed copy. NEVER reassigned mid-round (see cs2_types.h
-     * field comment). compute_observations reads this for obs[106] (T4 shift). */
+     * field comment). compute_observations reads this for obs[OBS_GLOBAL_BASE + 13]. */
     g->round_designated_carrier_id = bomb_carrier;
 
     /* F8: masks must describe the fresh spawn state, not the previous round's
