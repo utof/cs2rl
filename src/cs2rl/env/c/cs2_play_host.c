@@ -20,8 +20,8 @@ struct PlayHost {
 static void copy_game_to_world(const Dust2Env* env, DemoWorldTick* w) {
     const GameState* g = &env->game;
     int              i;
-    w->bomb_planted    = g->bomb_planted;
-    w->bomb_ticks_left = g->bomb_ticks_left;
+    w->bomb_planted    = bomb_planted(g);
+    w->bomb_ticks_left = g->bomb.ticks_left;
     for (i = 0; i < N_AGENTS; i++) {
         const AgentState* a          = &g->agents[i];
         w->agents[i].x               = a->x;
@@ -66,10 +66,10 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
     /* DemoWorldTick has no bomb xyz; wrapper reads the post-step game. */
     if (ev.plant)
         _demo_play_at(
-            cl, DEMO_VOICE_PLANT, env->game.bomb_x, env->game.bomb_y, env->game.bomb_z, 800.0f);
+            cl, DEMO_VOICE_PLANT, env->game.bomb.x, env->game.bomb.y, env->game.bomb.z, 800.0f);
     if (ev.beep)
         _demo_play_at(
-            cl, DEMO_VOICE_BEEP, env->game.bomb_x, env->game.bomb_y, env->game.bomb_z, 1200.0f);
+            cl, DEMO_VOICE_BEEP, env->game.bomb.x, env->game.bomb.y, env->game.bomb.z, 1200.0f);
 }
 
 /* View-kick is sim punch (#120). Client fields are unused leftovers. */

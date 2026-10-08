@@ -171,10 +171,12 @@ def drive_agent_through_area_path(env, agent_idx, area_path, max_ticks_per_hop=2
 
 
 def setup_bomb_carrier(env, bomber_idx: int):
-    """Round-state initialization pokes for the scripted bomber: make
-    `bomber_idx` the sole bomb carrier and hand it the knife.
+    """Round-state initialization for the scripted bomber: make `bomber_idx`
+    the bomb carrier and hand it the knife.
 
-    These ARE ctypes struct pokes, but deliberately so: they configure the
+    Possession goes through Cs2Env.give_bomb, the sim's own bomb_give
+    transition (#164), so the bomb state stays one the sim can reach. The role
+    bit and the knife ARE ctypes struct pokes, deliberately: they configure the
     round (who spawned with the bomb, which weapon is out), they are not
     policy actions and are never recorded as labels. Keep this separate from
     the driving loop so the action stream stays pure (spec D-5).
@@ -191,11 +193,8 @@ def setup_bomb_carrier(env, bomber_idx: int):
     RL time the designated carrier IS the one walking to plant. Pin it to
     the scripted bomber so demo obs match the RL-time semantics."""
     g = env._c_env.game
-    for i in range(N_AGENTS):
-        g.agents[i].has_bomb = 0
+    env.give_bomb(bomber_idx)
     bomber = g.agents[bomber_idx]
-    bomber.has_bomb = 1
-    g.bomb_carrier_id = bomber_idx
     g.round_designated_carrier_id = bomber_idx
     bomber.weapon_slot = 2
     bomber.weapon_slot_target = 2

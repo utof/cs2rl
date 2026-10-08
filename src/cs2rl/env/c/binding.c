@@ -260,9 +260,46 @@ static PyObject* py_step(PyObject* self, PyObject* args) {
                      PyArray_TYPE(cont_arr));
         return NULL;
     }
+    /* #164: the bomb lifecycle is one state (GameState.bomb) that only the
+     * cs2_bomb.h transitions write. A hand-assembled state written through the
+     * Python overlay between steps (tests, scripted setups) is checked here,
+     * the one door those writes pass through before the sim reads them, so an
+     * impossible bomb state raises instead of being stepped. */
+    const char* bomb_err = bomb_state_error(&env->game, env->sd);
+    if (bomb_err) {
+        PyErr_Format(PyExc_ValueError, "invalid GameState.bomb before step: %s", bomb_err);
+        return NULL;
+    }
     env_step(env,
              (const int32_t*)PyArray_DATA((PyArrayObject*)actions_o),
              (const float*)PyArray_DATA(cont_arr));
+    Py_RETURN_NONE;
+}
+
+/* ── binding.give_bomb(capsule, agent_index) -> None ──
+ * The one sanctioned way to choose who carries the bomb from outside the sim
+ * (#164): the same bomb_give transition env_reset and pickup use, after
+ * bomb_give_error's checks (a live, participating T and an unplanted bomb;
+ * ValueError otherwise). It changes possession only: round_designated_carrier_id
+ * (the role bit) and the agent's weapon are the caller's, and masks stay as the
+ * last step computed them until the next step. */
+static PyObject* py_give_bomb(PyObject* self, PyObject* args) {
+    (void)self;
+    PyObject* cap;
+    int       agent;
+    if (!PyArg_ParseTuple(args, "Oi", &cap, &agent))
+        return NULL;
+    Dust2Env* env = (Dust2Env*)PyCapsule_GetPointer(cap, NULL);
+    if (!env) {
+        PyErr_SetString(PyExc_ValueError, "invalid capsule");
+        return NULL;
+    }
+    const char* err = bomb_give_error(&env->game, agent);
+    if (err) {
+        PyErr_Format(PyExc_ValueError, "give_bomb(%d): %s", agent, err);
+        return NULL;
+    }
+    bomb_give(&env->game, agent);
     Py_RETURN_NONE;
 }
 
@@ -347,61 +384,83 @@ static PyObject* py_get_masks(PyObject* self, PyObject* args) {
  * Py_UNUSED mangles the name so it cannot be referenced at all. */
 static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     (void)self;
-    return Py_BuildValue(
-        "{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:i,s:i}",
-        "AgentState",
-        (Py_ssize_t)sizeof(AgentState),
-        "GameState",
-        (Py_ssize_t)sizeof(GameState),
-        "StepStats",
-        (Py_ssize_t)sizeof(StepStats),
-        "Dust2Env",
-        (Py_ssize_t)sizeof(Dust2Env),
-        "StaticData",
-        (Py_ssize_t)sizeof(StaticData),
-        "Wall",
-        (Py_ssize_t)sizeof(Wall),
-        "WallList",
-        (Py_ssize_t)sizeof(WallList),
-        /* TAIL ANCHORS — one offsetof per mirrored struct, on that struct's
-         * LAST field. sizeof alone cannot see a field inserted mid-struct here
-         * but appended at the end of the ctypes mirror: the total stays equal,
-         * every guard passes, and Python reads the wrong bytes forever. The
-         * last field's offset does move under that edit, so it catches it.
-         * Rule: a new field goes in the SAME position in the C struct and in
-         * the mirror. Appending at the tail (the usual case) shifts the anchor
-         * on both sides by the same amount, which is exactly what we want —
-         * the anchor then names the NEW last field, so update the key here and
-         * the entry in _C_OFFSET_FIELDS (cs2_env.py) together.
-         * StaticData carries three anchors, not one: wall_list/area_bounds sit
-         * after a long run of float reward weights, and pbrs_nav_weight_ct pins
-         * the end of that run so a drift inside it is localised. */
-        "StaticData_pbrs_nav_weight_ct_offset",
-        (Py_ssize_t)offsetof(StaticData, pbrs_nav_weight_ct),
-        "StaticData_wall_list_offset",
-        (Py_ssize_t)offsetof(StaticData, wall_list),
-        "StaticData_area_bounds_offset",
-        (Py_ssize_t)offsetof(StaticData, area_bounds),
-        "AgentState__pad5_offset",
-        (Py_ssize_t)offsetof(AgentState, _pad5),
-        /* GameState's last field is the explicit tail pad, not a "real"
-         * field. offsetof on a pad array is legal, and the rule is uniform:
-         * anchor the LAST field. Picking bomb_is_dropped instead would miss
-         * a field slipped in between it and the pad on one side only. */
-        "GameState__pad_gs_offset",
-        (Py_ssize_t)offsetof(GameState, _pad_gs),
-        "StepStats_reward_win_ct_offset",
-        (Py_ssize_t)offsetof(StepStats, reward_win_ct),
-        "Dust2Env_recoil_enabled_offset",
-        (Py_ssize_t)offsetof(Dust2Env, recoil_enabled),
-        "Wall_kind_offset",
-        (Py_ssize_t)offsetof(Wall, kind),
-        "WallList_capacity_offset",
-        (Py_ssize_t)offsetof(WallList, capacity),
-        "TEAM_SIZE",
-        TEAM_SIZE,
-        "N_AGENTS",
-        N_AGENTS);
+    return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,"
+                         "s:n,s:i,s:i,s:i,s:i,"
+                         "s:i,s:i,s:i,s:i,s:i}",
+                         "AgentState",
+                         (Py_ssize_t)sizeof(AgentState),
+                         "BombState",
+                         (Py_ssize_t)sizeof(BombState),
+                         "GameState",
+                         (Py_ssize_t)sizeof(GameState),
+                         "StepStats",
+                         (Py_ssize_t)sizeof(StepStats),
+                         "Dust2Env",
+                         (Py_ssize_t)sizeof(Dust2Env),
+                         "StaticData",
+                         (Py_ssize_t)sizeof(StaticData),
+                         "Wall",
+                         (Py_ssize_t)sizeof(Wall),
+                         "WallList",
+                         (Py_ssize_t)sizeof(WallList),
+                         /* TAIL ANCHORS — one offsetof per mirrored struct, on that struct's
+                          * LAST field. sizeof alone cannot see a field inserted mid-struct here
+                          * but appended at the end of the ctypes mirror: the total stays equal,
+                          * every guard passes, and Python reads the wrong bytes forever. The
+                          * last field's offset does move under that edit, so it catches it.
+                          * Rule: a new field goes in the SAME position in the C struct and in
+                          * the mirror. Appending at the tail (the usual case) shifts the anchor
+                          * on both sides by the same amount, which is exactly what we want —
+                          * the anchor then names the NEW last field, so update the key here and
+                          * the entry in _C_OFFSET_FIELDS (cs2_env.py) together.
+                          * StaticData carries three anchors, not one: wall_list/area_bounds sit
+                          * after a long run of float reward weights, and pbrs_nav_weight_ct pins
+                          * the end of that run so a drift inside it is localised. */
+                         "StaticData_pbrs_nav_weight_ct_offset",
+                         (Py_ssize_t)offsetof(StaticData, pbrs_nav_weight_ct),
+                         "StaticData_wall_list_offset",
+                         (Py_ssize_t)offsetof(StaticData, wall_list),
+                         "StaticData_area_bounds_offset",
+                         (Py_ssize_t)offsetof(StaticData, area_bounds),
+                         "AgentState__pad5_offset",
+                         (Py_ssize_t)offsetof(AgentState, _pad5),
+                         /* GameState's last field is the explicit tail pad, not a "real"
+                          * field. offsetof on a pad array is legal, and the rule is uniform:
+                          * anchor the LAST field. Picking bombsite_entered instead would miss
+                          * a field slipped in between it and the pad on one side only. */
+                         "GameState__pad_gs_offset",
+                         (Py_ssize_t)offsetof(GameState, _pad_gs),
+                         "GameState_bomb_offset",
+                         (Py_ssize_t)offsetof(GameState, bomb),
+                         "BombState_z_offset",
+                         (Py_ssize_t)offsetof(BombState, z),
+                         "StepStats_reward_win_ct_offset",
+                         (Py_ssize_t)offsetof(StepStats, reward_win_ct),
+                         "Dust2Env_recoil_enabled_offset",
+                         (Py_ssize_t)offsetof(Dust2Env, recoil_enabled),
+                         "Wall_kind_offset",
+                         (Py_ssize_t)offsetof(Wall, kind),
+                         "WallList_capacity_offset",
+                         (Py_ssize_t)offsetof(WallList, capacity),
+                         "TEAM_SIZE",
+                         TEAM_SIZE,
+                         "N_AGENTS",
+                         N_AGENTS,
+                         /* BombPhase values (cs2_types.h), mirrored by cs2_env.BombPhase. */
+                         "BOMB_CARRIED",
+                         BOMB_CARRIED,
+                         "BOMB_PLANTING",
+                         BOMB_PLANTING,
+                         "BOMB_DROPPED",
+                         BOMB_DROPPED,
+                         "BOMB_PLANTED",
+                         BOMB_PLANTED,
+                         "BOMB_DEFUSING",
+                         BOMB_DEFUSING,
+                         "BOMB_DEFUSED",
+                         BOMB_DEFUSED,
+                         "BOMB_DETONATED",
+                         BOMB_DETONATED);
 }
 
 /* ── binding.static_data_layout() -> dict ──
@@ -923,6 +982,7 @@ static PyMethodDef binding_methods[] = {
     {"init", py_init, METH_VARARGS, "Init env, return capsule"},
     {"reset", py_reset, METH_VARARGS, "Reset env"},
     {"step", py_step, METH_VARARGS, "Step env"},
+    {"give_bomb", py_give_bomb, METH_VARARGS, "Hand the bomb to a live T agent (cs2_bomb.h)"},
     {"close", py_close, METH_VARARGS, "Close env"},
     {"get_buffers", py_get_buffers, METH_VARARGS, "Get buffer addresses as ints"},
     {"get_masks", py_get_masks, METH_VARARGS, "Get masks buffer address as int"},
