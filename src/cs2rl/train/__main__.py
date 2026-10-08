@@ -322,8 +322,11 @@ if __name__ == "__main__":
     # #307: a --device cpu run hides the GPU from this whole process (vecenv
     # workers inherit it). PufferLib's Utilization thread polls
     # torch.cuda.utilization() whenever torch.cuda.is_available(), which opens a
-    # CUDA context (~84 MiB, and the GPU overheats) in every CPU run on a GPU box.
-    # Side effect, accepted: the dashboard's GPU/VRAM readout shows 0 on CPU runs.
+    # CUDA context (~84 MiB each; this machine's GPU overheats under load, so CPU
+    # runs must not touch it) in every --device cpu training run on a GPU box.
+    # Side effects, accepted: the dashboard's GPU/VRAM readout shows 0 on CPU runs.
+    # KNOWN LIMIT: only the exact spelling "cpu" matches ("cpu:0" does not); no
+    # launcher in this repo passes another spelling.
     # Overrides a caller-set CUDA_VISIBLE_DEVICES; --device unset/cuda leaves the
     # env alone. Here and not in library code, so in-process callers are untouched;
     # nothing before this line initializes CUDA (measured in test_train_cli).

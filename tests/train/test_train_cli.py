@@ -462,7 +462,8 @@ def test_train_smoke_returns_zero():
 # CLI in-process (runpy) and reports at exit, so the env is seen AFTER arg parsing.
 _CLI_ENV_PROBE = """
 import atexit, os, runpy, sys
-atexit.register(lambda: print("CVD=%r" % os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")))
+atexit.register(lambda: print("CVD=%r TORCH_LOADED=%s" % (
+    os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>"), "torch" in sys.modules)))
 sys.argv = ["cs2rl.train", *sys.argv[1:]]
 runpy.run_module("cs2rl.train", run_name="__main__")
 """
@@ -483,7 +484,13 @@ def _cvd_after(tmp_path, *args, caller_cvd=None):
                        text=True,
                        timeout=120)
     assert r.returncode == 0, r.stderr[-2000:]
-    return [ln for ln in r.stdout.splitlines() if ln.startswith("CVD=")][-1]
+    line = [ln for ln in r.stdout.splitlines() if ln.startswith("CVD=")][-1]
+    # The --dump-config path is torch-free, and any CUDA probe above parse_args needs
+    # torch, so a probe placed there (which would make the later hiding too late)
+    # shows up here on any box, with or without a GPU.
+    cvd, loaded = line.rsplit(" TORCH_LOADED=", 1)
+    assert loaded == "False", "torch was imported before the CLI finished parsing"
+    return cvd
 
 
 def test_device_cpu_hides_the_gpu_and_other_devices_leave_the_env_alone(tmp_path):
@@ -505,8 +512,13 @@ runpy.run_module("cs2rl.train", run_name="__main__")
 @pytest.mark.training
 def test_cpu_train_child_ends_without_cuda(tmp_path):
     """#307 end to end: a real --device cpu training child finishes with CUDA
-    unavailable and uninitialized (PufferLib's Utilization thread included). The
-    env hiding makes this hold on a GPU-less box too, so it never skips."""
+    unavailable and uninitialized (PufferLib's Utilization thread included).
+    The child does not inherit CUDA_VISIBLE_DEVICES, so on a box with a visible GPU
+    a regression (hiding removed, or a CUDA probe above parse_args) turns it red, at
+    the cost of one real CUDA context. On a GPU-less box it cannot fail; the
+    default-tier test above is the pin that holds everywhere."""
+    import os
+    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
     r = subprocess.run([
         sys.executable, "-c", _TRAIN_END_STATE, "--train", "--device", "cpu", "--vec-backend",
         "serial", "--num_envs", "16", "--no-self-play", "--no-dead-run-abort",
@@ -515,6 +527,7 @@ def test_cpu_train_child_ends_without_cuda(tmp_path):
         str(tmp_path), "--run-id", "r"
     ],
                        cwd=REPO_ROOT,
+                       env=env,
                        capture_output=True,
                        text=True,
                        timeout=600)

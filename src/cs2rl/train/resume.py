@@ -316,8 +316,8 @@ def _rng_state_dict():
 
     The CUDA states are captured only when this process already has a CUDA
     context (torch.cuda.is_initialized()): get_rng_state_all() itself opens one
-    (measured, #307), so gating on is_available() made every --device cpu run
-    on a GPU box open a context. A run that trains on CUDA has initialized it
+    (measured, #307), so gating on is_available() made every --device cpu
+    training run on a GPU box open a context. A run that trains on CUDA has initialized it
     long before its first checkpoint, so its checkpoints keep "torch_cuda"."""
     import torch
     st: dict[str, Any] = {
@@ -357,7 +357,10 @@ def _rng_load_state_dict(st):
     """Inverse of _rng_state_dict. A CUDA state saved on a GPU box is skipped
     silently on a CPU-only resume (device is allowlisted). set_rng_state_all
     only queues the restore until CUDA initializes (measured, #307), so a CPU
-    run on a GPU box never opens a context here."""
+    run on a GPU box never opens a context here.
+    KNOWN LIMIT: a GPU -> CPU -> GPU resume chain drops the first leg's CUDA RNG
+    stream (the CPU leg hides CUDA, so it neither restores nor re-captures it);
+    CUDA runs are seeded but not bit-exact anyway (see seed_everything)."""
     import torch
     random.setstate(st["python"])
     np.random.set_state(st["numpy"])
