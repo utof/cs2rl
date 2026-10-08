@@ -97,8 +97,8 @@ src/cs2rl/env/c/binding*.pyd
 # Editor/agent scratch dir.
 .ua
 
-# complexipy's on-disk cache; created by the (currently commented-out)
-# pre-commit step. Untracked and previously unignored, so it showed up in
+# complexipy's on-disk cache; created by the complexipy step
+# of the pre-commit hook. Untracked and previously unignored, so it showed up in
 # every `git status`.
 .complexipy_cache
 

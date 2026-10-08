@@ -33,3 +33,20 @@ export UV_PYTHON=python3.12
 # re-points the shared editable install at the worktree (#220).
 echo "[pre-merge-commit] pyrefly type check (merged index, whole project)..."
 uv run --no-sync python scripts/pyrefly_gate.py
+
+# Complexity ratchet (#216) on the merged result. A clean merge can create an over-40
+# function that no commit on either side had (two sides each add a branch to a
+# function at 37: each passes at 39, the merge is 41), and the 41 then becomes
+# HEAD's value, so only this step sees it. Same commands as pre-commit; the Python
+# list is the ACMR-filtered one for the same reason as there (ruff exits 1 on a
+# deleted path), and complexipy exits 1 on an empty path list, hence the guard.
+# KNOWN LIMIT: GitHub-side merges (`gh pr merge`) and rebases run no hook.
+mapfile -t python_files < <(git diff --cached --name-only --diff-filter=ACMR -- '*.py')
+if [ "${#python_files[@]}" -gt 0 ]; then
+    echo "[pre-merge-commit] Ruff McCabe complexity on merged Python files..."
+    uv run --no-sync ruff check --select C901 \
+        --config 'lint.mccabe.max-complexity=40' "${python_files[@]}"
+    echo "[pre-merge-commit] Cognitive complexity ratchet on merged Python files..."
+    uv run --no-sync complexipy "${python_files[@]}" --max-complexity-allowed 40 \
+        --diff HEAD --staged --failed --plain
+fi
