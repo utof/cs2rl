@@ -92,7 +92,7 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                       : 0.0f;
         obs[21] =
             (a->fire_cd > 0 && def->cycle_ticks > 0) ? a->fire_cd / (float)def->cycle_ticks : 0.0f;
-        obs[22] = (float)(a->team == 0 && a->has_bomb);
+        obs[22] = (float)(a->team == 0 && bomb_carrier(g) == i);
         obs[23] = (float)a->alive;
         obs[24] = (float)(a->team == 0);
 
@@ -257,23 +257,23 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
          * +11 t_alive · +12 ct_alive · +13 designated-carrier bit. */
         int gb      = OBS_GLOBAL_BASE;
         obs[gb + 0] = g->round_ticks_left / (float)sd->round_time;
-        /* Bomb status one-hot (+1..+4). Dropped takes precedence here even
-         * when planted is also set; position and timer below retain their
-         * separate raw-field rules. */
-        int carrier = bomb_current_carrier(g);
+        /* Bomb status one-hot (+1..+4): carried by self, carried by a
+         * teammate (a CT sees neither), dropped, planted (from the plant on,
+         * including the resolved phases). */
+        int carrier = bomb_carrier(g);
         if (carrier >= 0) {
             if (carrier == i)
                 obs[gb + 1] = 1.0f; /* carried by self */
             else if (a->team == 0)
                 obs[gb + 2] = 1.0f; /* carried by teammate */
-        } else if (g->bomb_is_dropped) {
+        } else if (g->bomb.phase == BOMB_DROPPED) {
             obs[gb + 3] = 1.0f;
-        } else if (g->bomb_planted) {
+        } else if (bomb_planted(g)) {
             obs[gb + 4] = 1.0f;
         }
         /* bomb position (+5,+6) */
-        if (g->bomb_planted || g->bomb_is_dropped) {
-            float bx = g->bomb_x - a->x, by = g->bomb_y - a->y;
+        if (bomb_on_ground(g)) {
+            float bx = g->bomb.x - a->x, by = g->bomb.y - a->y;
             obs[gb + 5] = (map_diag > 0.0f) ? bx / map_diag : 0.0f;
             obs[gb + 6] = (map_diag > 0.0f) ? by / map_diag : 0.0f;
         } else if (carrier >= 0 && a->team == 0 && carrier != i) {
@@ -287,18 +287,20 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
          * z-delta only).  Bomb z would require obs version contract for plug-in.
          * See gh #(filed) for the bomb-z-aware obs follow-up. */
         obs[gb + 7] = 0.0f; /* bomb z placeholder (intentionally constant pre-followup) */
-        obs[gb + 8] = g->bomb_planted ? g->bomb_ticks_left / (float)sd->bomb_timer : 0.0f;
-        obs[gb + 9] = (g->bomb_being_planted_by >= 0 && sd->bomb_plant_time > 0)
-                          ? g->bomb_plant_ticks / (float)sd->bomb_plant_time
+        obs[gb + 8] = bomb_planted(g) ? g->bomb.ticks_left / (float)sd->bomb_timer : 0.0f;
+        obs[gb + 9] = (g->bomb.phase == BOMB_PLANTING && sd->bomb_plant_time > 0)
+                          ? g->bomb.progress / (float)sd->bomb_plant_time
                           : 0.0f;
-        /* +10: defuse progress — extract to avoid GCC statement-expression */
+        /* +10: defuse progress (DEFUSING, and DEFUSED on its completion tick)
+         * — extract to avoid GCC statement-expression */
         {
             float defuse_prog = 0.0f;
-            if (g->bomb_being_defused_by >= 0) {
-                AgentState* def2  = &g->agents[g->bomb_being_defused_by];
+            int   defuser     = bomb_defuser(g);
+            if (defuser >= 0) {
+                AgentState* def2  = &g->agents[defuser];
                 int         dtime = def2->has_kit ? sd->bomb_defuse_kit : sd->bomb_defuse_time;
                 if (dtime > 0)
-                    defuse_prog = g->bomb_defuse_ticks / (float)dtime;
+                    defuse_prog = g->bomb.progress / (float)dtime;
             }
             obs[gb + 10] = defuse_prog;
         }

@@ -18,6 +18,8 @@
  * movement, LoS and draw_walls all read. Raylib-free on purpose: it must
  * never learn about WALL_DEPTH, which is a draw-only offset applied below. */
 #include "cs2_solids.h"
+/* bomb_carrier / bomb_on_ground / bomb_planted — the bomb lifecycle queries. */
+#include "cs2_bomb.h"
 
 #define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
@@ -154,7 +156,7 @@ static void _copy_agents_to_snapshot(Dust2Env* env, AgentSnapshot* snap) {
         snap[i].hp       = a->hp;
         snap[i].alive    = a->alive;
         snap[i].team     = a->team;
-        snap[i].has_bomb = a->has_bomb;
+        snap[i].has_bomb = (bomb_carrier(&env->game) == i);
     }
 }
 
@@ -682,13 +684,13 @@ static void draw_bomb(Dust2Env* env, Client* cl, float alpha) {
     (void)cl;
     (void)alpha;
     GameState* g = &env->game;
-    if (g->bomb_is_dropped || g->bomb_planted) {
-        float bx = g->bomb_x;
-        float by = g->bomb_y;
-        float bz = g->bomb_z;
+    if (bomb_on_ground(g)) {
+        float bx = g->bomb.x;
+        float by = g->bomb.y;
+        float bz = g->bomb.z;
         /* Pulse red when planted */
         Color col;
-        if (g->bomb_planted) {
+        if (bomb_planted(g)) {
             float pulse = 0.5f + 0.5f * sinf((float)g->tick * 0.5f);
             col         = (Color){255, (uint8_t)(30 * (1.0f - pulse)), 0, 255};
         } else {
@@ -728,8 +730,8 @@ static void draw_hud(Client* cl, Dust2Env* env) {
         TextFormat("%s %d/%d", wname, ammo, resrv), cl->width - 150, cl->height - 30, 16, WHITE);
 
     /* Bomb clock M:SS only while planted. ticks/16 = whole seconds. */
-    if (g->bomb_planted) {
-        int secs = g->bomb_ticks_left / 16;
+    if (bomb_planted(g)) {
+        int secs = g->bomb.ticks_left / 16;
         if (secs < 0)
             secs = 0;
         DrawText(

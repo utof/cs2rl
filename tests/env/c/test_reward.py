@@ -4,7 +4,7 @@ import math
 import numpy as np
 import pytest
 
-from cs2rl.env.c.cs2_env import make_env
+from cs2rl.env.c.cs2_env import BombPhase, make_env
 from cs2rl.env.config import EnvConfig, RewardWeights
 from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES
 
@@ -223,11 +223,8 @@ def test_bomb_entry_bonus():
     assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
 
     # Assign bomb to agent 0 and teleport them to bombsite
-    for i in range(10):
-        env._c_env.game.agents[i].has_bomb = 0
+    env.give_bomb(0)
     bomber = env._c_env.game.agents[0]
-    bomber.has_bomb = 1
-    env._c_env.game.bomb_carrier_id = 0
 
     # Ensure bombsite_entered flag is clear for bomber
     env._c_env.game.bombsite_entered[0] = 0
@@ -268,12 +265,9 @@ def test_plant_progress_reward():
     assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
 
     # Set up bomber at bombsite — mark entry as already done so no entry bonus
-    for i in range(10):
-        env._c_env.game.agents[i].has_bomb = 0
     bomber_idx = 0
+    env.give_bomb(bomber_idx)
     bomber = env._c_env.game.agents[bomber_idx]
-    bomber.has_bomb = 1
-    env._c_env.game.bomb_carrier_id = bomber_idx
     env._c_env.game.bombsite_entered[bomber_idx] = 1   # suppress entry bonus
 
     bomber.area_idx = site_idx
@@ -281,13 +275,12 @@ def test_plant_progress_reward():
     bomber.y = float(site_centroid[1])
     bomber.z = 0.0
 
-    # Start planting: set bomb_being_planted_by to bomber_idx and advance ticks
-    env._c_env.game.bomb_being_planted_by = bomber_idx
-    env._c_env.game.bomb_plant_ticks = 1               # already started (not tick 0)
-
-    # use=1 to continue planting (Batch 3: USE is now head index 4)
+    # use=1 (Batch 3: USE is now head index 4). The first press starts the plant;
+    # the second one is a mid-plant tick (progress already 1, not tick 0).
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     actions[bomber_idx, 4] = 1
+    env.step(actions)
+    assert (env._c_env.game.bomb.phase, env._c_env.game.bomb.progress) == (BombPhase.PLANTING, 1)
     _, rewards, _, _, _ = env.step(actions)
 
     # The per-tick plant progress reward is +0.05
@@ -324,37 +317,35 @@ def test_planter_death_releases_plant_lock():
             break
     assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
 
-    def _put_at_site(i, has_bomb):
+    def _put_at_site(i):
         a = g.agents[i]
         a.alive = 1
         a.hp = 100
-        a.has_bomb = has_bomb
         a.area_idx = site_idx
         a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
         g.bombsite_entered[i] = 1      # suppress entry bonus; not under test
 
-    # Agent 0 mid-plant at the site (5 of plant_time ticks done).
-    for i in range(10):
-        g.agents[i].has_bomb = 0
-    _put_at_site(0, has_bomb=1)
-    g.bomb_carrier_id = 0
-    g.bomb_being_planted_by = 0
-    g.bomb_plant_ticks = 5
+    # Agent 0 mid-plant at the site (5 of plant_time ticks done, through USE).
+    env.give_bomb(0)
+    _put_at_site(0)
+    use0 = np.zeros((10, ACTION_DIM), dtype=np.int64)
+    use0[0, 4] = 1
+    for _ in range(5):
+        env.step(use0)
+    assert (g.bomb.phase, g.bomb.agent, g.bomb.progress) == (BombPhase.PLANTING, 0, 5)
 
     # Kill the planter; one step must release the lock and reset progress.
     g.agents[0].alive = 0
     g.agents[0].hp = 0
     env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
-    assert int(
-        g.bomb_being_planted_by) == -1, (f"dead planter must release the plant lock, still held by "
-                                         f"{int(g.bomb_being_planted_by)}")
-    assert int(g.bomb_plant_ticks) == 0, (
-        f"plant progress must reset on planter death, got {int(g.bomb_plant_ticks)}")
+    assert g.bomb.phase == BombPhase.DROPPED, (
+        f"dead planter must drop the bomb and end the plant, phase is {g.bomb.phase}")
+    assert int(g.bomb.progress) == 0, (
+        f"plant progress must reset on planter death, got {int(g.bomb.progress)}")
 
     # Hand the bomb to a living T at the site; a full fresh plant must succeed.
-    _put_at_site(1, has_bomb=1)
-    g.bomb_carrier_id = 1
-    g.bomb_is_dropped = 0
+    _put_at_site(1)
+    env.give_bomb(1)
     plant_time = int(sd.bomb_plant_time)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     actions[1, 4] = 1                                                                # HEAD_USE held (Batch 3: USE is head 4)
@@ -373,8 +364,7 @@ def test_plant_completion_writes_plant_tick():
 
     Why: later analysis needs a direct plant timestamp (0 = never planted).
     Pitfall: do not copy the test_plant_progress_reward setup — that test
-    pre-sets bomb_plant_ticks=1 and takes one progress step only, so it
-    never completes a plant. Site placement mirrors _put_at_site above.
+    takes two USE steps only, so it never completes a plant. Site placement mirrors _put_at_site above.
     g->tick is incremented at the top of env_step, so plant_tick >= 1.
     """
     env = make_env(seed=0, auto_reset=False)
@@ -392,17 +382,13 @@ def test_plant_completion_writes_plant_tick():
             site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
             break
     assert site_idx is not None and site_centroid is not None
-    for i in range(10):
-        g.agents[i].has_bomb = 0
+    env.give_bomb(0)
     a = g.agents[0]
     a.alive = 1
     a.hp = 100
-    a.has_bomb = 1
     a.area_idx = site_idx
     a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
     g.bombsite_entered[0] = 1
-    g.bomb_carrier_id = 0
-    g.bomb_is_dropped = 0
     plant_time = int(sd.bomb_plant_time)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     actions[0, 4] = 1
@@ -602,8 +588,10 @@ def test_reward_components_logged_in_terminal_info():
 # ── Batch 1 Task 3: differential win-reward magnitude tests ──────────────────
 #
 # Strategy: direct-stimulus white-box approach.
-# We set game state (winner, bomb_planted, bomb_ticks_left, round_over, alive
+# We set game state (winner, the bomb's phase and countdown, round_over, alive
 # agents) directly via ctypes, then call env.step() with all-zero actions.
+# The bomb part is written by _set_planted_bomb as a state from the BombState
+# table in cs2_types.h; binding.step rejects any other hand-written bomb state.
 # All other reward weights (kill, death, pbrs, survival, shot, inaction) are
 # zeroed so step_stats.reward_win reflects only the win-magnitude path.
 #
@@ -663,6 +651,23 @@ def _make_zeroed_env():
     )
 
 
+def _set_planted_bomb(env, ticks_left, *, phase=BombPhase.PLANTED, agent=-1, progress=0):
+    """Hand-write a planted bomb on the map's first bombsite area.
+
+    Writes one state of the BombState table (cs2_types.h): binding.step runs
+    bomb_state_error (cs2_bomb.h) before stepping and raises on anything the
+    sim could not reach, so a typo here fails loudly instead of testing an
+    impossible state. The position stays (0, 0, 0), as raw-planted states
+    always had here; nothing these tests assert reads it.
+    """
+    b = env._c_env.game.bomb
+    b.phase, b.agent, b.progress = phase, agent, progress
+    b.ticks_left = ticks_left
+    b.area_idx = next(i for i, flag in enumerate(env.map_data.bombsite_by_idx) if flag)
+    b.x = b.y = b.z = 0.0
+    return b.area_idx
+
+
 def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_left, alive_teams):
     """Configure game state for a deterministic round-end scenario.
 
@@ -672,15 +677,15 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
     Use this helper for scenarios where round_over is already set before step()
     (detonation, elimination, timeout, and post-plant elimination edge-cases).
     For ct_defuse, see the standalone `test_natural_defuse` — pre-setting
-    round_over blocks the defuse branch in process_bomb (cs2_bomb.h:27), so
+    round_over blocks the defuse branch in process_bomb (cs2_bomb.h), so
     bomb_just_defused would never fire and the spec-compliant classifier in
     compute_rewards (which requires bomb_just_defused=1 for defuse) would
     misclassify as elimination.
 
     Args:
         winner:          0=T wins, 1=CT wins, -1=timeout
-        bomb_planted:    1 if bomb is planted
-        bomb_ticks_left: remaining bomb timer (<=0 means detonated)
+        bomb_planted:    1 if bomb is planted (else the reset's carried bomb stays)
+        bomb_ticks_left: remaining bomb timer (<=0 means detonated: DETONATED phase)
         round_ticks_left: remaining round timer
         alive_teams:     set of teams that have survivors ({0}, {1}, or {0,1})
     """
@@ -700,8 +705,10 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
         g.agents[5].team = 1
     # Set round-end state
     g.winner = winner
-    g.bomb_planted = bomb_planted
-    g.bomb_ticks_left = bomb_ticks_left
+    if bomb_planted:
+        _set_planted_bomb(env,
+                          bomb_ticks_left,
+                          phase=BombPhase.DETONATED if bomb_ticks_left <= 0 else BombPhase.PLANTED)
     g.round_ticks_left = round_ticks_left
     g.round_over = 1
 
@@ -729,17 +736,17 @@ def test_differential_win_magnitudes(scenario, winner, bomb_planted, bomb_ticks_
     (detonation, elimination, timeout, post-plant elimination).
 
     Classification logic (mirrors compute_rewards round-over block):
-      T win   (winner == 0): detonation if bomb_planted && ticks<=0, else elimination
+      T win   (winner == 0): detonation if the bomb is DETONATED, else elimination
       CT win  (winner == 1): defuse if bomb_just_defused, else elimination
       Timeout (winner == -1): timed_out flag set; CT gets ct_timeout reward
 
     Scenarios covered:
-      t_detonation — bomb_planted, ticks<=0 → exploded (5.0).
+      t_detonation — bomb DETONATED (ticks<=0) → exploded (5.0).
       t_elimination — no plant, T killed all CT (3.0).
       ct_elimination (preplant) — !bomb_planted, T dead before plant.
         bomb_just_defused=0 → elimination branch → 3.0.
       ct_elimination_postplant — LIVE-PLAY EDGE. CT killed last T with bomb
-        planted but not defused. cs2_env.h:146-152 sets winner=1/round_over=1
+        planted but not defused. env_step (cs2_env.h) sets winner=1/round_over=1
         when !t_alive, then process_bomb's defuse branch is skipped
         (round_over guard), so bomb_just_defused stays 0. Must classify as
         elimination (3.0), NOT defuse (5.0).
@@ -829,7 +836,7 @@ def test_natural_defuse():
 
     Why a dedicated test (not a parametrize row):
       - ct_defuse is the only scenario where round_over is NOT pre-set; the
-        test must arrange alive T agents so cs2_env.h:146's elimination check
+        test must arrange alive T agents so env_step's elimination check (cs2_env.h)
         is skipped, then step once to let process_bomb complete the defuse.
         That requires structurally different setup from the other cases.
       - We assert multiple invariants (flag values, per-agent rewards for
@@ -837,9 +844,9 @@ def test_natural_defuse():
 
     Pitfall avoided:
       An earlier attempt killed all T agents in the defuse setup. That made
-      t_alive=0, triggering cs2_env.h:146's unconditional elimination path
+      t_alive=0, triggering env_step's unconditional elimination path
       (round_over=1, winner=1) BEFORE process_bomb could fire. The defuse
-      branch then got skipped (cs2_bomb.h:27 guard), bomb_just_defused stayed
+      branch then got skipped (its round_over guard), bomb_just_defused stayed
       0, and the scenario mis-classified as elimination (3.0). We keep at
       least one T agent alive, placed at a non-bomb area so process_combat
       does nothing (actions are zeroed → no shoot), to let process_bomb reach
@@ -858,36 +865,35 @@ def test_natural_defuse():
         g.agents[i].alive = 0
         g.agents[i].hp = 0
 
-    # Alive CT defuser at the bomb area (agent 5).
+    # Alive CT defuser (agent 5); placed on the bomb's area below.
     ct = g.agents[5]
     ct.alive = 1
     ct.hp = 100
     ct.team = 1
     ct.has_kit = 0                     # use no-kit defuse_time
-    ct.area_idx = 0                    # arbitrary valid area
 
     # Alive T at a different area so process_combat doesn't kill them
     # (zeroed actions → no shoot → no combat resolution). Having a T alive
-    # is REQUIRED to avoid the elimination check in cs2_env.h:146 firing
+    # is REQUIRED to avoid env_step's elimination check (cs2_env.h) firing
     # before process_bomb runs.
     t = g.agents[0]
     t.alive = 1
     t.hp = 100
     t.team = 0
-    t.area_idx = 1                     # anywhere != ct.area_idx
 
-    # Bomb state: planted, live, co-located with the CT defuser, round open.
-    g.bomb_planted = 1
-    g.bomb_area_idx = ct.area_idx
-    g.bomb_ticks_left = 50             # plenty of bomb-timer headroom
+    # Bomb state: planted on a bombsite, live, and the CT one tick from
+    # finishing its defuse (short-circuited so ONE step completes it); 50
+    # ticks of bomb-timer headroom; round open.
+    defuse_time = int(sd.bomb_defuse_time)
+    ct.area_idx = _set_planted_bomb(env,
+                                    50,
+                                    phase=BombPhase.DEFUSING,
+                                    agent=5,
+                                    progress=defuse_time - 1)
+    t.area_idx = ct.area_idx + 1       # anywhere != ct.area_idx
     g.round_ticks_left = 100           # round timer well above zero
     g.round_over = 0                   # CRITICAL: leave the round open
     g.winner = -1                      # ongoing
-
-    # Short-circuit the defuse timer so ONE step completes the defuse.
-    defuse_time = int(sd.bomb_defuse_time)
-    g.bomb_being_defused_by = 5
-    g.bomb_defuse_ticks = defuse_time - 1
 
     # HEAD_USE = 1 keeps the CT defusing this tick.
     # Batch 3: USE moved from head 5 to head 4 after HEAD_AIM removal.
@@ -897,7 +903,7 @@ def test_natural_defuse():
     env.step(actions)
 
     # Pin the load-bearing precondition: the decoy T must survive this step
-    # so process_combat's t_alive count stays positive and cs2_env.h:146's
+    # so process_combat's t_alive count stays positive and env_step's
     # elimination guard does NOT fire before process_bomb. If a future
     # process_combat change (passive chip damage, AoE, long-range hit) kills
     # this T mid-step, the defuse branch gets skipped silently and the

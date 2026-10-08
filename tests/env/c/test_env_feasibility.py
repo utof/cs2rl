@@ -50,10 +50,7 @@ def test_scripted_bomber_can_reach_site_and_plant():
     env._c_env.game.round_ticks_left = 100000
 
     bomber_idx = 4
-    for i in range(10):
-        env._c_env.game.agents[i].has_bomb = 0
-    env._c_env.game.agents[bomber_idx].has_bomb = 1
-    env._c_env.game.bomb_carrier_id = bomber_idx
+    env.give_bomb(bomber_idx)
 
     # Knife has the highest wishspeed (250 u/s) so the bomber rolls up to
     # max speed in ~3 accel ticks and spends less budget per area hop.

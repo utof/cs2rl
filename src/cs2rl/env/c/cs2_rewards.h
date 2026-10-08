@@ -1,6 +1,7 @@
 #pragma once
 
 #include "cs2_types.h"
+#include "cs2_bomb.h"
 
 static float _potential(Dust2Env* env, int team) {
     float       alive_t = 0.0f, alive_o = 0.0f;
@@ -9,6 +10,7 @@ static float _potential(Dust2Env* env, int team) {
     float       bomb_progress        = 0.0f;
     float       nav_approach         = 0.0f;
     int         bomb_carrier_area_id = INVALID_AREA_IDX;
+    int         carrier              = bomb_carrier(&env->game);
     StaticData* sd                   = env->sd;
 
     for (int i = 0; i < N_AGENTS; i++) {
@@ -55,13 +57,13 @@ static float _potential(Dust2Env* env, int team) {
             }
         }
 
-        if (a->team == 0 && a->has_bomb) {
+        if (a->team == 0 && i == carrier) {
             bomb_carrier_area_id = area_id;
         }
     }
 
     /* R0-F (#136): same scale>0 + dist<1e29f guards as the nav block above. */
-    if (sd->bombsite_dist_scale > 0.0f && !env->game.bomb_planted &&
+    if (sd->bombsite_dist_scale > 0.0f && !bomb_planted(&env->game) &&
         bomb_carrier_area_id != INVALID_AREA_IDX && bomb_carrier_area_id <= sd->max_area_id) {
         float dist = sd->bombsite_dist[bomb_carrier_area_id];
         if (dist < 1e29f) {
@@ -104,7 +106,7 @@ static void compute_rewards(Dust2Env* env,
          *
          * Classification (mutually exclusive, evaluated in order):
          *   T win   (winner == 0):
-         *     - detonation: bomb_planted && bomb_ticks_left <= 0 (bomb timer ran to zero)
+         *     - detonation: the bomb is DETONATED (its timer ran to zero, cs2_bomb.h)
          *     - elimination: otherwise (killed all CT, with or without planting attempt)
          *   CT win  (winner == 1):
          *     - defuse: bomb_just_defused set this tick (cs2_bomb.h defuse branch)
@@ -131,7 +133,7 @@ static void compute_rewards(Dust2Env* env,
         int t_won     = (g->winner == 0);
         int ct_won    = (g->winner == 1);
         int timed_out = (g->winner == -1);
-        int detonated = t_won && g->bomb_planted && (g->bomb_ticks_left <= 0);
+        int detonated = t_won && bomb_detonated(g);
         int defused   = ct_won && bomb_just_defused;
 
         ss->win_by_detonation = detonated ? 1 : 0;

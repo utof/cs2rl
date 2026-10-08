@@ -505,12 +505,14 @@ typedef struct {
     int32_t hp;
     int32_t fire_cd;  /* was shoot_cd */
     int8_t  alive;
-    int8_t  has_bomb;
+    /* No per-agent has_bomb (#164): possession is GameState.bomb (BombState
+     * below), read through bomb_carrier() in cs2_bomb.h. The byte it used is
+     * the first of _pad0, so every later offset is unchanged. */
     int8_t  has_kit;
     int8_t  team;              /* 0=T, 1=CT                                     */
     int8_t  is_moving;         /* set by movement; read by sound system          */
     int8_t  fired_this_tick;   /* set by shoot; read by sound system             */
-    int8_t  _pad0[2];          /* explicit padding to int32 boundary */
+    int8_t  _pad0[3];          /* explicit padding to int32 boundary */
     int32_t enemy_mem_idx[5];  /* area_idx of last known pos; INVALID_AREA_IDX  */
     int32_t enemy_mem_tick[5]; /* tick when recorded; STALE_MEMORY_TICK=-9999   */
     /* Phase 4b additions — appended to preserve existing field offsets */
@@ -558,25 +560,64 @@ typedef struct {
     int8_t _pad5[3];
 } AgentState;
 
+/* ── Bomb lifecycle (#164) ──
+ * The round's one bomb is ONE state: a phase plus the agent, progress and
+ * position that phase needs. It replaces bomb_planted, bomb_is_dropped,
+ * bomb_carrier_id, the planter/defuser ids and tick counters, and the
+ * per-agent has_bomb flag, which could be set to contradict each other.
+ *
+ * Only cs2_bomb.h writes it: a phase change goes through a named transition,
+ * which leaves every field at its value in the table below for the new phase,
+ * and process_bomb advances progress and ticks_left within a phase.
+ * Consumers (masks, observations, rewards, render, the Python mirror) read it
+ * through the cs2_bomb.h queries (bomb_carrier, bomb_planted, ...).
+ * bomb_state_error() (cs2_bomb.h) checks a state against this table, except a
+ * lying bomb's position and a running countdown's value; binding py_step runs
+ * it before every step, so a hand-assembled state that breaks it raises
+ * instead of stepping.
+ *
+ *   phase           agent          progress        area_idx / x,y,z / ticks_left
+ *   CARRIED         carrier (T)    0               INVALID / 0,0,0 / 0
+ *   PLANTING        carrier (T)    plant ticks     INVALID / 0,0,0 / 0
+ *   DROPPED         -1             0               INVALID / ground pos / 0
+ *   PLANTED         -1             0               site / plant pos / countdown
+ *   DEFUSING        defuser (CT)   defuse ticks    site / plant pos / countdown
+ *   DEFUSED         defuser (CT)   defuse ticks    site / plant pos / countdown
+ *   DETONATED       -1             0               site / plant pos / <= 0
+ *
+ * PITFALL: the values are part of the binding contract (struct_sizes()
+ * publishes each one; cs2_env.BombPhase mirrors them). Append, never renumber. */
+typedef enum {
+    BOMB_CARRIED   = 0,
+    BOMB_PLANTING  = 1,
+    BOMB_DROPPED   = 2,
+    BOMB_PLANTED   = 3,
+    BOMB_DEFUSING  = 4,
+    BOMB_DEFUSED   = 5,
+    BOMB_DETONATED = 6,
+} BombPhase;
+
+typedef struct {
+    int32_t phase;      /* BombPhase */
+    int32_t agent;      /* carrier or defuser index, -1 when the phase has none */
+    int32_t progress;   /* plant ticks (PLANTING) or defuse ticks (DEFUSING/DEFUSED) */
+    int32_t ticks_left; /* detonation countdown, from the plant on */
+    int32_t area_idx;   /* plant area; INVALID_AREA_IDX before the plant */
+    float   x, y, z;    /* where the bomb lies (DROPPED, and from the plant on) */
+} BombState;
+
 /* ── Game state ── */
 typedef struct {
     int32_t    tick;
     int32_t    round_ticks_left;
-    AgentState agents[10]; /* agents[0..4]=T, agents[5..9]=CT              */
-    int8_t     bomb_planted;
+    AgentState agents[10];  /* agents[0..4]=T, agents[5..9]=CT              */
     int8_t     round_over;
-    int32_t    winner;          /* 0=T, 1=CT, -1=ongoing                        */
-    int32_t    bomb_carrier_id; /* agent index 0-4 (T side only)                */
-    int32_t    bomb_area_idx;   /* INVALID_AREA_IDX until planted               */
-    float      bomb_x, bomb_y, bomb_z;
-    int32_t    bomb_ticks_left;
-    int32_t    bomb_being_planted_by; /* agent index or -1 */
-    int32_t    bomb_plant_ticks;
-    int32_t    bomb_being_defused_by; /* agent index or -1 */
-    int32_t    bomb_defuse_ticks;
+    int8_t     _pad_gs0[3]; /* explicit padding to int32 boundary            */
+    int32_t    winner;      /* 0=T, 1=CT, -1=ongoing                        */
+    BombState  bomb;        /* #164: the bomb lifecycle, see BombState above */
     /* Batch 2: round-fixed designated bomb carrier (T-side index 0..4).
-     * Distinct from bomb_carrier_id, which is the *dynamic* possession
-     * tracker (reassigned on drop+auto-pickup; pickup is in process_bomb, cs2_bomb.h). This
+     * Distinct from bomb_carrier(), which is the *dynamic* possession
+     * (it changes on drop+auto-pickup; pickup is in process_bomb, cs2_bomb.h). This
      * field is set ONLY in env_reset and is the round's stable identity
      * signal. Consumed by compute_observations to emit the role bit at
      * obs[OBS_GLOBAL_BASE+13] (=109 since the Batch 6 bearing slots; was 106,
@@ -585,8 +626,7 @@ typedef struct {
      * cs2_env.py. */
     int32_t round_designated_carrier_id;
     int8_t  bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
-    int8_t  bomb_is_dropped;     /* 1 when bomb on ground */
-    int8_t  _pad_gs[2];          /* pad to 4-byte boundary */
+    int8_t  _pad_gs[3];          /* pad to 4-byte boundary */
 } GameState;
 
 /* ── Per-step stats exported for Python-side episode aggregation ─────────── */

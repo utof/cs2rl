@@ -92,7 +92,7 @@ Task 3 must reproduce all three with `--n-active 5`, rebuilding its own .so:
                                   end + auto-reset together)
 
 BOMB-MODE FINGERPRINTS (seed 7, rng-seed 123), measured with the binding built
-at 9efe642:
+at 9efe642. #164's canonical bomb state reproduces both:
     --steps 5000 --aim-mode bomb
         e2fb81c20d5ae02337dd935b0165c7aeb5c7a1557f7aa9dca92659da191f1b03
         (bomb: drop=13 pickup=2 same_tick_pickup=2 plant_start=20

@@ -165,7 +165,7 @@ static void compute_masks(Dust2Env* env) {
         }
         /* Eligibility is shared with bomb actions; masks still describe the
          * next step and do not gate on round_over or an in-progress lock. */
-        m[moff[HEAD_USE] + 1] = (int8_t)(bomb_can_plant(sd, g, a) || bomb_can_defuse(g, a));
+        m[moff[HEAD_USE] + 1] = (int8_t)(bomb_can_plant(sd, g, i) || bomb_can_defuse(g, a));
     }
 }
 
@@ -181,18 +181,15 @@ static void env_reset(Dust2Env* env) {
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);
 
-    g->round_ticks_left      = sd->round_time;
-    g->winner                = -1;
-    g->bomb_area_idx         = INVALID_AREA_IDX;
-    g->bomb_being_planted_by = -1;
-    g->bomb_being_defused_by = -1;
+    g->round_ticks_left = sd->round_time;
+    g->winner           = -1;
 
     /* Rung 0: the carrier is drawn among ACTIVE T slots only (a parked
      * carrier would never drop/plant). Identity at n_active == TEAM_SIZE. */
     int n_active     = sd->n_active_per_team;
     int bomb_carrier = (int)(xorshift32(&env->rng) % n_active);
-    spawn_team(g, sd, &env->rng, 0, sd->t_spawns, sd->n_t_spawns, bomb_carrier, n_active);
-    spawn_team(g, sd, &env->rng, 1, sd->ct_spawns, sd->n_ct_spawns, bomb_carrier, n_active);
+    spawn_team(g, sd, &env->rng, 0, sd->t_spawns, sd->n_t_spawns, n_active);
+    spawn_team(g, sd, &env->rng, 1, sd->ct_spawns, sd->n_ct_spawns, n_active);
     /* Parked slots: the GameState memset above left them all-zero, i.e.
      * team=0 / alive=0 / area_idx=0 — area 0 is a REAL area and team=0 would
      * mis-attribute parked CT rows to T in every team-indexed loop. Make
@@ -211,7 +208,7 @@ static void env_reset(Dust2Env* env) {
         }
     }
 
-    g->bomb_carrier_id = bomb_carrier;
+    bomb_give(g, bomb_carrier);
     /* Batch 2: round-fixed copy. NEVER reassigned mid-round (see cs2_types.h
      * field comment). compute_observations reads this for obs[106] (T4 shift). */
     g->round_designated_carrier_id = bomb_carrier;

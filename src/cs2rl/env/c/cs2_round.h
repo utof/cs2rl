@@ -25,7 +25,6 @@ static void spawn_team(GameState*     g,
                        int            team,
                        const int32_t* spawn_list,
                        int            n_spawns,
-                       int            bomb_carrier,
                        int            n_active) {
     int perm[TEAM_SIZE];
     for (int i = 0; i < TEAM_SIZE; i++)
@@ -54,7 +53,7 @@ static void spawn_team(GameState*     g,
         a->y        = sd->centroid_xy[area_idx * 2 + 1];
         a->area_idx = area_idx;
 
-        init_agent(a, team, i, bomb_carrier, rng, sd);
+        init_agent(a, team, rng, sd);
         a->participating = 1;
     }
 }

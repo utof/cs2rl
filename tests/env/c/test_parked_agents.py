@@ -52,8 +52,7 @@ def test_one_active_per_team_spawns_slots_0_and_5(simple_map):
                 # INVALID_AREA_IDX, not the memset zero (area 0 is a real area)
                 assert all(ag[i].enemy_mem_idx[k] == -1 for k in range(TEAM_SIZE)), i
             assert ag[i].team == (0 if i < TEAM_SIZE else 1), "parked CT slots must be team 1"
-        assert env._c_env.game.bomb_carrier_id == 0
-        assert ag[0].has_bomb == 1
+        assert env._c_env.game.bomb_carrier == 0
     finally:
         env.close()
 

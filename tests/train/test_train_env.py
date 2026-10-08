@@ -11,7 +11,7 @@ import numpy as np
 import pytest
 
 from cs2rl import policy as policy_mod
-from cs2rl.env.c.cs2_env import make_env
+from cs2rl.env.c.cs2_env import BombPhase, make_env
 from cs2rl.spec import action as spec_action
 from cs2rl.spec import obs as spec_obs
 from tests._helpers import envs as helper_envs
@@ -740,20 +740,16 @@ def test_ret_var_reflects_symlog_scale():
 
 # ── Batch 2 (utof/cs2rl Batch 2): designated bomb carrier — round-fixed ──
 def test_round_designated_carrier_assigned():
-    """At env_reset, all three carrier signals must align."""
+    """At env_reset, the designated carrier is the one carrying the bomb."""
     env = make_env(seed=42)
     try:
         env.reset(seed=42)
         g = env._c_env.game
         rid = g.round_designated_carrier_id
         assert 0 <= rid < 5, f"round_designated_carrier_id out of range: {rid}"
-        assert g.bomb_carrier_id == rid, (f"bomb_carrier_id ({g.bomb_carrier_id}) != "
-                                          f"round_designated_carrier_id ({rid}) at reset")
-        assert g.agents[rid].has_bomb == 1, (
-            f"designated carrier (idx {rid}) does not have_bomb=1 at reset")
-        for i in range(5):
-            if i != rid:
-                assert g.agents[i].has_bomb == 0, (f"non-carrier T idx {i} has_bomb=1 at reset")
+        assert g.bomb.phase == BombPhase.CARRIED, f"bomb phase at reset: {g.bomb.phase}"
+        assert g.bomb_carrier == rid, (f"bomb_carrier ({g.bomb_carrier}) != "
+                                       f"round_designated_carrier_id ({rid}) at reset")
     finally:
         env.close()
 
@@ -762,7 +758,7 @@ def test_round_designated_carrier_stable_through_drop():
     """Force the carrier to die and verify the round-fixed field survives
     the resulting drop, regardless of whether auto-pickup fires. Also
     sanity-checks that the production drop path actually engaged (would
-    catch a regression in cs2_env.h:155-167 silently skipping the drop).
+    catch a regression in process_bomb's drop, cs2_bomb.h, silently skipping it).
     """
     env = make_env(seed=7)
     try:
@@ -777,13 +773,13 @@ def test_round_designated_carrier_stable_through_drop():
             assert g.round_designated_carrier_id == rid_at_start, (
                 f"round_designated_carrier_id changed mid-round "
                 f"({rid_at_start} → {g.round_designated_carrier_id})")
-        # Sanity: the carrier-died branch in cs2_env.h:155-167 must have engaged.
-        # Either bomb is now dropped (no pickup yet) OR carrier_id was reassigned
-        # via auto-pickup (cs2_bomb.h:93-114). If neither, the drop path is broken.
-        assert g.bomb_is_dropped == 1 or g.bomb_carrier_id != rid_at_start, (
+        # Sanity: the drop in process_bomb (cs2_bomb.h) must have engaged.
+        # Either the bomb is now dropped (no pickup yet) OR a teammate picked
+        # it up. If neither, the drop path is broken.
+        assert g.bomb.phase == BombPhase.DROPPED or g.bomb_carrier != rid_at_start, (
             f"after carrier death, expected drop or pickup-reassignment, "
-            f"but bomb_is_dropped={g.bomb_is_dropped} and "
-            f"bomb_carrier_id={g.bomb_carrier_id} (still original carrier)")
+            f"but bomb.phase={g.bomb.phase} and "
+            f"bomb_carrier={g.bomb_carrier} (still original carrier)")
     finally:
         env.close()
 
@@ -807,7 +803,7 @@ def test_round_designated_carrier_property_50_seeds():
                 if g.round_over:
                     break
                 if kill_seed and tick == 5:
-                                                                             # Drive the drop-on-death path (cs2_env.h:155-167).  # noqa: E501
+                                                                             # Drive the drop-on-death path (cs2_bomb.h).
                     g.agents[rid].hp = 0
                     g.agents[rid].alive = 0
                 env.step(actions)
@@ -869,21 +865,21 @@ def test_post_pickup_plant_mask_unmasked():
     """After carrier dies and a teammate auto-picks up the bomb, the new
     holder's HEAD_USE plant action must be unmasked when standing at a
     bombsite. Closes mega-spec §Risks gap and verifies the dynamic
-    has_bomb gate (not the round-fixed role bit) drives the plant mask.
+    possession gate (bomb_carrier, not the round-fixed role bit) drives the
+    plant mask.
 
-    Sequencing rationale: the drop-on-death logic at cs2_env.h:154-167
-    runs inside env_step. process_bomb (which contains the auto-pickup
-    loop, cs2_bomb.h:93-114) is called in the SAME env_step immediately
-    after the drop. Because T-agents share a tight spawn cluster, another
-    T is almost always within the 32-unit pickup radius, so drop + pickup
-    typically complete atomically in one step. The test therefore:
+    Sequencing rationale: process_bomb (cs2_bomb.h) drops a dead carrier's
+    bomb and then runs the auto-pickup loop in the SAME env_step. Because
+    T-agents share a tight spawn cluster, another T is almost always within
+    the 32-unit pickup radius, so drop + pickup typically complete
+    atomically in one step. The test therefore:
 
       Step 1 — kill the carrier and step; confirm the bomb is no longer
                with the original carrier (either still dropped OR already
                picked up by a nearby teammate).
       Step 2 — if bomb is still dropped (rare), teleport a teammate onto
                it and step so the pickup loop fires; either way, identify
-               the new_holder as whoever now has has_bomb==1.
+               the new_holder as the bomb's carrier.
       Step 3 — scan bombsite areas; teleport the new_holder to each and
                step until HEAD_USE+1 is unmasked.
     """
@@ -896,20 +892,20 @@ def test_post_pickup_plant_mask_unmasked():
 
         # Step 1: kill the carrier; env_step performs drop-on-death and (if a
         # teammate is within 32 units) the auto-pickup atomically in the same
-        # call — bomb_is_dropped may go 0→1→0 internally in one tick.
+        # call — the phase may go CARRIED→DROPPED→CARRIED inside one tick.
         g.agents[rid].hp = 0
         g.agents[rid].alive = 0
         env.step(actions)
 
         # After step 1 the original carrier must not still hold the bomb.
-        assert g.agents[rid].has_bomb == 0, (
-            f"original carrier (idx {rid}) still has_bomb after death+step; "
-            f"drop-on-death at cs2_env.h:157-169 may be broken")
+        assert g.bomb_carrier != rid, (
+            f"original carrier (idx {rid}) still carries the bomb after death+step; "
+            f"the drop in process_bomb (cs2_bomb.h) may be broken")
 
         # Step 2 (conditional): if the bomb is still in the air (no teammate
         # was within 32 units), teleport the next-T teammate onto the drop
         # location so the pickup loop fires on the following step.
-        if g.bomb_is_dropped:
+        if g.bomb.phase == BombPhase.DROPPED:
             # Pick the first ALIVE non-carrier T. Hardcoding (rid + 1) % 5 is
             # brittle: that agent could itself have died on the same tick (e.g.
             # multi-kill seeds). Iterating + alive-check removes the seed
@@ -918,26 +914,22 @@ def test_post_pickup_plant_mask_unmasked():
             assert candidate is not None, (
                 "no alive T teammate available to receive the dropped bomb; "
                 "all 5 T-agents died on the same tick (test-setup edge case)")
-            g.agents[candidate].x = g.bomb_x
-            g.agents[candidate].y = g.bomb_y
+            g.agents[candidate].x = g.bomb.x
+            g.agents[candidate].y = g.bomb.y
             env.step(actions)
 
-        # Identify the new bomb holder (whoever now has has_bomb==1 among
-        # alive T-agents).
-        new_holder = None
-        for i in range(5):
-            if g.agents[i].has_bomb == 1 and g.agents[i].alive:
-                new_holder = i
-                break
+        # Identify the new bomb holder: the carrier, if alive.
+        carrier = g.bomb_carrier
+        new_holder = carrier if carrier >= 0 and g.agents[carrier].alive else None
         assert new_holder is not None, (
             "No alive T-agent holds the bomb after drop+pickup sequence; "
-            "auto-pickup loop at cs2_bomb.h:93-114 may be broken or all "
+            "the auto-pickup loop in process_bomb (cs2_bomb.h) may be broken or all "
             "T-agents died during the sequence")
         assert new_holder != rid, (f"bomb ended up back with the original carrier (idx {rid}); "
                                    "expected a teammate to receive it after drop+pickup")
 
         # Step 3: find a bombsite area and teleport new_holder there; verify
-        # HEAD_USE+1 (plant action) is unmasked by the dynamic has_bomb gate.
+        # HEAD_USE+1 (plant action) is unmasked by the dynamic possession gate.
         # We scan all sd.N area indices (not capped) to locate bombsite areas,
         # then step only once we land on one. Bombsite indices on Dust2 start
         # around idx 1320 so a small cap like 200 would miss them entirely.
@@ -970,8 +962,8 @@ def test_post_pickup_plant_mask_unmasked():
                 break
         assert masks_open, (f"tried {steps_taken} bombsite areas (scanned all {sd.N} indices); "
                             f"post-pickup carrier (idx {new_holder}) on a bombsite did NOT have "
-                            f"HEAD_USE+1 unmasked. Dynamic has_bomb gate at cs2_env.h:253-263 "
-                            f"may be broken. new_holder.has_bomb={g.agents[new_holder].has_bomb}, "
+                            f"HEAD_USE+1 unmasked. The possession gate in bomb_can_plant "
+                            f"(cs2_bomb.h) may be broken. bomb_carrier={g.bomb_carrier}, "
                             f"new_holder.alive={g.agents[new_holder].alive}, "
                             f"bomb_planted={g.bomb_planted}, round_over={g.round_over}")
     finally:

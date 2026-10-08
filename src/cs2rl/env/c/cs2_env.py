@@ -3,6 +3,7 @@
 import ctypes
 import hashlib
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any, Protocol, runtime_checkable
 
 import gymnasium
@@ -187,6 +188,11 @@ class StaticDataC(ctypes.Structure):
 
 
 class AgentStateC(ctypes.Structure):
+    # Empty __slots__: an assignment to a name that is not a field raises
+    # AttributeError. Without it ctypes stores the value as a plain instance
+    # attribute the sim never reads, so a stale write such as
+    # `agent.has_bomb = 1` (#164 removed the field) would pass silently.
+    __slots__ = ()
     _fields_ = [
         ("x", ctypes.c_float),
         ("y", ctypes.c_float),
@@ -196,12 +202,11 @@ class AgentStateC(ctypes.Structure):
         ("hp", ctypes.c_int32),
         ("fire_cd", ctypes.c_int32),
         ("alive", ctypes.c_int8),
-        ("has_bomb", ctypes.c_int8),
         ("has_kit", ctypes.c_int8),
         ("team", ctypes.c_int8),
         ("is_moving", ctypes.c_int8),
         ("fired_this_tick", ctypes.c_int8),
-        ("_pad0", ctypes.c_int8 * 2),
+        ("_pad0", ctypes.c_int8 * 3),
         ("enemy_mem_idx", ctypes.c_int32 * 5),
         ("enemy_mem_tick", ctypes.c_int32 * 5),
                                                        # Phase 4b additions
@@ -242,31 +247,73 @@ class AgentStateC(ctypes.Structure):
     ]
 
 
+class BombPhase(IntEnum):
+    """Mirror of the C BombPhase enum (cs2_types.h), the lifecycle of the round's bomb (#164).
+
+    Each value is pinned to the compiled header at import (struct_sizes() publishes it;
+    see _C_MACROS below), so a renumbered C enum fails the import instead of misreading.
+    The cs2_types.h table says which BombStateC fields each phase uses.
+    """
+    CARRIED = 0
+    PLANTING = 1
+    DROPPED = 2
+    PLANTED = 3
+    DEFUSING = 4
+    DEFUSED = 5
+    DETONATED = 6
+
+
+class BombStateC(ctypes.Structure):
+    # Mirror of C BombState: phase plus the agent/progress/position that phase needs.
+    # Write it through Cs2Env.give_bomb or by stepping the sim; binding.step raises on a
+    # hand-written state that bomb_state_error (cs2_bomb.h) finds outside the
+    # cs2_types.h table.
+    __slots__ = ()
+    _fields_ = [
+        ("phase", ctypes.c_int32),
+        ("agent", ctypes.c_int32),
+        ("progress", ctypes.c_int32),
+        ("ticks_left", ctypes.c_int32),
+        ("area_idx", ctypes.c_int32),
+        ("x", ctypes.c_float),
+        ("y", ctypes.c_float),
+        ("z", ctypes.c_float),
+    ]
+
+
 class GameStateC(ctypes.Structure):
+    # Empty __slots__ for the same reason as AgentStateC: #164 removed bomb_planted,
+    # bomb_is_dropped, bomb_carrier_id and the planter/defuser fields, and a write to
+    # one of those names must raise rather than set an attribute the sim never reads.
+    __slots__ = ()
     _fields_ = [
         ("tick", ctypes.c_int32),
         ("round_ticks_left", ctypes.c_int32),
         ("agents", AgentStateC * 10),
-        ("bomb_planted", ctypes.c_int8),
         ("round_over", ctypes.c_int8),
+        ("_pad_gs0", ctypes.c_int8 * 3),
         ("winner", ctypes.c_int32),
-        ("bomb_carrier_id", ctypes.c_int32),
-        ("bomb_area_idx", ctypes.c_int32),
-        ("bomb_x", ctypes.c_float),
-        ("bomb_y", ctypes.c_float),
-        ("bomb_z", ctypes.c_float),
-        ("bomb_ticks_left", ctypes.c_int32),
-        ("bomb_being_planted_by", ctypes.c_int32),
-        ("bomb_plant_ticks", ctypes.c_int32),
-        ("bomb_being_defused_by", ctypes.c_int32),
-        ("bomb_defuse_ticks", ctypes.c_int32),
+        ("bomb", BombStateC),
                                                                        # Batch 2: round-fixed designated carrier — mirrors C GameState.  # noqa: E501
                                                                        # See cs2_types.h for why/pitfalls; insertion order matters for alignment.  # noqa: E501
         ("round_designated_carrier_id", ctypes.c_int32),
         ("bombsite_entered", ctypes.c_int8 * 5),
-        ("bomb_is_dropped", ctypes.c_int8),
-        ("_pad_gs", ctypes.c_int8 * 2),
+        ("_pad_gs", ctypes.c_int8 * 3),
     ]
+
+    # Read-only mirrors of two cs2_bomb.h queries, for the Python readers of the old
+    # fields. No setter: assigning either raises AttributeError.
+    @property
+    def bomb_planted(self) -> int:
+        """1 once the bomb is planted this round (also after defuse/detonation), as C bomb_planted()."""
+        return int(self.bomb.phase >= BombPhase.PLANTED)
+
+    @property
+    def bomb_carrier(self) -> int:
+        """The agent holding the bomb (carrying or planting), else -1, as C bomb_carrier()."""
+        if self.bomb.phase in (BombPhase.CARRIED, BombPhase.PLANTING):
+            return int(self.bomb.agent)
+        return -1
 
 
 class StepStatsC(ctypes.Structure):
@@ -422,6 +469,7 @@ _C_SIZES = binding.struct_sizes()
 # (struct_sizes() key -> ctypes mirror) — sizeof pairs.
 _C_SIZE_MIRRORS = (
     ("AgentState", AgentStateC),
+    ("BombState", BombStateC),
     ("GameState", GameStateC),
     ("StepStats", StepStatsC),
     ("Dust2Env", Dust2EnvC),
@@ -456,21 +504,24 @@ _C_OFFSET_FIELDS = (
     (AgentStateC, "_pad5", "AgentState__pad5_offset"),
     # GameState's tail is its explicit pad array, not a "real" field. offsetof
     # on a pad is legal, and the rule is uniform: anchor the LAST field. Picking
-    # bomb_is_dropped instead would miss a field slipped in between it and the
+    # bombsite_entered instead would miss a field slipped in between it and the
     # pad on one side only.
     (GameStateC, "_pad_gs", "GameState__pad_gs_offset"),
+    (BombStateC, "z", "BombState_z_offset"),
     (StepStatsC, "reward_win_ct", "StepStats_reward_win_ct_offset"),
     (Dust2EnvC, "recoil_enabled", "Dust2Env_recoil_enabled_offset"),
     (WallC, "kind", "Wall_kind_offset"),
     (WallListC, "capacity", "WallList_capacity_offset"),
 )
 # (struct_sizes() key -> Python value) — bare macros env/nav.py re-declares in
-# Python. Pin them to the header: the reward views below slice
-# rewards[:TEAM_SIZE], so a drift would mis-attribute every team-spirit term
-# rather than crash.
+# Python, and the BombPhase values (#164). Pin them to the header: the reward
+# views below slice rewards[:TEAM_SIZE], so a drift would mis-attribute every
+# team-spirit term rather than crash, and a renumbered phase would make every
+# BombPhase comparison read the wrong phase.
 _C_MACROS = (
     ("TEAM_SIZE", TEAM_SIZE),
     ("N_AGENTS", N_AGENTS),
+    *((f"BOMB_{_phase.name}", int(_phase)) for _phase in BombPhase),
 )
 # fmt: on
 
@@ -494,7 +545,7 @@ for _mirror, _field, _key in _C_OFFSET_FIELDS:
 del _mirror, _field, _key
 for _macro, _py_value in _C_MACROS:
     if _py_value != _C_SIZES[_macro]:
-        raise RuntimeError(f"{_macro} mismatch: nav {_py_value} vs C {_C_SIZES[_macro]}")
+        raise RuntimeError(f"{_macro} mismatch: Python {_py_value} vs C {_C_SIZES[_macro]}")
 del _macro, _py_value
 
 # Every struct_sizes() key this module actually compares, derived from the three
@@ -1451,14 +1502,24 @@ class Cs2Env(pufferlib.PufferEnv):
                     pitch=float(agent.pitch),                                    # Batch 3.5: 3D aim direction.
                     hp=int(agent.hp),
                     alive=bool(agent.alive),
-                    has_bomb=bool(agent.has_bomb),
+                    has_bomb=(g.bomb_carrier == i),
                     has_kit=bool(agent.has_kit),
                 ))
         return VizGameState(
             agents=agents,
             bomb_planted=bool(g.bomb_planted),
-            bomb_pos=np.array([g.bomb_x, g.bomb_y, g.bomb_z], dtype=np.float32),
+            bomb_pos=np.array([g.bomb.x, g.bomb.y, g.bomb.z], dtype=np.float32),
         )
+
+    def give_bomb(self, agent: int) -> None:
+        """Hand the bomb to T agent `agent` — the one sanctioned way to set the carrier (#164).
+
+        Runs the C bomb_give transition that env_reset and pickup use, after its checks
+        (a live, participating T and an unplanted bomb; ValueError otherwise). Possession
+        only: round_designated_carrier_id (the role bit) and the agent's weapon stay the
+        caller's, and masks are recomputed by the next step, not here.
+        """
+        binding.give_bomb(self._capsule, int(agent))
 
     def _sync_team_spirit(self):
         if self._team_spirit_shared is not None:
