@@ -16,10 +16,10 @@ The helpers own those couplings, and every rule comes from the sim, never from a
 `assert_state_consistent` checks the same invariants over a whole state; call it after a
 hand-built setup, before the step under test.
 
-What stays a raw write, with a comment: a field no invariant couples (facing, has_kit,
-armor, the StaticData clocks); a state from the sim's own tables (round_over, a planted
-bomb through the BombState table, which `binding.step` checks); and a deliberately
-impossible state whose rejection a test pins.
+What stays a raw write: a field no invariant here couples (facing, has_kit, armor, a live
+agent's hp above 0, round_over and winner, the StaticData clocks); a planted bomb through
+the BombState table, which `binding.step` checks; and a deliberately impossible state whose
+rejection a test pins.
 
 PITFALL: a helper that does the sim's job hides the sim's behaviour from the test. A test of
 the ground-snap must place an unsettled z (`place_agent(..., z=...)`) and let the step under
