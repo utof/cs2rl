@@ -27,6 +27,7 @@ import numpy as np
 import pytest
 
 from cs2rl.spec.obs import OBS_BLOCKS
+from tests._helpers.scenario import place_agent, zero_actions
 
 # Slot indices derived from the generated spec — never hardcoded, so this test
 # keeps working if an earlier self-block slot is ever inserted.
@@ -34,15 +35,6 @@ _SELF_START, _SELF_STOP = OBS_BLOCKS["self"]
 BEARING_SIN = _SELF_STOP - 3
 BEARING_COS = _SELF_STOP - 2
 SITE_DIST = _SELF_STOP - 1
-
-
-def _zero_actions():
-    """Zero discrete+continuous actions: dyaw=0 preserves poked facing,
-    move=0 preserves poked position (velocity is 0 after reset)."""
-    from cs2rl.env.nav import N_AGENTS
-    from cs2rl.spec.action import ACTION_DIM, AIM_DIM
-    return (np.zeros((N_AGENTS, ACTION_DIM),
-                     dtype=np.int32), np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32))
 
 
 def _map_diag(md) -> float:
@@ -59,11 +51,14 @@ def _nearest_site_centroid(md, x: float, y: float):
 
 
 def _obs_after_pose(env, x: float, y: float, facing: float):
-    """Poke agent 0 to (x, y, facing), step with zero actions, return its obs row."""
-    a = env._c_env.game.agents[0]
-    a.x, a.y = x, y
+    """Place agent 0 at (x, y) at rest, set its facing, step with zero actions
+    (dyaw=0 keeps the facing, move=0 the position), return its obs row.
+
+    Before #170 this moved x/y and left area_idx at the spawn area (0), while
+    every pose here lies in area 5; place_agent derives it."""
+    a = place_agent(env, 0, x, y)
     a.facing = facing
-    env.step(*_zero_actions())
+    env.step(*zero_actions())
     return env.observations[0]
 
 
@@ -152,7 +147,7 @@ def test_bearing_nearest_site_selection_dust2():
     env = make_env(seed=7)             # bare make_env → real de_dust2
     try:
         env.reset(seed=7)
-        env.step(*_zero_actions())
+        env.step(*zero_actions())
         md = env.map_data
         diag = _map_diag(md)
         for i in range(10):

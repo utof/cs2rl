@@ -23,10 +23,10 @@ import time
 import numpy as np
 import pytest
 
+from tests._helpers.scenario import zero_actions
 from tests.conftest import REPO_ROOT
 
-N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
-H_SHOOT = 1                            # cs2_types.h head order (same pin as test_pitch_pin)
+H_SHOOT = 1                            # cs2_types.h head order
 AGENT_HULL_RADIUS = 12.0               # cs2_types.h:26
 EYE_STAND = 48.0                       # cs2_combat.h standing eye height
 
@@ -80,10 +80,6 @@ def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
             except ProcessLookupError:                 # whole group already gone
                 pass
     return subprocess.CompletedProcess(argv, p.returncode, out, err)
-
-
-def _zero():
-    return (np.zeros((N_AGENTS, ACTION_DIM), np.int32), np.zeros((N_AGENTS, AIM_DIM), np.float32))
 
 
 def test_preset_geometry():
@@ -156,7 +152,7 @@ def test_env_runs_and_spawns_in_columns():
         # R12.3: the row draw is live (sidx = xorshift32 % 4, not always 0).
         assert len(ys_t) >= 3 and len(ys_ct) >= 3, (ys_t, ys_ct)
         assert ys_t <= {50, 150, 250, 350} and ys_ct <= {50, 150, 250, 350}
-        a, c = _zero()
+        a, c = zero_actions()
         for _ in range(50):
             _, rew, *_ = env.step(a, c)
             assert np.isfinite(rew).all()
@@ -189,7 +185,7 @@ def _best_bias_only_score(md, seed, n_rounds=16, ticks=160):
             for _ in range(n_rounds):
                 env.reset()
                 for tick in range(ticks):
-                    a, c = _zero()
+                    a, c = zero_actions()
                     a[0, H_SHOOT] = 1
                     c[0, 0] = dyaw if tick == 0 else 0.0
                     _, _, term, trunc, _ = env.step(a, c)
@@ -270,7 +266,7 @@ def test_arena_survives_solids_bake():
                                        EYE_STAND) == 0
                                                                                                      # The sim keeps stepping (finite rewards) with the list attached; env.close frees it.
         env.reset()
-        a, c = _zero()
+        a, c = zero_actions()
         for _ in range(10):
             _, rew, *_ = env.step(a, c)
             assert np.isfinite(rew).all()
