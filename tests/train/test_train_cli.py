@@ -456,3 +456,67 @@ def test_train_smoke_returns_zero():
         f"STDOUT:\n{result.stdout[-2000:]}\nSTDERR:\n{result.stderr[-2000:]}")
     assert "[Smoke] Completed" in result.stdout, result.stdout
     assert "steps/sec" in result.stdout, result.stdout
+
+
+# #307: the entry point must hide the GPU for --device cpu. The wrapper runs the real
+# CLI in-process (runpy) and reports at exit, so the env is seen AFTER arg parsing.
+_CLI_ENV_PROBE = """
+import atexit, os, runpy, sys
+atexit.register(lambda: print("CVD=%r" % os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")))
+sys.argv = ["cs2rl.train", *sys.argv[1:]]
+runpy.run_module("cs2rl.train", run_name="__main__")
+"""
+
+
+def _cvd_after(tmp_path, *args, caller_cvd=None):
+    import os
+    env = {k: v for k, v in os.environ.items() if k != "CUDA_VISIBLE_DEVICES"}
+    if caller_cvd is not None:
+        env["CUDA_VISIBLE_DEVICES"] = caller_cvd
+    r = subprocess.run([
+        sys.executable, "-c", _CLI_ENV_PROBE, "--dump-config", "--checkpoint-dir",
+        str(tmp_path), *args
+    ],
+                       cwd=REPO_ROOT,
+                       env=env,
+                       capture_output=True,
+                       text=True,
+                       timeout=120)
+    assert r.returncode == 0, r.stderr[-2000:]
+    return [ln for ln in r.stdout.splitlines() if ln.startswith("CVD=")][-1]
+
+
+def test_device_cpu_hides_the_gpu_and_other_devices_leave_the_env_alone(tmp_path):
+    assert _cvd_after(tmp_path, "--device", "cpu") == "CVD=''"
+    assert _cvd_after(tmp_path, "--device", "cpu", caller_cvd="0") == "CVD=''"
+    assert _cvd_after(tmp_path, "--device", "cuda", caller_cvd="0") == "CVD='0'"
+    assert _cvd_after(tmp_path) == "CVD='<unset>'"
+
+
+_TRAIN_END_STATE = """
+import atexit, runpy, sys
+import torch
+atexit.register(lambda: print("END", torch.cuda.is_available(), torch.cuda.is_initialized()))
+sys.argv = ["cs2rl.train", *sys.argv[1:]]
+runpy.run_module("cs2rl.train", run_name="__main__")
+"""
+
+
+@pytest.mark.training
+def test_cpu_train_child_ends_without_cuda(tmp_path):
+    """#307 end to end: a real --device cpu training child finishes with CUDA
+    unavailable and uninitialized (PufferLib's Utilization thread included). The
+    env hiding makes this hold on a GPU-less box too, so it never skips."""
+    r = subprocess.run([
+        sys.executable, "-c", _TRAIN_END_STATE, "--train", "--device", "cpu", "--vec-backend",
+        "serial", "--num_envs", "16", "--no-self-play", "--no-dead-run-abort",
+        "--checkpoint-interval", "1", "--seed", "3", "--save_every_sec", "100000", "--timesteps",
+        "10240", "--checkpoint-dir",
+        str(tmp_path), "--run-id", "r"
+    ],
+                       cwd=REPO_ROOT,
+                       capture_output=True,
+                       text=True,
+                       timeout=600)
+    assert r.returncode == 0, r.stderr[-3000:]
+    assert "END False False" in r.stdout, r.stdout[-500:]
