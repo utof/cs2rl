@@ -638,8 +638,9 @@ static int sd_type_is_pointer(const char* c_type) {
  *
  * The arguments are taken on trust as numpy arrays (see py_init). The count is
  * checked before anything is written. The slot is filled with memcpy of a
- * void*, not a typed store, because the field types differ (int8_t*, int32_t*,
- * float*). Returns 0, or -1 with an exception set. */
+ * void*, not a typed store: the macro body is expanded for every row, and
+ * `sd->f = (ctype)p` does not compile for the scalar and array rows. Returns 0, or -1 with an
+ * exception set. */
 static int sd_bind_pointers(StaticData* sd, PyObject* args, Py_ssize_t first) {
     Py_ssize_t expected = 0;
     Py_ssize_t k        = 0;

@@ -276,6 +276,20 @@ def _perturbed_layout_hash():
     return ("0" if digest[0] != "0" else "1") + digest[1:]
 
 
+def test_init_rejects_a_wrong_pointer_argument_count():
+    """One pointer argument too few or too many is a TypeError, not an OOB read.
+
+    sd_bind_pointers counts the pointer rows of SD_PREFIX_FIELDS and checks the
+    tuple length before writing; nothing else would catch C and Python
+    disagreeing about how many pointer arguments there are.
+    """
+    buffer = cs2_env._pack_static_data(_minimal_values())
+    ptrs = _probe_pointer_args()
+    for args in (ptrs[:-1], ptrs + ptrs[:1]):
+        with pytest.raises(TypeError, match="pointer arguments"):
+            binding.init(buffer, _layout_hash(), 0, 0.0, *args)
+
+
 def test_init_rejects_a_short_buffer():
     """The length check, which the layout hash cannot stand in for.
 

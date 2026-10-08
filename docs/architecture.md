@@ -32,7 +32,9 @@ guides describe where new code goes. Tests mirror the owning package;
   The ctypes layout hash checks struct declarations, not values. The StaticData
   pointer arguments of `binding.init` are positional: C assigns them by walking
   `SD_PREFIX_FIELDS` and Python passes them in `StaticDataC` pointer order, so
-  neither side keeps its own list; `test_pointer_fields_receive_their_own_arrays`
+  neither keeps a separate pointer list: each derives the order from its own
+  declaration table and the layout hash proves the two tables agree;
+  `test_pointer_fields_receive_their_own_arrays`
   reads each stored address back and checks it against its array.
 - Frozen `EnvConfig` and `RewardWeights` own env defaults. Runtime inputs such
   as seed, buffers and map data are supplied separately by the env factory.

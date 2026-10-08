@@ -30,10 +30,13 @@ torch, awpy or the C env.
   `src/cs2rl/spec/obs.py` (`OBS_DIM`, `OBS_BLOCKS`) and `src/cs2rl/spec/action.py` (the heads)
   from it; both say "do not edit manually". Since #302 no other module in `src/` assigns
   `OBS_DIM`.
-- Still hand-written, and #179 is open for them: `binding.c`'s `py_init` takes the ten
-  `StaticData` pointer arrays by position. The layout hash compares the struct's declarations,
-  not that call (`binding.c` says so); `cs2_env.py` derives the order it passes from
-  `StaticDataC` (`_SD_POINTER_FIELDS`). Three test files also type the obs width, `110`.
+- `binding.init` takes the `StaticData` pointer arrays by position, in an order each side
+  derives: `sd_bind_pointers` in `binding.c` walks `SD_PREFIX_FIELDS`, `cs2_env.py` passes them
+  in `StaticDataC` order (`_SD_POINTER_FIELDS`), and the layout hash proves the two tables list
+  the same fields in the same order. `test_pointer_fields_receive_their_own_arrays` in
+  `tests/env/c/test_static_data_layout.py` reads every stored address back.
+- Tests take the obs width from the generated `OBS_DIM`; `test_obs_blocks_tile_obs_dim` pins the
+  block boundaries as literals on purpose.
 
 ## Where new code goes
 
