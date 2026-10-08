@@ -653,3 +653,64 @@ def test_failed_resume_preserves_checkpoints_and_releases_workers(tmp_path, monk
             trainer.utilization.join(timeout=5)
             for worker in trainer.vecenv.processes:
                 worker.join(timeout=5)
+
+
+def test_rng_capture_skips_cuda_until_a_context_exists(monkeypatch):
+    """#307: get_rng_state_all() opens a CUDA context, so a CPU run on a GPU box
+    must not call it. Device-independent: availability is faked, so this holds
+    in the CUDA-hidden default tier. A run with a live context keeps its state."""
+    from cs2rl.train.resume import _rng_state_dict
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+
+    def opens_a_context():
+        raise AssertionError("get_rng_state_all would open a CUDA context")
+
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", opens_a_context)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    assert "torch_cuda" not in _rng_state_dict()
+
+    fake = [torch.zeros(1, dtype=torch.uint8)]
+    monkeypatch.setattr(torch.cuda, "get_rng_state_all", lambda: fake)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    assert _rng_state_dict()["torch_cuda"] is fake
+
+
+def test_restore_without_a_cuda_state_never_touches_cuda(monkeypatch):
+    """#307: a checkpoint from a CPU run has no "torch_cuda" key; resuming it with
+    CUDA available must skip the CUDA restore (the fresh seed stays in force)."""
+    from cs2rl.train.resume import _rng_load_state_dict, _rng_state_dict
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+
+    def touches_cuda(*args, **kwargs):
+        raise AssertionError("set_rng_state_all called for a state without torch_cuda")
+
+    monkeypatch.setattr(torch.cuda, "set_rng_state_all", touches_cuda)
+    st = _rng_state_dict()
+    assert "torch_cuda" not in st
+    _rng_load_state_dict(st)
+
+
+_NO_CONTEXT_PROBE = """
+import torch
+from cs2rl.train.resume import _rng_load_state_dict, _rng_state_dict, seed_everything
+seed_everything(3)
+st = _rng_state_dict()
+assert "torch_cuda" not in st, "captured CUDA RNG without a context"
+st["torch_cuda"] = [torch.get_rng_state()] * torch.cuda.device_count()  # a GPU run's checkpoint; CPU-RNG bytes stand in, never applied (the restore stays queued)
+_rng_load_state_dict(st)
+print("CTX", torch.cuda.is_initialized())
+"""
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a visible CUDA device")
+def test_cpu_rng_seed_capture_restore_open_no_cuda_context():
+    """#307, real torch: seed, capture and restore (even of a GPU run's state)
+    leave a fresh process without a CUDA context. Skipped when CUDA is hidden."""
+    r = subprocess.run([sys.executable, "-c", _NO_CONTEXT_PROBE],
+                       cwd=REPO_ROOT,
+                       capture_output=True,
+                       text=True,
+                       timeout=300)
+    assert r.returncode == 0, r.stderr[-3000:]
+    assert r.stdout.strip().endswith("CTX False"), r.stdout
