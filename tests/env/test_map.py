@@ -7,11 +7,14 @@ the L9 adjacency post-prune removes cliff edges from the nav graph.
 T1 tests (steps 1.8-1.10): 5 pure-Python MapData tests, no C env required.
 T2 tests (step 2.7): 1 binding smoke test — env construction with centroids_z/is_ramp plumbed.
 T3 tests (step 3.7): 5 movement/behaviour tests requiring the C env — added later.
-T4 tests (step 4.5): 1 obs z-delta test — added in T4.
+T4 tests (step 4.5): 1 obs z-delta test (teammate) — added in T4; #170 added the enemy one.
 """
 import math
 
 import numpy as np
+import pytest
+
+from tests._helpers.scenario import place_agent, zero_actions
 
 # ── T1: MapData verticality field tests ──────────────────────────────────────
 
@@ -182,15 +185,6 @@ def _make_simple_env(seed=42):
     return make_env(seed=seed, map_data=make_simple_map())
 
 
-def _zero_actions(n_agents=10):
-    """Return (actions, continuous_actions) zero buffers for n_agents."""
-    from cs2rl.spec import action as spec
-    return (
-        np.zeros((n_agents, spec.ACTION_DIM), dtype=np.int32),
-        np.zeros((n_agents, spec.AIM_DIM), dtype=np.float32),
-    )
-
-
 def _room_x_lerp(x0, x1, z_w, z_e, x):
     """X-slope room lerp: z = (1-u)*z_w + u*z_e, u=(x-x0)/(x1-x0)."""
     return (1.0 - (x - x0) / (x1 - x0)) * z_w + ((x - x0) / (x1 - x0)) * z_e
@@ -224,13 +218,9 @@ def test_agent_on_t_ramp_does_not_snap_to_top():
         b = env._c_env.sd.contents.area_bounds
         assert [b[13 * 4 + i] for i in range(4)] == [750.0, 192.0, 820.0, 416.0]
         g = env._c_env.game
-        g.agents[0].x = 755.0
-        g.agents[0].y = 300.0
-        g.agents[0].area_idx = 13
-        g.agents[0].z = 0.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 0
-        actions, cont = _zero_actions()
+        # z is left unsettled on purpose: the ground-snap under test settles it.
+        place_agent(env, 0, 755.0, 300.0, z=0.0)
+        actions, cont = zero_actions()
         env.step(actions, cont)
         z_want = _room_x_lerp(750.0, 820.0, 0.0, 64.0, 755.0)
         assert abs(g.agents[0].z - z_want) < 0.5, (
@@ -249,13 +239,9 @@ def test_agent_on_ct_ramp_follows_x_slope():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        g.agents[0].x = 1135.0
-        g.agents[0].y = 300.0
-        g.agents[0].area_idx = 14
-        g.agents[0].z = 64.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 0
-        actions, cont = _zero_actions()
+        # z is left unsettled on purpose: the ground-snap under test settles it.
+        place_agent(env, 0, 1135.0, 300.0, z=64.0)
+        actions, cont = zero_actions()
         env.step(actions, cont)
         z_want = _room_x_lerp(1100.0, 1170.0, 64.0, 0.0, 1135.0)
         assert abs(g.agents[0].z - z_want) < 0.5, (
@@ -273,13 +259,9 @@ def test_agent_on_stairs_follows_y_slope():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        g.agents[0].x = 1235.0
-        g.agents[0].y = 136.0
-        g.agents[0].area_idx = 16
-        g.agents[0].z = 128.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 0
-        actions, cont = _zero_actions()
+        # z is left unsettled on purpose: the ground-snap under test settles it.
+        place_agent(env, 0, 1235.0, 136.0, z=128.0)
+        actions, cont = zero_actions()
         env.step(actions, cont)
         z_want = _room_y_lerp(80.0, 192.0, 128.0, 0.0, 136.0)
         assert abs(g.agents[0].z - z_want) < 0.5, (
@@ -306,13 +288,8 @@ def test_agent_walk_to_bombsite_reaches_elevation():
         # Teleport agent 0 to bombsite centroid (xy in area 6) at z=0.
         # The ground-snap rule (T3 step 3.4) must set z=centroids_z[6]=64 on
         # the next tick, even though we placed the agent at z=0.
-        g.agents[0].x = 950.0
-        g.agents[0].y = 300.0
-        g.agents[0].area_idx = 6
-        g.agents[0].z = 0.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 0
-        actions, cont = _zero_actions()
+        place_agent(env, 0, 950.0, 300.0, z=0.0)
+        actions, cont = zero_actions()
         env.step(actions, cont)
         assert g.agents[0].z >= 64.0, (
             f"ground-snap failed: agent at bombsite (area 6) should have z=64, "
@@ -337,13 +314,8 @@ def test_landing_on_elevated_area():
         # Place agent airborne above bombsite at z=200, falling with vz=0.
         # Gravity (SV_GRAVITY_CS=800 u/s²) will pull it down; it should land
         # at terrain_z=64, not 0.
-        g.agents[0].x = 950.0
-        g.agents[0].y = 300.0
-        g.agents[0].area_idx = 6
-        g.agents[0].z = 200.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 1
-        actions, cont = _zero_actions()
+        place_agent(env, 0, 950.0, 300.0, z=200.0, airborne=True)
+        actions, cont = zero_actions()
         # Step until landed (max 40 ticks; at 16 Hz falling 136u under gravity
         # takes ~0.58s ≈ 9–10 ticks, plus ε).
         for _ in range(40):
@@ -377,17 +349,12 @@ def test_cliff_guard_blocks_walkup():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        # Place on the bombsite, just south of the y=192 cliff to catwalk.
-        g.agents[0].x = 900.0
-        g.agents[0].y = 195.0
-        g.agents[0].area_idx = 6
-        g.agents[0].z = 64.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 0
+        # Place on the bombsite floor (z=64), just south of the y=192 cliff to catwalk.
+        place_agent(env, 0, 900.0, 195.0)
         # facing = -π/2 so bin 1 (forward) drives wy < 0 (decreasing y = toward catwalk).
         g.agents[0].facing = float(-math.pi / 2)
         y0 = g.agents[0].y
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         # Bin 1 = "W" (forward). With facing=-π/2: wy = -1 → drives decreasing y.
         # HEAD_MOVE = 0; sanity pre-check below confirms the agent moved in -y.
         actions[0, 0] = 1
@@ -423,16 +390,12 @@ def test_cliff_guard_diagonal_slides():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        # Starting position: bombsite, near the north cliff edge, with room to go west.
-        g.agents[0].x = 900.0
-        g.agents[0].y = 195.0
-        g.agents[0].area_idx = 6
-        g.agents[0].z = 64.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 0
+        # Starting position: bombsite floor (z=64), near the north cliff edge, with room
+        # to go west.
+        place_agent(env, 0, 900.0, 195.0)
         g.agents[0].facing = float(-math.pi / 2)
         x0 = g.agents[0].x
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         # Bin 2 = "WD" (forward+right), post-F9 basis. With facing=-π/2:
         #   wx = fy*cos(-π/2) + fx*sin(-π/2) = 0 + 0.707*(-1) = -0.707  (west)
         #   wy = fy*sin(-π/2) - fx*cos(-π/2) = -0.707 - 0     = -0.707  (toward
@@ -471,13 +434,8 @@ def test_is_airborne_no_flicker_on_elevated_terrain():
         env.reset(seed=42)
         g = env._c_env.game
         # Place grounded on bombsite at exactly terrain_z=64.
-        g.agents[0].x = 950.0
-        g.agents[0].y = 300.0
-        g.agents[0].area_idx = 6
-        g.agents[0].z = 64.0
-        g.agents[0].vz = 0.0
-        g.agents[0].is_airborne = 0
-        actions, cont = _zero_actions()
+        place_agent(env, 0, 950.0, 300.0)
+        actions, cont = zero_actions()
         for tick in range(10):
             env.step(actions, cont)
             assert g.agents[0].is_airborne == 0, (
@@ -516,35 +474,27 @@ def test_obs_z_delta_populated_for_elevated_teammate():
         g = env._c_env.game
         # Self at T-spawn (z=0), teammate at bombsite (z=64).
         # Both on team T (agents 0-4 are T-side in the simple map layout).
-        g.agents[0].x = 100.0
-        g.agents[0].y = 500.0
-        g.agents[0].z = 0.0
-        g.agents[0].area_idx = 0                                                        # T-spawn-A
-        g.agents[0].is_airborne = 0
-        g.agents[1].x = 950.0
-        g.agents[1].y = 300.0
-        g.agents[1].z = 64.0
-        g.agents[1].area_idx = 6                                                        # bombsite (elevated)
-        g.agents[1].is_airborne = 0
-        actions, cont = _zero_actions()
+        place_agent(env, 0, 100.0, 500.0)
+        place_agent(env, 1, 950.0, 300.0)
+        actions, cont = zero_actions()
         env.step(actions, cont)
-                                                                                        # Verify ground-snap didn't mutate the teammate's z (T3 invariant).
+        # Verify ground-snap didn't mutate the teammate's z (T3 invariant).
         assert g.agents[1].z == 64.0, f"teammate z drifted ({g.agents[1].z})"
         assert g.agents[1].is_airborne == 0
-                                                                                        # env.observations is a flat buffer; [0] gives the OBS_DIM slice for agent 0.
+        # env.observations is a flat buffer; [0] gives the OBS_DIM slice for agent 0.
         obs = env.observations[0]
-                                                                                        # Teammate slot: tm_count=0, base=28, z_delta at obs[base+2]=obs[30].
+        # Teammate slot: tm_count=0, base=28, z_delta at obs[base+2]=obs[30].
         z_delta = obs[30]
         expected = (64.0 - 0.0) / 128.0                                                 # = 0.5
         assert abs(z_delta - expected) < 1e-5, (
             f"teammate z-delta slot obs[30] = {z_delta:.6f}, expected {expected:.6f}. "
             f"Check (tm->z - a->z)/128.0f; agent 1 alive={g.agents[1].alive}.")
 
-        # Sign-flip sub-case: swap z values; expect obs[30] = -0.5.
-        g.agents[0].z = 64.0
-        g.agents[0].area_idx = 6
-        g.agents[1].z = 0.0
-        g.agents[1].area_idx = 0
+        # Sign-flip sub-case: swap the two positions (and so their floors); expect
+        # obs[30] = -0.5. Swapping only z and area_idx, as this did before #170, stood
+        # each agent on the other's floor without moving it.
+        place_agent(env, 0, 950.0, 300.0)
+        place_agent(env, 1, 100.0, 500.0)
         env.step(actions, cont)
         obs = env.observations[0]
         expected_neg = (0.0 - 64.0) / 128.0                                                       # = -0.5
@@ -573,15 +523,9 @@ def test_exterior_wall_keeps_body_inside_room():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        g.agents[0].x = 40.0
-        g.agents[0].y = 500.0
-        g.agents[0].z = 0.0
-        g.agents[0].vx = 0.0
-        g.agents[0].vy = 0.0
-        g.agents[0].area_idx = 0
-        g.agents[0].is_airborne = 0
+        place_agent(env, 0, 40.0, 500.0)
         g.agents[0].facing = float(math.pi)                              # bin 1 = west (−x)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         actions[0, 0] = 1
         env.step(actions, cont)
         assert g.agents[0].x < 40.0, (
@@ -608,15 +552,10 @@ def test_raster_overshoot_cannot_enter_exterior_wall():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        g.agents[0].x = 860.0
-        g.agents[0].y = 130.0
-        g.agents[0].z = 128.0
-        g.agents[0].vx = 0.0
-        g.agents[0].vy = 0.0
-        g.agents[0].area_idx = 15
-        g.agents[0].is_airborne = 0
+        # Catwalk floor, z=128.
+        place_agent(env, 0, 860.0, 130.0)
         g.agents[0].facing = float(math.pi)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         actions[0, 0] = 1
         for _ in range(20):
             env.step(actions, cont)
@@ -641,15 +580,9 @@ def test_t_ramp_portal_is_walkable():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        g.agents[0].x = 700.0
-        g.agents[0].y = 300.0
-        g.agents[0].z = 0.0
-        g.agents[0].vx = 0.0
-        g.agents[0].vy = 0.0
-        g.agents[0].area_idx = 5
-        g.agents[0].is_airborne = 0
+        place_agent(env, 0, 700.0, 300.0)
         g.agents[0].facing = 0.0                                                       # bin 1 = east (+x)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         actions[0, 0] = 1
         seen = {5}
         for _ in range(40):
@@ -673,15 +606,9 @@ def test_ct_ramp_portal_is_walkable():
     try:
         env.reset(seed=42)
         g = env._c_env.game
-        g.agents[0].x = 1220.0
-        g.agents[0].y = 300.0
-        g.agents[0].z = 0.0
-        g.agents[0].vx = 0.0
-        g.agents[0].vy = 0.0
-        g.agents[0].area_idx = 7
-        g.agents[0].is_airborne = 0
+        place_agent(env, 0, 1220.0, 300.0)
         g.agents[0].facing = float(math.pi)
-        actions, cont = _zero_actions()
+        actions, cont = zero_actions()
         actions[0, 0] = 1
         seen = {7}
         for _ in range(40):
@@ -697,13 +624,31 @@ def test_ct_ramp_portal_is_walkable():
         env.close()
 
 
-# Note: enemy z-delta slot at obs[base+2] (where base=51 for the closest enemy slot2=0)
-# is intentionally NOT covered here. The slot uses a distance-sorted indirection
-# (`order[]` array in cs2_observations.h:100-110) that needs setup-coordination across
-# multiple agents to test reliably. The formula matches the teammate write site verbatim,
-# and visibility-gating is documented at the write site (cs2_observations.h:122-134).
-# A live deploy-side test in T6 (or a dedicated test_obs_enemy_z_delta after T4 lands)
-# is the better venue. Tracking gap as a follow-up.
+def test_obs_z_delta_populated_for_visible_elevated_enemy():
+    """The enemy slot's z-delta obs[base+2] is (enemy.z - self.z)/128 while the enemy is seen.
+
+    At n_active_per_team=1 the only live enemy sorts into slot 0, so the distance-sorted
+    order[] (cs2_observations.h) needs no coordination. Agent 0 stands on the T-corridor
+    floor (z=0) and agent 5 on the bombsite (z=64), a pair with line of sight (the
+    test_pitch.py T5 geometry); each sees the other, so the two rows give +0.5 and -0.5.
+    """
+    from cs2rl.env.c.cs2_env import make_env
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_simple_map
+    from cs2rl.spec.obs import OBS_BLOCKS
+    base = OBS_BLOCKS["enemy"][0]
+    env = make_env(seed=42, map_data=make_simple_map(), config=EnvConfig(n_active_per_team=1))
+    try:
+        env.reset()
+        place_agent(env, 0, 575.0, 352.0)
+        place_agent(env, 5, 960.0, 304.0)
+        env.step(*zero_actions())
+        obs = env.observations
+        assert (obs[0, base + 3], obs[5, base + 3]) == (1.0, 1.0), "the pair must see each other"
+        assert obs[0, base + 2] == pytest.approx((64.0 - 0.0) / 128.0, abs=1e-5)
+        assert obs[5, base + 2] == pytest.approx((0.0 - 64.0) / 128.0, abs=1e-5)
+    finally:
+        env.close()
 
 
 def test_corridors_do_not_enter_spawn():
