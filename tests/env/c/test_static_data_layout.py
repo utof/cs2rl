@@ -80,7 +80,8 @@ def test_pointer_fields_receive_their_own_arrays(simple_map):
 
 
 def test_a_map_without_its_vis_matrix_hands_c_an_empty_array(simple_map):
-    """A MapData whose vis_matrix is None (every dust2 env since #270) still builds an env.
+    """A MapData whose vis_matrix is None (a dust2 env since #270, unless a
+    build_vis=True load of the same key ran earlier in the process) still builds an env.
 
     C does not read sd->vis_matrix (cs2_env._map_arrays), so the field gets an empty
     array: it holds that array's address, and the array carries no visibility data.

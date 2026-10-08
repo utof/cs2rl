@@ -184,15 +184,17 @@ def make_cs2_map(nav_path: str, cache_path: str, *, build_vis: bool = True) -> M
     ``build_vis=False`` (gh#251) skips NavGraph.build_vis_matrix and returns an
     UNCACHED MapData whose ``vis_matrix`` is None. Every env loads dust2 this way
     (cs2_env.make_env, train.envs.pin_pitch_for_map; #270): the C sim does not read
-    the matrix (cs2_env._map_arrays hands its pointer an empty array). The build it
+    the matrix (cs2_env._map_arrays hands its pointer an empty array unless a build_vis=True
+    load of the same key ran earlier in this process). The build it
     skips matters: on a cold `src/cs2rl/vis_cache.npy` (nav.CACHE_PATH; every
     fresh worktree — it is gitignored) build_vis_matrix spawns a cpu_count()-worker
     ProcessPoolExecutor for minutes, and a killed `--dump-config` orphaned all 12
     workers to PID 1 at ~900 MB each.
 
-    PITFALL: never cache a build_vis=False MapData — a later build_vis=True caller
-    for the same key would get the vis-less object. A warm cached full MapData IS
-    returned for either flag.
+    PITFALL: never put a build_vis=False MapData in _CS2_MAP_CACHE — a later
+    build_vis=True caller for the same key would get the vis-less object. (cs2_env's
+    _ENV_CACHE holds one on purpose: its readers, make_env and pin_pitch_for_map,
+    never need the matrix.) A warm cached full MapData IS returned for either flag.
     """
     key = (nav_path, cache_path)
     cached = _CS2_MAP_CACHE.get(key)

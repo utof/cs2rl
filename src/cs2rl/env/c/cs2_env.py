@@ -956,11 +956,14 @@ def _map_arrays(md: MapData) -> dict[str, np.ndarray]:
     def _arr(a, dtype):
         return np.ascontiguousarray(a.astype(dtype, copy=False).flatten())
 
-    # dust2's vis_matrix is None: envs load it with make_cs2_map(build_vis=False) (#270).
+    # dust2's vis_matrix is None, unless a build_vis=True load of the same key ran earlier in
+    # this process: envs load it with make_cs2_map(build_vis=False) (#270).
     # No C code reads sd->vis_matrix since combat switched to the per-tick raycast
     # (cs2_combat.h, build_vis_matrix: "Was: O(1) lookup into the pre-baked area→area
     # sd->vis_matrix"). binding.init still takes one array per pointer field and stores its
     # address, so the field gets an empty array: no visibility data at all, not made-up data.
+    # KNOWN LIMIT: a future C reader of sd->vis_matrix would read past this empty array on
+    # dust2. Remove the field (follow-up) before adding a reader.
     if md.vis_matrix is None:
         vis_matrix = np.zeros(0, dtype=np.int8)
     else:

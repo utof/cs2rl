@@ -169,8 +169,9 @@ typedef struct {
 
 /* ── Static data (owned by Python numpy arrays, pointer shared across instances) ── */
 typedef struct {
-    int      N;           /* nav area count                                   */
-    int8_t*  vis_matrix;  /* [N*N]           area visibility, row-major        */
+    int     N;          /* nav area count                                   */
+    int8_t* vis_matrix; /* [N*N] on simple/arena; EMPTY for dust2 envs (#270). UNREAD: visibility is
+                          cs2_combat.h's raycast; remove the field before adding a reader */
     int32_t* raster_grid; /* [grid_h*grid_w]  pos->area_idx, -1=off mesh       */
     int8_t*  adjacency;   /* [N*N]           nav graph connectivity            */
     float*   centroid_xy; /* [N*2]           idx-indexed: centroid_xy[i*2+0]=x */

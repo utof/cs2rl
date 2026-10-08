@@ -856,6 +856,8 @@ def train_remote(payload: LaunchPayload) -> dict[str, object]:
                                  volume=volume)
     resume = payload.get("resume_mount_path")
     resume_sha = payload.get("resume_sha256")
+    # KNOWN LIMIT: the container trusts the payload's nav_mesh_path; it is checked against the
+    # payload's own digest, and the payload has one author.
     nav_mesh_path = payload.get("nav_mesh_path")
     manifest = build_remote_manifest(payload)
     prepared = mrl.prepare_remote_source(

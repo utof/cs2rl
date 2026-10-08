@@ -375,7 +375,10 @@ def test_dust2_loads_never_build_vis(monkeypatch, tmp_path, entry):
     The MapData it leaves in _ENV_CACHE has no matrix, and an env built from it
     steps. The vis-less MapData is never put in map.py's _CS2_MAP_CACHE, where a
     build_vis=True caller would get it. `--record` runs one random-policy episode
-    with the rerun calls stubbed; it must log the env's own nav graph."""
+    with the rerun calls stubbed; it must log the env's own nav graph.
+
+    KNOWN LIMIT: the four entry points are enumerated; a NEW direct make_cs2_map(...)
+    caller using the default build_vis=True is outside this guard (follow-up removes the flag)."""
     import argparse
 
     import numpy as np
