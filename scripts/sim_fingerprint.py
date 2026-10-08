@@ -26,9 +26,14 @@ anything the bomb lifecycle reads or writes:
       --steps 5000: it is the only mode that reaches defuse and detonation.
       Each terminal tick also hashes the outcome fields of info[0]
       (OUTCOME_KEYS), because auto_reset replaces that tick's observation
-      with the next round's, so a change seen only at round end would
+      with the zeroed reset buffer, so a change seen only at round end would
       otherwise be invisible. stderr adds a `bomb:` line of transition
-      counts (BombCounters), read from observations and terminal info only.
+      counts (BombCounters), read from observations, terminal info and
+      step_stats.bomb_planted (StepStats, which #164 does not change).
+      KNOWN LIMIT: terminal-tick observations and masks are not hashed
+      (auto_reset returns the reset buffer and the fresh round's masks). The
+      terminal bomb slots are pinned in test_bomb_lifecycle with
+      auto_reset=False.
       Added for #164.
 
 WHY: behaviour-neutral sim refactors (spec §6: the parked-agent /
@@ -310,7 +315,7 @@ GLOBAL_BASE = OBS_BLOCKS["global"][0]
 
 
 class BombCounters:
-    """Bomb-transition counts read from what the hash covers (obs, terminal info).
+    """Bomb-transition counts read from what the hash covers (obs, terminal info, step_stats.bomb_planted).
 
     The coverage evidence for bomb mode, as deaths/damage_ticks are for track
     mode: a transition counted 0 is one the fingerprint says nothing about.
@@ -318,7 +323,7 @@ class BombCounters:
     sides of a bomb-representation change (#164 ran it against 9efe642).
     Counts are edges between consecutive non-terminal observations, so an
     event that starts and ends inside one tick is missed, and a terminal
-    tick is counted from info[0] instead (its observation is the reset one).
+    tick is counted from info[0] instead (its observation is the zeroed reset buffer).
     """
 
     def __init__(self, obs):

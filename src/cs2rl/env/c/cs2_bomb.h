@@ -5,7 +5,8 @@
  * authoritative lifecycle state. This file owns:
  *   - the queries every consumer reads (masks, observations, rewards, render,
  *     the play host) instead of rebuilding the phase from raw fields;
- *   - the named transitions, the only code that changes the phase. Each one
+ *   - the named transitions, the only code that changes the phase (apart from
+ *     env_reset's memset, which bomb_give follows). Each one
  *     leaves every BombState field at its value in the cs2_types.h table for
  *     the new phase (a field it does not set already holds that value). The
  *     only other writes are process_bomb's progress++ and ticks_left--;

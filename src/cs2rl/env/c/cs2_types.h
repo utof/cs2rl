@@ -506,8 +506,9 @@ typedef struct {
     int32_t fire_cd;  /* was shoot_cd */
     int8_t  alive;
     /* No per-agent has_bomb (#164): possession is GameState.bomb (BombState
-     * below), read through bomb_carrier() in cs2_bomb.h. The byte it used is
-     * the first of _pad0, so every later offset is unchanged. */
+     * below), read through bomb_carrier() in cs2_bomb.h. Removing it moves
+     * has_kit .. fired_this_tick one byte earlier (the ctypes mirror matches);
+     * _pad0 grows to 3, so enemy_mem_idx and every later offset are unchanged. */
     int8_t  has_kit;
     int8_t  team;              /* 0=T, 1=CT                                     */
     int8_t  is_moving;         /* set by movement; read by sound system          */
@@ -566,11 +567,13 @@ typedef struct {
  * bomb_carrier_id, the planter/defuser ids and tick counters, and the
  * per-agent has_bomb flag, which could be set to contradict each other.
  *
- * Only cs2_bomb.h writes it: a phase change goes through a named transition,
+ * Apart from env_reset's whole-GameState memset (which bomb_give immediately
+ * follows), only cs2_bomb.h writes it: a phase change goes through a named transition,
  * which leaves every field at its value in the table below for the new phase,
  * and process_bomb advances progress and ticks_left within a phase.
- * Consumers (masks, observations, rewards, render, the Python mirror) read it
- * through the cs2_bomb.h queries (bomb_carrier, bomb_planted, ...).
+ * Consumers (masks, observations, rewards, render) read the phase through the
+ * cs2_bomb.h queries (bomb_carrier, bomb_planted, ...) or compare it directly;
+ * the Python mirror's bomb_planted/bomb_carrier properties re-implement two queries.
  * bomb_state_error() (cs2_bomb.h) checks a state against this table, except a
  * lying bomb's position and a running countdown's value; binding py_step runs
  * it before every step, so a hand-assembled state that breaks it raises
@@ -618,7 +621,8 @@ typedef struct {
     /* Batch 2: round-fixed designated bomb carrier (T-side index 0..4).
      * Distinct from bomb_carrier(), which is the *dynamic* possession
      * (it changes on drop+auto-pickup; pickup is in process_bomb, cs2_bomb.h). This
-     * field is set ONLY in env_reset and is the round's stable identity
+     * field is set by env_reset (and by setup_bomb_carrier right after a reset; never
+     * reassigned mid-round) and is the round's stable identity
      * signal. Consumed by compute_observations to emit the role bit at
      * obs[OBS_GLOBAL_BASE+13] (=109 since the Batch 6 bearing slots; was 106,
      * and 104 before the T4 pitch insertion). Pitfall: must stay in the int32_t block
