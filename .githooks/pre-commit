@@ -54,12 +54,14 @@ if [ "${#python_files[@]}" -gt 0 ]; then
 
     # Complexity gates, threshold 40 (#216). Ruff's McCabe check is strict: no
     # function is over 40 by that metric today. complexipy's cognitive complexity is
-    # a ratchet, because a few functions already exceed 40 (and some of tests/ does):
+    # a ratchet, because 15 tracked functions already exceed 40 (11 of them in tests/):
     # `--diff HEAD --staged` compares each staged file with HEAD and fails only for
     # a NEW function over 40 or an existing one that got MORE complex and is over 40.
     # Editing an over-40 function without worsening it passes; a function renamed or
-    # moved counts as new. It sees staged .py files only: nothing here re-scans the
-    # rest of the tree, and `--no-verify` skips it.
+    # moved counts as new, so refactor it below 40 first (never --no-verify). It sees
+    # staged .py files only: nothing here re-scans the rest of the tree; `--no-verify`,
+    # rebase, cherry-pick and GitHub-side merges skip it. A `# noqa: complexipy` hides a
+    # NEW function, and of two same-named defs in one scope only the last is compared.
     echo "[pre-commit] Ruff McCabe complexity on staged Python files..."
     uv run --no-sync ruff check --select C901 \
         --config 'lint.mccabe.max-complexity=40' "${python_files[@]}"

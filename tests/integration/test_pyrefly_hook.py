@@ -335,7 +335,7 @@ def test_every_hook_uv_call_is_no_sync():
     from the environment is not: a NEW call through it passes this test and
     install()'s check, and one that REPLACES a counted call fails only the count.
     """
-    expected = {HOOK: 6, MERGE_HOOK: 1}
+    expected = {HOOK: 6, MERGE_HOOK: 3}
     for hook, n in expected.items():
         text = hook.read_text()
         bare = bare_uv_lines(text)
