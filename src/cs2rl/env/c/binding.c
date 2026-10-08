@@ -1016,7 +1016,9 @@ static PyObject* py_ground_at(PyObject* self, PyObject* args) {
  *      stay within it (#170); a hand-typed copy would be another author.
  * PITFALL: every key is a WeaponDef field name, so a renamed or removed field
  *      fails to compile here, but a NEW field is missing from the dict until
- *      it is added below. */
+ *      it is added below.
+ * KNOWN LIMIT: the scenario helpers' tests pin only type, mag_size, reserve_mags
+ *      and cycle_ticks; the other five fields are exported but not pinned. */
 static PyObject* py_weapon_defs(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     (void)self;
     enum { N_WEAPON_DEFS = (int)(sizeof(WEAPON_DEFS) / sizeof(WEAPON_DEFS[0])) };
