@@ -303,6 +303,8 @@ class GameStateC(ctypes.Structure):
 
     # Read-only mirrors of two cs2_bomb.h queries, for the Python readers of the old
     # fields. No setter: assigning either raises AttributeError.
+    # KNOWN LIMIT: these re-implement the C rules; the BombPhase value pin would not catch
+    # a changed rule that keeps the phase values.
     @property
     def bomb_planted(self) -> int:
         """1 once the bomb is planted this round (also after defuse/detonation), as C bomb_planted()."""
@@ -507,6 +509,9 @@ _C_OFFSET_FIELDS = (
     # bombsite_entered instead would miss a field slipped in between it and the
     # pad on one side only.
     (GameStateC, "_pad_gs", "GameState__pad_gs_offset"),
+    # The nested BombState's position inside GameState (#164): the _pad_gs tail anchor
+    # and sizeof are both blind to the bomb struct moving within GameStateC.
+    (GameStateC, "bomb", "GameState_bomb_offset"),
     (BombStateC, "z", "BombState_z_offset"),
     (StepStatsC, "reward_win_ct", "StepStats_reward_win_ct_offset"),
     (Dust2EnvC, "recoil_enabled", "Dust2Env_recoil_enabled_offset"),
