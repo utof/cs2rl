@@ -6,9 +6,10 @@ WHAT: builds one Cs2Env (seed 7, otherwise default kwargs, simple_map), steps
 masks, and prints a single sha256 hex digest over the concatenated
 mask/obs/reward/terminal stream.
 
-TWO MODES, TWO ORACLES — run BOTH, they are complementary, and their hashes are
+THREE MODES, THREE ORACLES — they are complementary, and their hashes are
 unrelated to each other (only parent-vs-HEAD comparisons within one mode mean
-anything):
+anything). Run random and track for any sim change, and bomb as well for
+anything the bomb lifecycle reads or writes:
   --aim-mode random (default)  uniform aim noise. Nothing is ever on target, so
       this covers spawn placement (the 5-area Fisher-Yates branch), movement,
       nav/PBRS shaping, the mask buffer, the round timer and — at --steps 700 —
@@ -18,6 +19,17 @@ anything):
       agents actually shoot each other. 4 deaths inside 200 steps, first
       damage on tick 0. Use this for ANY change to hitscan, damage, death or
       the visible-enemy scan (e.g. process_combat's nearest_vis_enemy).
+  --aim-mode bomb              track aim, plus every agent presses USE with
+      probability BOMB_USE_P and shoots whenever its mask allows, on a map
+      where both sides' spawn areas include the bombsite, with short bomb
+      clocks and round time (BOMB_CLOCKS, BOMB_ROUND_TIME). Run it with
+      --steps 5000: it is the only mode that reaches defuse and detonation.
+      Each terminal tick also hashes the outcome fields of info[0]
+      (OUTCOME_KEYS), because auto_reset replaces that tick's observation
+      with the next round's, so a change seen only at round end would
+      otherwise be invisible. stderr adds a `bomb:` line of transition
+      counts (BombCounters), read from observations and terminal info only.
+      Added for #164.
 
 WHY: behaviour-neutral sim refactors (spec §6: the parked-agent /
 `n_active_per_team` change at n_active=5) must be proven bit-identical to the
@@ -79,11 +91,25 @@ Task 3 must reproduce all three with `--n-active 5`, rebuilding its own .so:
                                   — the only run that covers combat AND round
                                   end + auto-reset together)
 
+BOMB-MODE FINGERPRINTS (seed 7, rng-seed 123), measured with the binding built
+at 9efe642:
+    --steps 5000 --aim-mode bomb
+        e2fb81c20d5ae02337dd935b0165c7aeb5c7a1557f7aa9dca92659da191f1b03
+        (bomb: drop=13 pickup=2 same_tick_pickup=2 plant_start=20
+         plant_complete=17 plant_cancel=3 defuse_start=18 defuse_cancel=5
+         defuse_complete=13 detonation=4 timeout=34 elimination=3)
+    --steps 5000 --aim-mode bomb --n-active 3
+        bd4f5f9d7ddac7321c644e633a4c572758a4ddf5f54604c969164b352c473a21
+  At --steps 700 track mode reaches drop, pickup and plant but never defuse or
+  detonation, and random mode reaches none of them.
+
 Usage:
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py [--steps 200] [--n-active 5]
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py --aim-mode track [--n-active 5]
+    UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py --aim-mode bomb --steps 5000
 """
 import argparse
+import dataclasses
 import hashlib
 import math
 import sys
@@ -94,7 +120,14 @@ from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
-from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
+from cs2rl.spec.action import (
+    ACTION_DIM,
+    ACTION_HEAD_NAMES,
+    ACTION_HEAD_SIZES,
+    ACTION_MASK_DIM,
+    AIM_DIM,
+)
+from cs2rl.spec.obs import OBS_BLOCKS
 
 # The mask buffer is the discrete heads laid end to end. If a head is ever added
 # or resized without ACTION_MASK_DIM following, the per-head slicing below would
@@ -158,6 +191,29 @@ def sample_masked_actions(masks, rng):
 TRACK_T_SPAWNS = [5, 13]               # T-corridor, T-ramp
 TRACK_CT_SPAWNS = [7, 14]              # CT-corridor, CT-ramp
 
+# Bomb mode (#164). The values were chosen by measuring transition counts over
+# 5000 steps (see BOMB-MODE FINGERPRINTS above): both sides' spawn areas include
+# the bombsite so plants and defuses start early, and the others are the ramps
+# and corridors, so rounds also see fights, drops and pickups. Clocks and round
+# time are short so a run holds dozens of rounds and every kind of round end.
+# Changing any value changes the fingerprints.
+BOMB_T_SPAWNS = [13, 5, 6]             # T-ramp, T-corridor, bombsite
+BOMB_CT_SPAWNS = [6, 14, 7]            # bombsite, CT-ramp, CT-corridor
+
+BOMB_CLOCKS = (("bomb_plant_time", 8), ("bomb_defuse_time", 4), ("bomb_defuse_kit", 2),
+               ("bomb_timer", 24))
+BOMB_ROUND_TIME = 120
+# The per-agent, per-tick chance of holding USE.
+BOMB_USE_P = 0.7
+HEAD_USE = ACTION_HEAD_NAMES.index("use")
+HEAD_SHOOT = ACTION_HEAD_NAMES.index("shoot")
+# The mask column of shoot's press bin (heads are laid end to end, bin 1 = press).
+SHOOT_PRESS_COL = sum(ACTION_HEAD_SIZES[:HEAD_SHOOT]) + 1
+
+# Terminal info keys hashed in bomb mode: how and when the round ended.
+OUTCOME_KEYS = ("winner", "win_by_detonation", "win_by_defuse", "timed_out", "bomb_planted",
+                "bomb_defused", "plant_tick", "kills_t", "kills_ct")
+
 
 def build_map(aim_mode):
     """simple_map for the given aim mode — identical rooms, differing spawns.
@@ -169,6 +225,8 @@ def build_map(aim_mode):
         return make_simple_map(rooms=SIMPLE_ROOMS,
                                t_spawns=TRACK_T_SPAWNS,
                                ct_spawns=TRACK_CT_SPAWNS)
+    if aim_mode == "bomb":
+        return make_simple_map(rooms=SIMPLE_ROOMS, t_spawns=BOMB_T_SPAWNS, ct_spawns=BOMB_CT_SPAWNS)
     return make_simple_map()
 
 
@@ -248,6 +306,74 @@ def track_aim_actions(game, max_turn):
     return cont
 
 
+GLOBAL_BASE = OBS_BLOCKS["global"][0]
+
+
+class BombCounters:
+    """Bomb-transition counts read from what the hash covers (obs, terminal info).
+
+    The coverage evidence for bomb mode, as deaths/damage_ticks are for track
+    mode: a transition counted 0 is one the fingerprint says nothing about.
+    It reads no GameState bomb field, so one copy of this script measures both
+    sides of a bomb-representation change (#164 ran it against 9efe642).
+    Counts are edges between consecutive non-terminal observations, so an
+    event that starts and ends inside one tick is missed, and a terminal
+    tick is counted from info[0] instead (its observation is the reset one).
+    """
+
+    def __init__(self, obs):
+        self.c = dict(drop=0,
+                      pickup=0,
+                      same_tick_pickup=0,
+                      plant_start=0,
+                      plant_complete=0,
+                      plant_cancel=0,
+                      defuse_start=0,
+                      defuse_cancel=0,
+                      defuse_complete=0,
+                      detonation=0,
+                      timeout=0,
+                      elimination=0)
+        self._prev = self._status(obs)
+
+    @staticmethod
+    def _status(obs):
+        g = obs[:, GLOBAL_BASE:GLOBAL_BASE + 11]
+        # The rows whose "carried by self" one-hot slot is set.
+        selves = np.flatnonzero(g[:TEAM_SIZE, 1])
+        carrier = int(selves[0]) if selves.size else -1
+        return (carrier >= 0, bool(g[:, 3].any()), bool(g[:, 4].any()), float(g[:, 9].max()),
+                float(g[:, 10].max()), carrier)
+
+    def update(self, obs, info, terminal, ss):
+        c = self.c
+        if terminal:
+            t = info[0]
+            c["defuse_complete"] += int(t["win_by_defuse"])
+            c["detonation"] += int(t["win_by_detonation"])
+            c["timeout"] += int(t["timed_out"])
+            c["elimination"] += int(not (
+                t["win_by_defuse"] or t["win_by_detonation"] or t["timed_out"]))
+            c["plant_complete"] += int(t["plant_tick"] > 0 and not self._prev[2])
+            self._prev = self._status(obs)
+            return
+        cur = self._status(obs)
+        p = self._prev
+        c["drop"] += int(not p[1] and cur[1] and not cur[2])
+        c["pickup"] += int(p[1] and cur[0])
+        # Drop and pickup inside one process_bomb call: the carrier changes hands.
+        c["same_tick_pickup"] += int(p[5] >= 0 and cur[5] >= 0 and p[5] != cur[5])
+        c["plant_start"] += int(p[3] == 0 and cur[3] > 0)
+        c["plant_cancel"] += int(p[3] > 0 and cur[3] == 0 and not cur[2])
+        c["plant_complete"] += int(ss.bomb_planted)
+        c["defuse_start"] += int(p[4] == 0 and cur[4] > 0)
+        c["defuse_cancel"] += int(p[4] > 0 and cur[4] == 0)
+        self._prev = cur
+
+    def summary(self):
+        return "bomb: " + " ".join(f"{k}={v}" for k, v in self.c.items())
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--steps", type=int, default=200)
@@ -261,7 +387,7 @@ def main():
                     default=123,
                     help="action-sampling seed (sanity checks only)")
     ap.add_argument("--aim-mode",
-                    choices=("random", "track"),
+                    choices=("random", "track", "bomb"),
                     default="random",
                     help="random: uniform aim noise (never hits — no combat coverage). "
                     "track: aim at the nearest alive enemy, so the hash covers the "
@@ -274,7 +400,13 @@ def main():
     # default that tests/integration/test_no_restated_env_defaults.py fails on — as the
     # first draft of this very comment was, by writing the number.
     config = EnvConfig() if a.n_active is None else EnvConfig(n_active_per_team=a.n_active)
+    if a.aim_mode == "bomb":
+        config = dataclasses.replace(config, round_time=BOMB_ROUND_TIME)
     env = make_env(config=config, seed=a.seed, map_data=build_map(a.aim_mode))
+    if a.aim_mode == "bomb":
+        sd = env._c_env.sd.contents
+        for name, ticks in BOMB_CLOCKS:
+            setattr(sd, name, ticks)
     rng = np.random.default_rng(a.rng_seed)
     h = hashlib.sha256()
 
@@ -297,6 +429,7 @@ def main():
     # Counting alive→dead EDGES (not a final headcount) so deaths across an
     # auto-reset round rollover still accumulate.
     prev_alive = [bool(game.agents[i].alive) for i in range(N_AGENTS)]
+    bomb_counts = BombCounters(obs)
 
     for _ in range(a.steps):
         masks = np.asarray(env._masks_view)            # (N_AGENTS, ACTION_MASK_DIM) int8
@@ -305,15 +438,23 @@ def main():
 
         # Order is load-bearing: the discrete sampler consumes RNG first. In
         # random mode the uniform draw follows it; in track mode there is no
-        # draw at all, so the two modes' RNG streams diverge immediately.
-        if a.aim_mode == "track":
+        # draw at all, so the two modes' RNG streams diverge immediately. Bomb
+        # mode then draws USE and overrides shoot with the mask's press bin.
+        if a.aim_mode in ("track", "bomb"):
             cont = track_aim_actions(game, max_turn)
         else:
             cont = rng.uniform(-0.5, 0.5, size=(N_AGENTS, AIM_DIM)).astype(np.float32)
-        obs, rew, term, _trunc, _info = env.step(act, cont)
+        if a.aim_mode == "bomb":
+            act[:, HEAD_USE] = rng.random(N_AGENTS) < BOMB_USE_P
+            act[:, HEAD_SHOOT] = masks[:, SHOOT_PRESS_COL]
+        obs, rew, term, _trunc, info = env.step(act, cont)
         h.update(np.ascontiguousarray(obs).tobytes())
         h.update(np.ascontiguousarray(rew).tobytes())
         h.update(np.ascontiguousarray(term).tobytes())
+        if a.aim_mode == "bomb":
+            bomb_counts.update(obs, info, bool(np.any(term)), env._c_env.step_stats)
+            if np.any(term):
+                h.update(np.array([info[0][k] for k in OUTCOME_KEYS], np.int64).tobytes())
         n_terminal_ticks += int(np.any(term))
         n_nonzero_reward_ticks += int(np.any(rew != 0))
         reward_abs_sum += float(np.abs(rew).sum())
@@ -333,6 +474,8 @@ def main():
         f"reward_abs_sum={reward_abs_sum:.6f} "
         f"deaths={n_deaths} damage_ticks={n_damage_ticks} min_hp={min_hp}",
         file=sys.stderr)
+    if a.aim_mode == "bomb":
+        print(bomb_counts.summary(), file=sys.stderr)
     print(h.hexdigest())
 
 
