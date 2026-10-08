@@ -15,6 +15,14 @@ from cs2rl.env.c.cs2_env import BombPhase, make_env
 from cs2rl.spec import action as spec_action
 from cs2rl.spec import obs as spec_obs
 from tests._helpers import envs as helper_envs
+from tests._helpers.scenario import (
+    area_centroid,
+    assert_state_consistent,
+    ground_at,
+    kill_agent,
+    place_agent,
+    place_in_area,
+)
 
 
 def test_make_env_reset_returns_expected_batch():
@@ -765,8 +773,7 @@ def test_round_designated_carrier_stable_through_drop():
         env.reset(seed=7)
         g = env._c_env.game
         rid_at_start = g.round_designated_carrier_id
-        g.agents[rid_at_start].hp = 0
-        g.agents[rid_at_start].alive = 0
+        kill_agent(env, rid_at_start)
         actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         for _ in range(20):
             env.step(actions)
@@ -804,8 +811,7 @@ def test_round_designated_carrier_property_50_seeds():
                     break
                 if kill_seed and tick == 5:
                                                                              # Drive the drop-on-death path (cs2_bomb.h).
-                    g.agents[rid].hp = 0
-                    g.agents[rid].alive = 0
+                    kill_agent(env, rid)
                 env.step(actions)
                 assert g.round_designated_carrier_id == rid, (
                     f"seed={seed} tick={tick}: round_designated_carrier_id "
@@ -850,8 +856,7 @@ def test_obs_designated_carrier_bit_t_side():
             assert obs[j, 109] == 0.0, f"CT idx {j}: obs[109]={obs[j,109]} expected 0.0"
 
         # Persistence after carrier death — drive 20 zero-action steps.
-        g.agents[rid].hp = 0
-        g.agents[rid].alive = 0
+        kill_agent(env, rid)
         for _ in range(20):
             obs, *_ = env.step(actions)
             assert obs[rid, 109] == 1.0, (
@@ -893,8 +898,7 @@ def test_post_pickup_plant_mask_unmasked():
         # Step 1: kill the carrier; env_step performs drop-on-death and (if a
         # teammate is within 32 units) the auto-pickup atomically in the same
         # call — the phase may go CARRIED→DROPPED→CARRIED inside one tick.
-        g.agents[rid].hp = 0
-        g.agents[rid].alive = 0
+        kill_agent(env, rid)
         env.step(actions)
 
         # After step 1 the original carrier must not still hold the bomb.
@@ -914,8 +918,7 @@ def test_post_pickup_plant_mask_unmasked():
             assert candidate is not None, (
                 "no alive T teammate available to receive the dropped bomb; "
                 "all 5 T-agents died on the same tick (test-setup edge case)")
-            g.agents[candidate].x = g.bomb.x
-            g.agents[candidate].y = g.bomb.y
+            place_agent(env, candidate, g.bomb.x, g.bomb.y)
             env.step(actions)
 
         # Identify the new bomb holder: the carrier, if alive.
@@ -933,6 +936,8 @@ def test_post_pickup_plant_mask_unmasked():
         # We scan all sd.N area indices (not capped) to locate bombsite areas,
         # then step only once we land on one. Bombsite indices on Dust2 start
         # around idx 1320 so a small cap like 200 would miss them entirely.
+        # place_in_area refuses a site whose centroid lies in another area, so
+        # those are skipped (dust2's first site, 1320, is not one of them).
         # We limit the number of env.step calls (not area scans) to 20 so the
         # test terminates even if every bombsite area somehow fails to unmask.
         sd = env._c_env.sd.contents
@@ -950,9 +955,9 @@ def test_post_pickup_plant_mask_unmasked():
         masks_open = False
         steps_taken = 0
         for ai in range(sd.N):
-            if not sd.bombsite_by_idx[ai]:
+            if not sd.bombsite_by_idx[ai] or ground_at(env, *area_centroid(env, ai))[0] != ai:
                 continue
-            g.agents[new_holder].area_idx = ai
+            place_in_area(env, new_holder, ai)
             env.step(actions)
             steps_taken += 1
             if env._masks_view[new_holder, use_mask_offset + 1] == 1:
@@ -2043,9 +2048,7 @@ def test_env_publishes_masks_after_reset_and_step():
         # All agents alive at spawn: move head fully valid.
         assert view[:, :9].all(), "alive agents should have the full move head valid"
 
-        g = env._c_env.game
-        g.agents[0].hp = 0
-        g.agents[0].alive = 0
+        kill_agent(env, 0)
         actions = np.zeros((n_agents, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         env.step(actions)
         assert (view == env._masks_view).all(), "shm != _masks_view after step"
@@ -2103,24 +2106,18 @@ def test_strafe_labels_match_geometry():
 
     env = make_env(seed=0, auto_reset=False)
     try:
-        g = env._c_env.game
         sd = env._c_env.sd.contents
         # An open bombsite-area centroid (R4 recipe) — flat, no walls nearby.
-        id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
-        open_area = next(aid for aid in env.map_data.area_ids
-                         if sd.bombsite_by_idx[id2idx[int(aid)]])
-        cx, cy = env.map_data.centroids[open_area][:2]
+        # Before #170 this indexed map_data.centroids (by area index) with an area
+        # id, standing the agent on area 1321's centroid with area_idx 1320.
+        open_area = next(i for i in range(sd.N) if sd.bombsite_by_idx[i])
 
         expected = {1: 0.0, 3: -90.0, 5: 180.0, 7: 90.0}                                      # bin → world angle (deg)
         for move_bin, want_deg in expected.items():
             env.reset()
-            a = g.agents[0]
-            a.alive, a.hp = 1, 100
-            a.x, a.y, a.z = float(cx), float(cy), 0.0
-            a.area_idx = id2idx[int(open_area)]
+            a = place_in_area(env, 0, open_area)
             a.facing = 0.0
             a.aim_rad = 0.0
-            a.vx = a.vy = a.vz = 0.0
             acts = np.zeros((10, 7), dtype=np.int64)
             acts[0, 0] = move_bin
             env.step(acts)
@@ -2143,8 +2140,10 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
     key was the TRUE distance for all 5 enemies unconditionally, so an unseen
     enemy walking closer visibly reordered the slots (rank leak).
 
-    Invisibility here is forced via area_idx = -1 — build_vis_matrix
-    short-circuits off-mesh agents to can_see=0 regardless of position."""
+    Invisibility here is geometry the sim can reach: enemy 6 stands within 40u
+    of the observer (area 0's centroid) behind a wall, at spots the step itself
+    reports as unseen; enemies 7-9 stay at the CT spawn. Before #170 it was
+    forced via area_idx = -1 on live agents, a state movement never writes."""
     from cs2rl.env.c.cs2_env import make_env
     from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_STRIDE
 
@@ -2154,6 +2153,10 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
         obs_view = env._obs_view
         enemy_base = OBS_BLOCKS["enemy"][0]
         observer = g.agents[0]         # T slot 0; enemies are 5-9
+        agents = g.agents
+
+        def _dist(a, b):
+            return ((a.x - b.x)**2 + (a.y - b.y)**2)**0.5
 
         def slot_flags():
             """(can_see, alive) per enemy obs slot of agent 0."""
@@ -2164,33 +2167,35 @@ def test_enemy_slot_sort_does_not_leak_invisible_rank():
         # Wipe observer's enemy memory so the sentinel branch is exercised.
         for m in range(5):
             observer.enemy_mem_idx[m] = -1             # INVALID_AREA_IDX
-                                                       # Enemy 5: alive, ON-mesh, right next to the observer (trivial LoS).
-        vis_enemy = g.agents[5]
-        vis_enemy.alive, vis_enemy.hp = 1, 100
-        vis_enemy.x, vis_enemy.y = observer.x + 40.0, observer.y
-        vis_enemy.area_idx = observer.area_idx
-                                                       # Enemies 6-9: alive but OFF-mesh (area_idx=-1 → can_see forced 0).
-                                                       # Enemy 6 sits CLOSER than the visible one — pre-F10 it stole slot 0.
-        for j in range(6, 10):
-            g.agents[j].alive, g.agents[j].hp = 1, 100
-            g.agents[j].area_idx = -1
-            g.agents[j].x, g.agents[j].y = observer.x + 500.0, observer.y
-        g.agents[6].x = observer.x + 5.0
+
+        place_in_area(env, 0, 0)
+        # Enemy 5: 40u east of the observer, in its line of sight.
+        place_agent(env, 5, observer.x + 40.0, observer.y)
+        # Enemy 6: 36u away behind a wall, CLOSER than the visible one; pre-F10
+        # it stole slot 0. Enemies 7-9 stay at the CT spawn, out of sight.
+        place_agent(env, 6, 162.5, -10.875)
+        assert_state_consistent(env)
+        assert _dist(observer, agents[6]) < _dist(observer, agents[5]), "enemy 6 must be closer"
 
         acts = np.zeros((10, 7), dtype=np.int64)
         env.step(acts)
         flags = slot_flags()
+        assert sum(cs for cs, _ in flags) == 1, f"exactly one enemy is visible: {flags}"
         assert flags[0] == (1, 1), (
             f"slot 0 must hold the VISIBLE enemy (can_see=1); got slots {flags} — "
             f"a closer invisible enemy outranked it (F10 leak)")
         assert all(cs == 0 for cs, _ in flags[1:]), f"only one enemy is visible: {flags}"
 
-        # Unseen movement must not reorder: drag the invisible enemy through
-        # the observer and re-step several times — slot 0 stays the visible one.
-        for new_dx in (2.0, 1.0, 0.5):
-            g.agents[6].x = observer.x + new_dx
+        # Unseen movement must not reorder: move the invisible enemy to other
+        # unseen spots, all closer than the visible one, and re-step each time —
+        # slot 0 stays the visible one.
+        for spot in ((168.743, -6.26), (155.477, -10.184), (182.5, -4.808)):
+            place_agent(env, 6, *spot)
+            assert _dist(observer, agents[6]) < _dist(
+                observer, agents[5]), (f"enemy 6 at {spot} must be closer than enemy 5")
             env.step(acts)
+            assert sum(cs for cs, _ in slot_flags()) == 1, f"enemy 6 at {spot} became visible"
             assert slot_flags()[0] == (1, 1), (
-                f"invisible enemy at dx={new_dx} reordered the slots — rank leak")
+                f"invisible enemy at {spot} reordered the slots — rank leak")
     finally:
         env.close()

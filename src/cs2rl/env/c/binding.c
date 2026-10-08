@@ -978,6 +978,83 @@ static PyObject* py_solid_ray_clear(PyObject* self, PyObject* args) {
     return PyLong_FromLong((long)solid_ray_clear(&benv->sd, x0, y0, z0, x1, y1, z1));
 }
 
+/* ── binding.ground_at(capsule, x, y) -> (area_idx, z) ──
+ * The sim's own answer to "which area holds (x, y), and where is its floor":
+ * cs2_movement.h's _area_at (the raster label, or the room that contains the
+ * point when the label's quad misses it) and _surface_z on that area, the
+ * height the grounded ground-snap writes. (-1, None) when no area holds (x, y).
+ *
+ * WHY: both rules are static inline C, so ctypes cannot reach them, and the
+ *      only other route is a Python copy of each (#170). The test scenario
+ *      helpers (tests/_helpers/scenario.py) derive area_idx and the settled z
+ *      from a position through this, so a placed agent agrees with the sim.
+ * PITFALL: reads sd->area_bounds, which Cs2Env installs after binding.init
+ *      (_attach_area_bounds, in its constructor). A query: it writes nothing. */
+static PyObject* py_ground_at(PyObject* self, PyObject* args) {
+    (void)self;
+    PyObject* cap;
+    float     x, y;
+    if (!PyArg_ParseTuple(args, "Off", &cap, &x, &y))
+        return NULL;
+    BindingEnv* benv = (BindingEnv*)PyCapsule_GetPointer(cap, NULL);
+    if (!benv) {
+        PyErr_SetString(PyExc_ValueError, "invalid env capsule");
+        return NULL;
+    }
+    int area = _area_at(&benv->sd, x, y);
+    if (area < 0)
+        return Py_BuildValue("(iO)", area, Py_None);
+    return Py_BuildValue("(if)", area, _surface_z(&benv->sd, area, x, y));
+}
+
+/* ── binding.weapon_defs() -> tuple of dicts, one per weapon slot ──
+ * cs2_weapons.h's WEAPON_DEFS, indexed by weapon_slot (0 rifle, 1 pistol,
+ * 2 knife): the table init_agent_ammo fills a spawn loadout from and
+ * tick_weapon reloads from. mag_size and reserve_mags are -1 for the knife.
+ *
+ * WHY: no Python copy of the table exists, and a test that writes ammo must
+ *      stay within it (#170); a hand-typed copy would be another author.
+ * PITFALL: every key is a WeaponDef field name, so a renamed or removed field
+ *      fails to compile here, but a NEW field is missing from the dict until
+ *      it is added below.
+ * KNOWN LIMIT: the scenario helpers' tests pin only type, mag_size, reserve_mags
+ *      and cycle_ticks; the other five fields are exported but not pinned. */
+static PyObject* py_weapon_defs(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    (void)self;
+    enum { N_WEAPON_DEFS = (int)(sizeof(WEAPON_DEFS) / sizeof(WEAPON_DEFS[0])) };
+    PyObject* defs = PyTuple_New(N_WEAPON_DEFS);
+    if (!defs)
+        return NULL;
+    for (int s = 0; s < N_WEAPON_DEFS; s++) {
+        const WeaponDef* d   = &WEAPON_DEFS[s];
+        PyObject*        row = Py_BuildValue("{s:i,s:f,s:f,s:i,s:i,s:i,s:i,s:f,s:f}",
+                                             "type",
+                                             d->type,
+                                             "base_damage",
+                                             d->base_damage,
+                                             "armor_pen",
+                                             d->armor_pen,
+                                             "cycle_ticks",
+                                             (int)d->cycle_ticks,
+                                             "mag_size",
+                                             (int)d->mag_size,
+                                             "reserve_mags",
+                                             (int)d->reserve_mags,
+                                             "reload_ticks",
+                                             (int)d->reload_ticks,
+                                             "move_speed",
+                                             d->move_speed,
+                                             "range_modifier",
+                                             d->range_modifier);
+        if (!row) {
+            Py_DECREF(defs);
+            return NULL;
+        }
+        PyTuple_SET_ITEM(defs, s, row);
+    }
+    return defs;
+}
+
 static PyMethodDef binding_methods[] = {
     {"init", py_init, METH_VARARGS, "Init env, return capsule"},
     {"reset", py_reset, METH_VARARGS, "Reset env"},
@@ -1003,6 +1080,11 @@ static PyMethodDef binding_methods[] = {
      py_solid_ray_clear,
      METH_VARARGS,
      "1 if no baked face blocks the segment (x0,y0,z0)->(x1,y1,z1)"},
+    {"ground_at",
+     py_ground_at,
+     METH_VARARGS,
+     "(area_idx, surface z) the sim resolves for (x, y); (-1, None) off the mesh"},
+    {"weapon_defs", py_weapon_defs, METH_NOARGS, "WEAPON_DEFS as one dict per weapon slot"},
     {NULL, NULL, 0, NULL},
 };
 

@@ -1,5 +1,4 @@
 # tests/env/c/test_reward.py
-import math
 
 import numpy as np
 import pytest
@@ -7,6 +6,19 @@ import pytest
 from cs2rl.env.c.cs2_env import BombPhase, make_env
 from cs2rl.env.config import EnvConfig, RewardWeights
 from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_SIZES
+from tests._helpers.scenario import (
+    assert_state_consistent,
+    face,
+    kill_agent,
+    kill_all_but,
+    place_in_area,
+    visible_area_pair,
+)
+
+
+def _first_bombsite(env):
+    """The map's first bombsite area index."""
+    return next(i for i, flag in enumerate(env.map_data.bombsite_by_idx) if flag)
 
 
 def test_pbrs_rewards_are_finite():
@@ -28,67 +40,21 @@ def test_pbrs_shaping_positive_on_kill():
     """Killing an enemy produces a positive reward for the shooter."""
     env = make_env(auto_reset=False)
     env.reset()
-    id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
 
-    # Find two visible areas within shooting range.
-    # Selection criterion (gh #36 follow-up): runtime position-LoS, NOT the
-    # centroid-baked vis_matrix. The C build_vis_matrix in cs2_combat.h now
-    # walks raster cells with adjacency checks, which can disagree with the
-    # static vis_matrix (centroid-only raycast at bake time). Use the Python
-    # mirror MapData.line_of_sight_2d to filter pair candidates so we pick a
-    # pair the live env actually treats as combatable.
-    nav = env.nav_graph
-    assert nav is not None, "make_env() loads dust2, which has a NavGraph"
-    pair = None
-    for i, area_i in enumerate(nav.area_ids[:400]):
-        for area_j in nav.area_ids[i + 1:i + 200]:
-            ci = nav.centroids[area_i]
-            cj = nav.centroids[area_j]
-            dx = cj[0] - ci[0]
-            dy = cj[1] - ci[1]
-            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
-                continue
-            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
-                                                 float(cj[1])):
-                continue
-            pair = (area_i, area_j)
-            break
-        if pair is not None:
-            break
-    assert pair is not None, "no visible test pair found"
-
-    area_t, area_ct = pair
-    for i in range(10):
-        env._c_env.game.agents[i].alive = 0
-        env._c_env.game.agents[i].hp = 0
-
-    t_c = nav.centroids[area_t]
-    ct_c = nav.centroids[area_ct]
-    t = env._c_env.game.agents[0]
-    ct = env._c_env.game.agents[5]
-
-    t.alive = 1
-    t.hp = 100
-    t.area_idx = id2idx[area_t]
-    t.x, t.y, t.z = float(t_c[0]), float(t_c[1]), 0.0
-
-    ct.alive = 1
+    # Two visible areas within shooting range, by runtime position-LoS (gh #36
+    # follow-up), not the centroid-baked vis_matrix: see visible_area_pair.
+    area_t, area_ct = visible_area_pair(env, min_dist=50, max_dist=1500)
+    kill_all_but(env, 0, 5)
+    place_in_area(env, 0, area_t)
+    ct = place_in_area(env, 5, area_ct)
     ct.hp = 1                          # low HP so any hit kills
     ct.armor = 0
-    ct.area_idx = id2idx[area_ct]
-    ct.x, ct.y, ct.z = float(ct_c[0]), float(ct_c[1]), 0.0
 
     # Batch 3: set facing directly (continuous-aim path); SHOOT is now head 1.
-    t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
-    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
-    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
-    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
-    # asymmetric-z setups inherit the correct correction automatically.
-    rx_3d = ct.x - t.x
-    ry_3d = ct.y - t.y
-    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
-    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
-    t.pitch = math.atan2(rz_3d, dist_2d_3d)
+    # Pitch is absolute per step and the zero continuous buffer sets 0, which
+    # hits a same-floor target (dust2 is flat: rz = 0).
+    face(env, 0, 5)
+    assert_state_consistent(env)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     # Batch 3: SHOOT moved from head 2 → 1 after HEAD_AIM removal.
@@ -189,8 +155,7 @@ def test_win_terminal_reward():
 
     # Kill all CT agents — T team wins
     for i in range(5, 10):
-        env._c_env.game.agents[i].alive = 0
-        env._c_env.game.agents[i].hp = 0
+        kill_agent(env, i)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     _, rewards, terms, _, _ = env.step(actions)
@@ -208,32 +173,16 @@ def test_bomb_entry_bonus():
     """T bomb carrier entering bombsite for the first time gets +0.3 bonus."""
     env = make_env(seed=0, auto_reset=False)
     env.reset()
-    nav_graph = env.nav_graph
-    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
-    map_data = env.map_data
-
-    # Find first bombsite area index
-    site_idx = None
-    site_centroid = None
-    for idx, is_site in enumerate(map_data.bombsite_by_idx):
-        if is_site:
-            site_idx = idx
-            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
-            break
-    assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
+    site_idx = _first_bombsite(env)
 
     # Assign bomb to agent 0 and teleport them to bombsite
     env.give_bomb(0)
-    bomber = env._c_env.game.agents[0]
 
     # Ensure bombsite_entered flag is clear for bomber
     env._c_env.game.bombsite_entered[0] = 0
 
     # Teleport bomber to bombsite centroid
-    bomber.area_idx = site_idx
-    bomber.x = float(site_centroid[0])
-    bomber.y = float(site_centroid[1])
-    bomber.z = 0.0
+    place_in_area(env, 0, site_idx)
 
     # Step with use=1 — the C env checks use action to trigger entry bonus
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
@@ -250,30 +199,13 @@ def test_plant_progress_reward():
     """Each tick of active bomb planting yields +0.05 to the planting agent."""
     env = make_env(seed=0, auto_reset=False)
     env.reset()
-    nav_graph = env.nav_graph
-    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
-    map_data = env.map_data
-
-    # Find first bombsite area
-    site_idx = None
-    site_centroid = None
-    for idx, is_site in enumerate(map_data.bombsite_by_idx):
-        if is_site:
-            site_idx = idx
-            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
-            break
-    assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
+    site_idx = _first_bombsite(env)
 
     # Set up bomber at bombsite — mark entry as already done so no entry bonus
     bomber_idx = 0
     env.give_bomb(bomber_idx)
-    bomber = env._c_env.game.agents[bomber_idx]
     env._c_env.game.bombsite_entered[bomber_idx] = 1   # suppress entry bonus
-
-    bomber.area_idx = site_idx
-    bomber.x = float(site_centroid[0])
-    bomber.y = float(site_centroid[1])
-    bomber.z = 0.0
+    place_in_area(env, bomber_idx, site_idx)
 
     # use=1 (Batch 3: USE is now head index 4). The first press starts the plant;
     # the second one is a mid-plant tick (progress already 1, not tick 0).
@@ -304,25 +236,10 @@ def test_planter_death_releases_plant_lock():
     env.reset()
     g = env._c_env.game
     sd = env._c_env.sd.contents
-    map_data = env.map_data
-    nav_graph = env.nav_graph
-    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
-
-    site_idx = None
-    site_centroid = None
-    for idx, is_site in enumerate(map_data.bombsite_by_idx):
-        if is_site:
-            site_idx = idx
-            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
-            break
-    assert site_idx is not None and site_centroid is not None, "No bombsite found in map"
+    site_idx = _first_bombsite(env)
 
     def _put_at_site(i):
-        a = g.agents[i]
-        a.alive = 1
-        a.hp = 100
-        a.area_idx = site_idx
-        a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
+        place_in_area(env, i, site_idx)
         g.bombsite_entered[i] = 1      # suppress entry bonus; not under test
 
     # Agent 0 mid-plant at the site (5 of plant_time ticks done, through USE).
@@ -335,8 +252,7 @@ def test_planter_death_releases_plant_lock():
     assert (g.bomb.phase, g.bomb.agent, g.bomb.progress) == (BombPhase.PLANTING, 0, 5)
 
     # Kill the planter; one step must release the lock and reset progress.
-    g.agents[0].alive = 0
-    g.agents[0].hp = 0
+    kill_agent(env, 0)
     env.step(np.zeros((10, ACTION_DIM), dtype=np.int64))
     assert g.bomb.phase == BombPhase.DROPPED, (
         f"dead planter must drop the bomb and end the plant, phase is {g.bomb.phase}")
@@ -371,23 +287,9 @@ def test_plant_completion_writes_plant_tick():
     env.reset()
     g = env._c_env.game
     sd = env._c_env.sd.contents
-    map_data = env.map_data
-    nav_graph = env.nav_graph
-    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
-    site_idx = None
-    site_centroid = None
-    for idx, is_site in enumerate(map_data.bombsite_by_idx):
-        if is_site:
-            site_idx = idx
-            site_centroid = nav_graph.centroids[map_data.area_ids[idx]]
-            break
-    assert site_idx is not None and site_centroid is not None
+    site_idx = _first_bombsite(env)
     env.give_bomb(0)
-    a = g.agents[0]
-    a.alive = 1
-    a.hp = 100
-    a.area_idx = site_idx
-    a.x, a.y, a.z = float(site_centroid[0]), float(site_centroid[1]), 0.0
+    place_in_area(env, 0, site_idx)
     g.bombsite_entered[0] = 1
     plant_time = int(sd.bomb_plant_time)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
@@ -483,67 +385,21 @@ def test_kill_reward_weight_is_configurable():
         ), ),
     )
     env.reset()
-    id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
-    nav = env.nav_graph
-    assert nav is not None, "make_env() loads dust2, which has a NavGraph"
 
     # Pair selection uses runtime LoS (see test_pbrs_shaping_positive_on_kill comment).
-    pair = None
-    for i, area_i in enumerate(nav.area_ids[:400]):
-        for area_j in nav.area_ids[i + 1:i + 200]:
-            ci = nav.centroids[area_i]
-            cj = nav.centroids[area_j]
-            dx = cj[0] - ci[0]
-            dy = cj[1] - ci[1]
-            if not (50 < float((dx * dx + dy * dy)**0.5) < 1500):
-                continue
-            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
-                                                 float(cj[1])):
-                continue
-            pair = (area_i, area_j)
-            break
-        if pair is not None:
-            break
-    assert pair is not None
-
-    area_t, area_ct = pair
-    for i in range(10):
-        env._c_env.game.agents[i].alive = 0
-        env._c_env.game.agents[i].hp = 0
-
-    t = env._c_env.game.agents[0]
-    ct = env._c_env.game.agents[5]
-    tc = nav.centroids[area_t]
-    ctc = nav.centroids[area_ct]
-
-    t.alive = 1
-    t.hp = 100
+    area_t, area_ct = visible_area_pair(env, min_dist=50, max_dist=1500)
+    kill_all_but(env, 0, 5)
+    t = place_in_area(env, 0, area_t)
+    ct = place_in_area(env, 5, area_ct)
     t.armor = 0
-    t.area_idx = id2idx[area_t]
-    t.x = float(tc[0])
-    t.y = float(tc[1])
-    t.z = 0.0
-    ct.alive = 1
     ct.hp = 1
     ct.armor = 0
-    ct.area_idx = id2idx[area_ct]
-    ct.x = float(ctc[0])
-    ct.y = float(ctc[1])
-    ct.z = 0.0
-
-    # Batch 3: set facing directly; SHOOT is now head 1.
-    t.facing = math.atan2(ct.y - t.y, ct.x - t.x)
-    # Batch 3.5 v1b (gh #36 fix A): 3D combat uses center-to-center geometry
-    # (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). Same-z agents → rz=0 →
-    # pitch=0 hits like 2D would. Kept pitch computation for documentation:
-    # asymmetric-z setups inherit the correct correction automatically.
-    rx_3d = ct.x - t.x
-    ry_3d = ct.y - t.y
-    rz_3d = (ct.z + 48.0) - (t.z + 48.0)               # torso_z - eye_z (v1b: equal)
-    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
-    t.pitch = math.atan2(rz_3d, dist_2d_3d)
+    # Batch 3: set facing directly; SHOOT is now head 1. The zero continuous buffer
+    # sets pitch 0, which hits a same-floor target (see test_pbrs_shaping_positive_on_kill).
+    face(env, 0, 5)
+    assert_state_consistent(env)
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
-    actions[0, 1] = 1                                  # SHOOT (post-Batch-3 index)
+    actions[0, 1] = 1                  # SHOOT (post-Batch-3 index)
     _, rewards, _, _, _ = env.step(actions)
 
     # With all weights zeroed except reward_kill=0.9, killer reward must be ≈0.9
@@ -665,7 +521,7 @@ def _set_planted_bomb(env, ticks_left, *, phase=BombPhase.PLANTED, agent=-1, pro
     b = env._c_env.game.bomb
     b.phase, b.agent, b.progress = phase, agent, progress
     b.ticks_left = ticks_left
-    b.area_idx = next(i for i, flag in enumerate(env.map_data.bombsite_by_idx) if flag)
+    b.area_idx = _first_bombsite(env)
     b.x = b.y = b.z = 0.0
     return b.area_idx
 
@@ -673,8 +529,9 @@ def _set_planted_bomb(env, ticks_left, *, phase=BombPhase.PLANTED, agent=-1, pro
 def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_left, alive_teams):
     """Configure game state for a deterministic round-end scenario.
 
-    Sets one agent alive per team (agent 0 = T, agent 5 = CT) and marks the
-    round over with the specified winner/bomb conditions. All other agents dead.
+    Keeps one agent alive per team in alive_teams (agent 0 = T, agent 5 = CT) and
+    marks the round over with the specified winner/bomb conditions. All other agents
+    dead.
 
     Use this helper for scenarios where round_over is already set before step()
     (detonation, elimination, timeout, and post-plant elimination edge-cases).
@@ -692,20 +549,11 @@ def _setup_round_end(env, winner, bomb_planted, bomb_ticks_left, round_ticks_lef
         alive_teams:     set of teams that have survivors ({0}, {1}, or {0,1})
     """
     g = env._c_env.game
-    # Kill all agents first
-    for i in range(10):
-        g.agents[i].alive = 0
-        g.agents[i].hp = 0
-    # Revive one agent per alive team
-    if 0 in alive_teams:
-        g.agents[0].alive = 1
-        g.agents[0].hp = 100
-        g.agents[0].team = 0
-    if 1 in alive_teams:
-        g.agents[5].alive = 1
-        g.agents[5].hp = 100
-        g.agents[5].team = 1
-    # Set round-end state
+    # One survivor per alive team (agent 0 = T, agent 5 = CT); kill everyone else.
+    kill_all_but(env, *(i for team, i in ((0, 0), (1, 5)) if team in alive_teams))
+    # Set round-end state: written raw on purpose, the scenario's terminal flags
+    # (compute_rewards reads them; scenario.py has no rule for them, and a pre-set
+    # round_over skips the sim's own end checks).
     g.winner = winner
     if bomb_planted:
         _set_planted_bomb(env,
@@ -862,37 +710,27 @@ def test_natural_defuse():
     g = env._c_env.game
     sd = env._c_env.sd.contents
 
-    # Kill every agent first to zero the slate.
-    for i in range(10):
-        g.agents[i].alive = 0
-        g.agents[i].hp = 0
+    # Only the CT defuser (agent 5) and one T (agent 0) stay alive.
+    kill_all_but(env, 0, 5)
 
     # Alive CT defuser (agent 5); placed on the bomb's area below.
     ct = g.agents[5]
-    ct.alive = 1
-    ct.hp = 100
-    ct.team = 1
     ct.has_kit = 0                     # use no-kit defuse_time
 
     # Alive T at a different area so process_combat doesn't kill them
     # (zeroed actions → no shoot → no combat resolution). Having a T alive
     # is REQUIRED to avoid env_step's elimination check (cs2_env.h) firing
-    # before process_bomb runs.
+    # before process_bomb runs. It stays at its T spawn, away from the site.
     t = g.agents[0]
-    t.alive = 1
-    t.hp = 100
-    t.team = 0
 
     # Bomb state: planted on a bombsite, live, and the CT one tick from
     # finishing its defuse (short-circuited so ONE step completes it); 50
     # ticks of bomb-timer headroom; round open.
     defuse_time = int(sd.bomb_defuse_time)
-    ct.area_idx = _set_planted_bomb(env,
-                                    50,
-                                    phase=BombPhase.DEFUSING,
-                                    agent=5,
-                                    progress=defuse_time - 1)
-    t.area_idx = ct.area_idx + 1       # anywhere != ct.area_idx
+    site = _set_planted_bomb(env, 50, phase=BombPhase.DEFUSING, agent=5, progress=defuse_time - 1)
+    place_in_area(env, 5, site)
+    assert t.area_idx != site
+    assert_state_consistent(env)
     g.round_ticks_left = 100           # round timer well above zero
     g.round_over = 0                   # CRITICAL: leave the round open
     g.winner = -1                      # ongoing
@@ -1062,14 +900,9 @@ def test_step_stats_in_info_flag_on_merges_with_terminal_summary():
     env = make_env(include_step_stats_in_info=True)
     env.reset()
     # Force round_over via direct state manipulation (same pattern as
-    # _setup_round_end in test_reward.py). Minimal: kill all agents of one team.
+    # _setup_round_end in test_reward.py). Minimal: only CT agent 5 survives.
     g = env._c_env.game
-    for i in range(10):
-        g.agents[i].alive = 0
-        g.agents[i].hp = 0
-    g.agents[5].alive = 1
-    g.agents[5].hp = 100
-    g.agents[5].team = 1
+    kill_all_but(env, 5)
     g.winner = 1
     g.round_over = 1
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)

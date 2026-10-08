@@ -1,5 +1,4 @@
 # tests/env/c/test_env_feasibility.py
-import math
 
 import numpy as np
 
@@ -11,8 +10,20 @@ from cs2rl.env.nav import BOMB_PLANT_TIME, LASER_RANGE, TEAM_SIZE
 # canonical implementation with these tests. drive_agent_through_area_path
 # is the facing-poke TEST driver; the action-interface expert used for demo
 # recording is scripted_expert.ScriptedBomber.
-from cs2rl.eval.scripted_expert import bfs_area_path, bombsite_areas, drive_agent_through_area_path
+from cs2rl.eval.scripted_expert import (
+    bfs_area_path,
+    bombsite_areas,
+    drive_agent_through_area_path,
+    setup_bomb_carrier,
+)
 from cs2rl.spec.action import ACTION_DIM
+from tests._helpers.scenario import (
+    assert_state_consistent,
+    face,
+    kill_all_but,
+    place_in_area,
+    visible_area_pair,
+)
 
 
 def test_spawn_areas_are_distinct_and_site_reachable():
@@ -50,13 +61,9 @@ def test_scripted_bomber_can_reach_site_and_plant():
     env._c_env.game.round_ticks_left = 100000
 
     bomber_idx = 4
-    env.give_bomb(bomber_idx)
-
-    # Knife has the highest wishspeed (250 u/s) so the bomber rolls up to
-    # max speed in ~3 accel ticks and spends less budget per area hop.
-    env._c_env.game.agents[bomber_idx].weapon_slot = 2
-    env._c_env.game.agents[bomber_idx].weapon_slot_target = 2
-    env._c_env.game.agents[bomber_idx].switch_ticks = 0
+    # The bomb and the knife (highest wishspeed, 250 u/s: the bomber rolls up
+    # to max speed in ~3 accel ticks and spends less budget per area hop).
+    setup_bomb_carrier(env, bomber_idx)
 
     bomber = env._c_env.game.agents[bomber_idx]
     start_area_id = int(env.map_data.area_ids[bomber.area_idx])
@@ -86,79 +93,22 @@ def test_scripted_bomber_can_reach_site_and_plant():
 def test_controlled_visible_agents_can_kill():
     env = make_env(auto_reset=False)
     env.reset()
-    nav_graph = env.nav_graph
-    assert nav_graph is not None, "make_env() loads dust2, which has a NavGraph"
-    id2idx = {int(aid): i for i, aid in enumerate(env.map_data.area_ids)}
-
-    # Pair selection uses runtime LoS (see test_reward.py comment for the
-    # vis_matrix / line_of_sight_2d divergence introduced by gh #36).
-    pair = None
-    area_ids = nav_graph.area_ids
-    for i, area_i in enumerate(area_ids[:400]):
-        for area_j in area_ids[i + 1:i + 200]:
-            ci = nav_graph.centroids[area_i]
-            cj = nav_graph.centroids[area_j]
-            dx = cj[0] - ci[0]
-            dy = cj[1] - ci[1]
-            dist = float((dx * dx + dy * dy)**0.5)
-            if not (50 < dist < LASER_RANGE * 0.5):
-                continue
-            if not env.map_data.line_of_sight_2d(float(ci[0]), float(ci[1]), float(cj[0]),
-                                                 float(cj[1])):
-                continue
-            pair = (area_i, area_j)
-            break
-        if pair is not None:
-            break
-
-    assert pair is not None, "Failed to find a visible test pair"
-    area_t, area_ct = pair
-
-    for i in range(10):
-        ca = env._c_env.game.agents[i]
-        ca.alive = 0
-        ca.hp = 0
-
-    t_centroid = nav_graph.centroids[area_t]
-    ct_centroid = nav_graph.centroids[area_ct]
-
-    t_agent = env._c_env.game.agents[0]
-    ct_agent = env._c_env.game.agents[5]
-
-    t_agent.alive = 1
-    t_agent.hp = 100
-    t_agent.area_idx = id2idx[area_t]
-    t_agent.x = float(t_centroid[0])
-    t_agent.y = float(t_centroid[1])
-    t_agent.z = 0.0
-
-    ct_agent.alive = 1
+    # Two visible areas within half the laser range, by runtime position-LoS
+    # (gh #36 follow-up), not the centroid-baked vis_matrix: see visible_area_pair.
+    area_t, area_ct = visible_area_pair(env, min_dist=50, max_dist=LASER_RANGE * 0.5)
+    kill_all_but(env, 0, 5)
+    place_in_area(env, 0, area_t)
+    ct_agent = place_in_area(env, 5, area_ct)
     ct_agent.hp = 1                    # low HP so any hit kills
     ct_agent.armor = 0
-    ct_agent.area_idx = id2idx[area_ct]
-    ct_agent.x = float(ct_centroid[0])
-    ct_agent.y = float(ct_centroid[1])
-    ct_agent.z = 0.0
 
-    # Batch 3: aim is now a continuous head — facing is set directly on the
-    # agent (above) and the discrete actions buffer no longer carries an
-    # aim bin. SHOOT moved from index 2 to index 1 in the new enum
-    # (move=0, shoot=1, reload=2, weapon=3, use=4, crouch=5, jump=6).
-    t_facing = math.atan2(ct_agent.y - t_agent.y, ct_agent.x - t_agent.x)
-    t_agent.facing = t_facing
-    # Batch 3.5 v1b (gh #36 fix A): 3D combat hit-test uses center-to-center
-    # geometry (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND = 48). For same-z agents
-    # this gives rz=0 → pitch=0 hits flat-ground shots as 2D would. The
-    # `t_agent.pitch = atan2(rz_3d, dist_2d_3d)` call below evaluates to 0 for
-    # this same-z setup but is kept for documentation: future asymmetric-z
-    # tests can copy this pattern and get the correct correction automatically.
-    rx_3d = ct_agent.x - t_agent.x
-    ry_3d = ct_agent.y - t_agent.y
-    eye_z_t = t_agent.z + 48.0         # EYE_HEIGHT_STAND (v1b)
-    torso_z_ct = ct_agent.z + 48.0     # TORSO_OFFSET_STAND (v1b)
-    rz_3d = torso_z_ct - eye_z_t
-    dist_2d_3d = math.sqrt(rx_3d * rx_3d + ry_3d * ry_3d)
-    t_agent.pitch = math.atan2(rz_3d, dist_2d_3d)
+    # Batch 3: aim is a continuous head; facing is set directly on the agent
+    # and the discrete actions buffer carries no aim bin. Pitch is absolute
+    # per step and the zero continuous buffer sets 0, which hits a same-floor
+    # target (dust2 is flat). SHOOT moved from index 2 to index 1 in the new
+    # enum (move=0, shoot=1, reload=2, weapon=3, use=4, crouch=5, jump=6).
+    face(env, 0, 5)
+    assert_state_consistent(env)
 
     actions = np.zeros((10, ACTION_DIM), dtype=np.int64)
     # Batch 3: SHOOT moved from head 2 → 1 after HEAD_AIM removal.

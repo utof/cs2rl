@@ -8,24 +8,7 @@ from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig, RewardWeights
 from cs2rl.train.metrics import compute_game_metrics
 from cs2rl.train.rewards import split_into_channels
-
-N_AGENTS, AIM_DIM, ACTION_DIM = 10, 2, 7
-H_SHOOT = 1
-
-
-def _place_duel(env, facing0):
-    """Agent 0 (T) and agent 5 (CT) 40u apart in agent 0's spawn room, both standing."""
-    env.reset()
-    ag = env._c_env.game.agents
-    a0, a5 = ag[0], ag[5]
-    a5.x, a5.y, a5.z = a0.x + 40.0, a0.y, a0.z
-    a5.area_idx = a0.area_idx
-    a5.facing = math.pi                # looks back at agent 0
-    a0.facing = facing0
-    act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
-    cont = np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32)
-    act[0, H_SHOOT] = 1
-    return act, cont
+from tests._helpers.scenario import place_duel
 
 
 def test_scripted_hit_tick(simple_map):
@@ -38,12 +21,12 @@ def test_scripted_hit_tick(simple_map):
                    seed=1,
                    auto_reset=False)
     try:
-        act, cont = _place_duel(env, facing0=0.0)
+        act, cont = place_duel(env, facing0=0.0)
         obs, *_ = env.step(act, cont)
         # Geometry guard first: both agents must share LoS (same room, 40u apart).
-        # If this fails the placement straddles a wall — fix _place_duel, not R0-A.
+        # If this fails the placement straddles a wall — fix place_duel, not R0-A.
         # obs layout: enemy block starts at 56, 3 = can_see flag of the nearest enemy slot
-        assert obs[0][56 + 3] == 1.0, "agent 0 cannot see agent 5 — _place_duel geometry"
+        assert obs[0][56 + 3] == 1.0, "agent 0 cannot see agent 5 — place_duel geometry"
         es = env._c_env.episode_stats
         assert es.shots_fired == 1
         assert es.shots_with_enemy_in_los == 1
@@ -65,7 +48,7 @@ def test_scripted_shot_facing_90_off(simple_map):
                    seed=1,
                    auto_reset=False)                                   # see above
     try:
-        act, cont = _place_duel(env, facing0=math.pi / 2)
+        act, cont = place_duel(env, facing0=math.pi / 2)
         env.step(act, cont)
         es = env._c_env.episode_stats
         assert es.shots_fired == 1
@@ -116,7 +99,7 @@ def test_win_t_ct_one_sided_and_equal_to_terminal_rewards(simple_map):
         ),
     )
     try:
-        act, cont = _place_duel(env, facing0=0.0)
+        act, cont = place_duel(env, facing0=0.0)
         env._c_env.game.agents[5].hp = 1               # one hit kills
         _, rew, term, _, info = env.step(act, cont)
         assert term[0]

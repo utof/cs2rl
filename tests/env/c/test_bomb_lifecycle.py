@@ -18,17 +18,9 @@ from cs2rl.env.map import make_simple_map
 from cs2rl.eval.scripted_expert import setup_bomb_carrier
 from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_NAMES, ACTION_HEAD_SIZES
 from cs2rl.spec.obs import OBS_BLOCKS
+from tests._helpers.scenario import area_centroid, kill_agent, place_agent, place_in_area
 
 OBS_GLOBAL_BASE = OBS_BLOCKS['global'][0]
-
-
-def _place(env, index, area_idx):
-    """Place a stationary agent at a real area centre, including its floor height."""
-    a = env._c_env.game.agents[index]
-    a.x, a.y = map(float, env.map_data.centroids[area_idx])
-    a.z = float(env.map_data.centroids_z[area_idx])
-    a.area_idx = area_idx
-    a.vx = a.vy = a.vz = 0
 
 
 @pytest.fixture
@@ -40,7 +32,7 @@ def bomb_env():
         env.reset()
         setup_bomb_carrier(env, 0)
         site = next(i for i, flag in enumerate(map_data.bombsite_by_idx) if flag)
-        _place(env, 0, site)
+        place_in_area(env, 0, site)
         sd = env._c_env.sd.contents
         sd.bomb_plant_time, sd.bomb_timer = 3, 7
         sd.bomb_defuse_kit, sd.bomb_defuse_time = 2, 4
@@ -106,7 +98,7 @@ def test_plant_release_pauses_but_leaving_site_with_use_interrupts(bomb_env):
     _step(env)
     assert _bomb(env) == (BombPhase.PLANTING, 0, 1)
     away = next(i for i, flag in enumerate(env.map_data.bombsite_by_idx) if not flag)
-    _place(env, 0, away)
+    place_in_area(env, 0, away)
     _step(env)
     assert _bomb(env) == (BombPhase.PLANTING, 0, 1)
     assert _use_mask(env, 0) == 0
@@ -122,13 +114,13 @@ def test_planter_loss_resets_progress_without_interruption_penalty(bomb_env, los
     g = env._c_env.game
     _step(env, 0)
     if loss == 'death':
-        g.agents[0].alive = g.agents[0].hp = 0
+        kill_agent(env, 0)
     else:
         env.give_bomb(1)               # the sanctioned setter moves possession without a death
     _step(env)
     assert _bomb(env)[0] != BombPhase.PLANTING and g.bomb.progress == 0
     assert env._c_env.step_stats.reward_bomb == 0
-    _place(env, 1, g.agents[0].area_idx)
+    place_in_area(env, 1, g.agents[0].area_idx)
     _step(env)                         # death drops before pickup; pickup cannot plant on this tick
     assert g.bomb_carrier == 1
     _step(env, 1)
@@ -141,11 +133,11 @@ def test_drop_pickup_radius_tie_and_next_tick_use(bomb_env, distance, holder):
     env = bomb_env
     g = env._c_env.game
     site = g.agents[0].area_idx
+    x, y = area_centroid(env, site)
     for i in (1, 2):
-        _place(env, i, site)
-        g.agents[i].x += distance
+        place_agent(env, i, x + distance, y)
     dead_x, dead_y = g.agents[0].x, g.agents[0].y
-    g.agents[0].alive = g.agents[0].hp = 0
+    kill_agent(env, 0)
     _step(env, 1, 2)
     assert g.bomb_carrier == holder
     assert (g.bomb.phase == BombPhase.DROPPED) == (holder == -1)
@@ -172,10 +164,12 @@ def test_elimination_still_drops_but_does_not_pick_up(bomb_env, losing_team):
     env = bomb_env
     g = env._c_env.game
     _step(env, 0)
-    _place(env, 1, g.agents[0].area_idx)
-    g.agents[0].alive = g.agents[0].hp = 0
+    place_in_area(env, 1, g.agents[0].area_idx)
+    kill_agent(env, 0)
+    # Agent 0 is already dead when the T side loses.
     for i in range(losing_team * 5, losing_team * 5 + 5):
-        g.agents[i].alive = g.agents[i].hp = 0
+        if g.agents[i].alive:
+            kill_agent(env, i)
     _, _, terminal, _, info = _step(env)
     assert terminal.all() and info
     # The live T in the CT-elimination case cannot pick up: carrier stays -1.
@@ -196,7 +190,7 @@ def test_defuse_completion_wins_before_timer_and_routes_stats(bomb_env, kit):
     env = bomb_env
     g, sd = env._c_env.game, env._c_env.sd.contents
     _plant(env)
-    _place(env, 5, g.bomb.area_idx)
+    place_in_area(env, 5, g.bomb.area_idx)
     g.agents[5].has_kit = kit
     ticks = sd.bomb_defuse_kit if kit else sd.bomb_defuse_time
     # A shorter countdown: still a reachable PLANTED state.
@@ -221,13 +215,14 @@ def test_defuse_cancellation_resets_progress(bomb_env, cancel):
     env = bomb_env
     g = env._c_env.game
     _plant(env)
-    _place(env, 5, g.bomb.area_idx)
+    place_in_area(env, 5, g.bomb.area_idx)
     _step(env, 5)
     assert _bomb(env) == (BombPhase.DEFUSING, 5, 1)
     if cancel == 'leave':
-        _place(env, 5, next(i for i, flag in enumerate(env.map_data.bombsite_by_idx) if not flag))
+        place_in_area(env, 5,
+                      next(i for i, flag in enumerate(env.map_data.bombsite_by_idx) if not flag))
     elif cancel == 'death':
-        g.agents[5].alive = g.agents[5].hp = 0
+        kill_agent(env, 5)
     _step(env, *(() if cancel == 'release' else (5, )))
     assert _bomb(env) == (BombPhase.PLANTED, -1, 0)
     assert env._c_env.step_stats.bomb_defused == 0
@@ -238,7 +233,7 @@ def test_detonation_during_defuse_discards_defuse_progress(bomb_env):
     env = bomb_env
     g = env._c_env.game
     _plant(env)
-    _place(env, 5, g.bomb.area_idx)
+    place_in_area(env, 5, g.bomb.area_idx)
     # Without a kit defuse_time is 4: two ticks cannot finish it.
     g.agents[5].has_kit = 0
     g.bomb.ticks_left = 2
@@ -269,7 +264,7 @@ def test_end_reason_precedence(bomb_env, ending):
     g.round_ticks_left = 1
     if ending == 'elimination':
         for i in range(5):
-            g.agents[i].alive = g.agents[i].hp = 0
+            kill_agent(env, i)
     _step(env)
     ss = env._c_env.step_stats
     assert g.round_over
@@ -295,7 +290,7 @@ def test_plant_on_round_deadline_and_same_tick_resolution(bomb_env, resolution):
     sd.bomb_plant_time = sd.bomb_defuse_kit = 1
     sd.bomb_timer = 7 if resolution == 'plant' else 1
     g.round_ticks_left = 1
-    _place(env, 5, g.agents[0].area_idx)
+    place_in_area(env, 5, g.agents[0].area_idx)
     g.agents[5].has_kit = 1
     _step(env, *((0, 5) if resolution == 'defuse' else (0, )))
     ss = env._c_env.step_stats
@@ -314,6 +309,8 @@ def test_plant_on_round_deadline_and_same_tick_resolution(bomb_env, resolution):
 
 
 # ── Rejection of hand-assembled states ──────────────────────────────────────
+# Most of these tests write raw fields ON PURPOSE (#170): the states are deliberately
+# impossible, or (valid_planted) the positive control of the check that rejects the others.
 
 
 @pytest.mark.parametrize('name', [
@@ -387,7 +384,7 @@ def test_give_bomb_hands_over_only_to_a_live_t_before_the_plant(bomb_env, case):
     g = env._c_env.game
     target = {'live_t': 2, 'ct': 5, 'out_of_range': 10, 'dead_t': 3, 'planted': 2}[case]
     if case == 'dead_t':
-        g.agents[3].alive = g.agents[3].hp = 0
+        kill_agent(env, 3)
     if case == 'planted':
         _plant(env)
     if case == 'live_t':

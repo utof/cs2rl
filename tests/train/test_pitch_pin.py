@@ -13,15 +13,11 @@ import pytest
 import torch
 
 from cs2rl.spec.action import ACTION_HEAD_SIZES
+from tests._helpers.scenario import place_agent, place_duel, zero_actions
 
-N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
-H_SHOOT = 1
+N_AGENTS, AIM_DIM = 10, 2
 HEAD_CROUCH = 5                        # cs2_types.h enum
 HEAD_JUMP = 6
-
-
-def _zero():
-    return (np.zeros((N_AGENTS, ACTION_DIM), np.int32), np.zeros((N_AGENTS, AIM_DIM), np.float32))
 
 
 def test_c_ignores_pitch_when_pinned(simple_map):
@@ -30,7 +26,7 @@ def test_c_ignores_pitch_when_pinned(simple_map):
     env = make_env(map_data=simple_map, config=EnvConfig(pin_pitch=1), seed=1)
     try:
         env.reset()
-        act, cont = _zero()
+        act, cont = zero_actions()
         cont[0, 1] = 0.4
         env.step(act, cont)
         assert env._c_env.game.agents[0].pitch == 0.0
@@ -46,7 +42,7 @@ def test_c_applies_pitch_when_unpinned(simple_map):
     env = make_env(map_data=simple_map, seed=1)
     try:
         env.reset()
-        act, cont = _zero()
+        act, cont = zero_actions()
         cont[0, 1] = 0.4
         env.step(act, cont)
         assert env._c_env.game.agents[0].pitch == pytest.approx(0.4, abs=1e-6)
@@ -95,21 +91,6 @@ def test_jump_masked_when_disabled(simple_map):
             env.close()
 
 
-def _place_duel(env):
-    """Agent 0 (T) and agent 5 (CT) 40u apart in agent 0's spawn room, agent 0
-    facing agent 5 dead-on (same pattern as tests/env/c/test_stepstats_export.py)."""
-    env.reset()
-    ag = env._c_env.game.agents
-    a0, a5 = ag[0], ag[5]
-    a5.x, a5.y, a5.z = a0.x + 40.0, a0.y, a0.z
-    a5.area_idx = a0.area_idx
-    a5.facing = math.pi
-    a0.facing = 0.0
-    act, cont = _zero()
-    act[0, H_SHOOT] = 1
-    return act, cont
-
-
 def test_arena_stance_parity_hit_and_stance_blocked():
     """On ARENA_DUEL_V1 (R0-H), the map Rung 1 trains on.
     Preflight ruling: pin 1 / crouch 0, two standing agents, on-target shot
@@ -137,10 +118,10 @@ def test_arena_stance_parity_hit_and_stance_blocked():
                    seed=1,
                    auto_reset=False)
     try:
-        act, cont = _place_duel(env)
+        act, cont = place_duel(env)
         cont[0, 1] = 0.7               # ignored: pitch is pinned
         obs, *_ = env.step(act, cont)
-        assert obs[0][56 + 3] == 1.0, "agent 0 cannot see agent 5 — _place_duel geometry"
+        assert obs[0][56 + 3] == 1.0, "agent 0 cannot see agent 5 — place_duel geometry"
         es = env._c_env.episode_stats
         assert es.shots_fired == 1
         assert es.shots_on_target == 1
@@ -155,7 +136,7 @@ def test_arena_stance_parity_hit_and_stance_blocked():
                    seed=1,
                    auto_reset=False)
     try:
-        act, cont = _place_duel(env)
+        act, cont = place_duel(env)
         act[5, HEAD_CROUCH] = 1                        # process_movement sets is_crouching before combat
         obs, *_ = env.step(act, cont)
         assert obs[0][56 + 3] == 1.0
@@ -179,11 +160,11 @@ def test_arena_stance_parity_hit_and_stance_blocked():
                        seed=1,
                        auto_reset=False)
         try:
-            act, cont = _place_duel(env)
+            act, cont = place_duel(env)
             ag = env._c_env.game.agents[airborne_idx]
             # mid-jump: is_airborne=1 keeps process_movement from snapping z back
             # to the ground (cs2_movement.h), so the offset survives into combat.
-            ag.z, ag.vz, ag.is_airborne = ag.z + z_off, 0.0, 1
+            place_agent(env, airborne_idx, ag.x, ag.y, z=ag.z + z_off, airborne=True)
             obs, *_ = env.step(act, cont)
             assert obs[0][56 + 3] == 1.0
             es = env._c_env.episode_stats

@@ -7,6 +7,7 @@ import pytest
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 from cs2rl.spec.obs import OBS_BLOCKS
+from tests._helpers.scenario import kill_agent, place_agent
 
 ENEMY_BASE = OBS_BLOCKS["enemy"][0]    # 56; agent 0's enemy slot 0 = agent 5
 TM_BASE = OBS_BLOCKS["teammate"][0]    # 28
@@ -17,10 +18,9 @@ def _place_fixed(env, facing, dx=40.0, dy=0.0):
     """Enemy at a FIXED world offset (+40u in x, same room as Task 5's duel); only
     the observer's facing rotates — that is the invariant under test."""
     env.reset()
-    ag = env._c_env.game.agents
-    a0, a5 = ag[0], ag[5]
+    a0 = env._c_env.game.agents[0]
     a0.facing = facing
-    a5.x, a5.y, a5.z, a5.area_idx = a0.x + dx, a0.y + dy, a0.z, a0.area_idx
+    place_agent(env, 5, a0.x + dx, a0.y + dy)
     obs, *_ = env.step(np.zeros((N_AGENTS, ACTION_DIM), np.int32),
                        np.zeros((N_AGENTS, AIM_DIM), np.float32))
     assert obs[0][ENEMY_BASE + 3] == 1.0, "no LoS at +40u — placement geometry, not bearing"
@@ -52,10 +52,9 @@ def test_memory_fallback_is_rotated(simple_map):
     env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=2), seed=1)
     try:
         env.reset()
-        ag = env._c_env.game.agents
-        a0, a5 = ag[0], ag[5]
+        a0 = env._c_env.game.agents[0]
         a0.facing = 1.2
-        a5.alive = 0                                                                               # agent 5 invisible ⇒ memory path
+        kill_agent(env, 5)                                                                         # agent 5 invisible ⇒ memory path
         sd = env._c_env.sd.contents
                                                                                                    # spawn_team puts a0 EXACTLY on its area centroid, so the memory area
                                                                                                    # must be a different one — pick the first centroid > 1u away.

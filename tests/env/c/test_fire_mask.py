@@ -18,6 +18,7 @@ import numpy as np
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 from cs2rl.spec.action import ACTION_HEAD_SIZES
+from tests._helpers.scenario import set_clip
 
 N_AGENTS, ACTION_DIM, AIM_DIM = 10, 7, 2
 H_SHOOT, H_RELOAD, H_WEAPON = 1, 2, 3
@@ -59,8 +60,7 @@ def test_empty_mag_reload_first_shot_at_T_plus_40(simple_map):
     env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
-        a = env._c_env.game.agents[0]
-        a.ammo_clip[0] = 0
+        set_clip(env, 0, 0)
         act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
         act[0, H_RELOAD] = 1
         _step(env, act)                # T: reload starts (reload_ticks=39)
@@ -74,8 +74,7 @@ def test_partial_mag_reload_first_shot_at_T_plus_39(simple_map):
     env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=1), seed=1)
     try:
         env.reset()
-        a = env._c_env.game.agents[0]
-        a.ammo_clip[0] = 5
+        set_clip(env, 0, 5)
         act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
         act[0, H_RELOAD] = 1
         _step(env, act)
@@ -132,7 +131,7 @@ def test_reload_mask_closed_on_refill_tick(simple_map):
         env.reset()
         a = env._c_env.game.agents[0]
         mag, clip0, res0 = a.ammo_clip[0], 5, a.ammo_reserve[0]
-        a.ammo_clip[0] = clip0
+        set_clip(env, 0, clip0)
         act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
         act[0, H_RELOAD] = 1
         _step(env, act)
@@ -144,7 +143,7 @@ def test_reload_mask_closed_on_refill_tick(simple_map):
         assert a.reload_ticks == 0                                     # sim rejected: clip full
         assert a.ammo_clip[0] == mag and a.ammo_reserve[0] == res0 - 1
         assert _reload_mask(env) == 0                                  # still full
-        a.ammo_clip[0] = mag - 1
+        set_clip(env, 0, mag - 1)
         _step(env, np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32))
         assert _reload_mask(env) == 1                                  # partial + idle: open
     finally:
@@ -159,7 +158,7 @@ def test_weapon_head_describes_target_slot_on_flip_tick(simple_map):
     try:
         env.reset()
         a = env._c_env.game.agents[0]
-        a.ammo_clip[1] = 0                                             # pistol empty, rifle full
+        set_clip(env, 0, 0, slot=1)                                    # pistol empty, rifle full
         assert _weapon_mask(env, 1) == 0 and _weapon_mask(env, 2) == 1
         act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
         act[0, H_WEAPON] = 2                                           # switch to pistol
