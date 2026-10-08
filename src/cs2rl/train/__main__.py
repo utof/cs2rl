@@ -353,8 +353,9 @@ if __name__ == "__main__":
     # for simple/arena, ~1 s for dust2 from the nav cache (pin_pitch_for_map(
     # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
     # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)
-    # therefore needs nav/de_dust2.nav on the HOST that runs the dump (Modal
-    # fingerprints run host-side). It does NOT need the vis cache: every dust2
+    # therefore needs the dust2 nav mesh (nav.NAV_PATH) where the dump runs. The
+    # Modal runner runs it in the container, on the mesh the launch uploaded
+    # (scripts/run_modal.py, #270). It does NOT need the vis cache: every dust2
     # load skips the vis matrix, which the sim does not read (make_cs2_map,
     # build_vis=False; #270).
     if args.map is None:
