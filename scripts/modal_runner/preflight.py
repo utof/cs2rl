@@ -70,6 +70,20 @@ class RemoteResume:
 
 
 @dataclass(frozen=True)
+class RemoteNavMesh:
+    """A dust2 run's nav mesh on the Volume mount and its hash (#270).
+
+    The image has no awpy data, so the client uploads the mesh its own dust2 env reads
+    as a content-addressed input. Prepare checks that the blob exists and matches its
+    hash before the first command, then points every child's CS2RL_NAV_PATH at it.
+    Every other map has none; a dust2 request without one fails in BUILDING.
+    """
+
+    path: Path
+    sha256: str
+
+
+@dataclass(frozen=True)
 class PreflightHost:
     """What prepare takes from the container. Production uses the defaults.
 
@@ -115,6 +129,18 @@ def _validate_remote_resume(path: Path, expected_sha256: str | None) -> FileProv
     if expected_sha256 is not None and provenance.sha256 != expected_sha256:
         raise ValidationError(f"resume sha256 {provenance.sha256} != expected {expected_sha256}")
     return provenance
+
+
+def _verify_nav_mesh(mesh: RemoteNavMesh) -> None:
+    """Pin the mounted nav mesh to the client's digest.
+
+    A missing or changed blob is a ValidationError: no command runs on another mesh.
+    """
+    if not mesh.path.is_file():
+        raise ValidationError(f"nav mesh missing on the Volume: {mesh.path}")
+    actual = core.sha256_file(mesh.path)
+    if actual != mesh.sha256:
+        raise ValidationError(f"nav mesh sha256 {actual} != expected {mesh.sha256}")
 
 
 def _hash_dumped_config(run_root: Path) -> str:
@@ -191,13 +217,16 @@ def _build_in_source(
     request: RunRequest,
     source_dir: Path,
     resume: RemoteResume | None,
+    nav_mesh: RemoteNavMesh | None,
     manifest: Manifest | None,
     wandb_api_key: str | None,
     host: PreflightHost,
 ) -> _BuiltSource:
     """Phase 4, BUILDING: install, validate the resume, dump and hash the config, then probe.
 
-    The order is the contract: the install runs before the resume is
+    The order is the contract: dust2's nav mesh is verified (a dust2 request
+    without one fails) and its path added to the child env before the first command,
+    so every command gets the same env; the install runs before the resume is
     validated, the resume is validated before the cheap dump-config run, the
     dumped config is hashed and the manifest rewritten with that hash, and the
     CUDA probe runs last. BUILDING gets no commit of its own: the next Volume
@@ -218,6 +247,16 @@ def _build_in_source(
         wandb_enabled=request.wandb_secret_name is not None,
         wandb_api_key=wandb_api_key,
     )
+    if nav_mesh is not None:
+        _verify_nav_mesh(nav_mesh)
+        # The name cs2rl.env.nav reads at import (`_resolve_nav_path`). Typed here because
+        # this package never imports cs2rl; test_modal_preflight resolves it through nav.
+        child_env["CS2RL_NAV_PATH"] = os.fspath(nav_mesh.path)
+    elif request.effective_map == "dust2":
+        # The image has no awpy data: without the uploaded mesh the dump would fail on a
+        # missing file. Say why, before the install (#270).
+        raise ValidationError("a dust2 run needs the nav mesh its launch uploads; "
+                              "this payload has none")
     cwd = os.fspath(source_dir)
     host.run(build_install_command(source_dir), cwd=cwd, shell=False, env=child_env, check=True)
     resume_str: str | None = None
@@ -281,6 +320,7 @@ def prepare_remote_source(
     request: RunRequest,
     source: ExpectedSource,
     resume: RemoteResume | None = None,
+    nav_mesh: RemoteNavMesh | None = None,
     manifest: Manifest | None = None,
     wandb_api_key: str | None = None,
     host: PreflightHost | None = None,
@@ -339,6 +379,7 @@ def prepare_remote_source(
                                  request=request,
                                  source_dir=source_dir,
                                  resume=resume,
+                                 nav_mesh=nav_mesh,
                                  manifest=manifest,
                                  wandb_api_key=wandb_api_key,
                                  host=host)

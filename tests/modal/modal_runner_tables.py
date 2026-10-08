@@ -96,10 +96,10 @@ MANIFEST = {
         "build_train_command", "build_dump_config_command", "build_cuda_probe_command"
     ],
     "preflight.py": [
-        "ExpectedSource", "RemoteResume", "PreflightHost", "_verify_extracted_provenance",
-        "_validate_remote_resume", "_hash_dumped_config", "_verify_archive_then_enter_preparing",
-        "_extract_verified_source", "_BuiltSource", "_build_in_source", "_fail_preflight",
-        "prepare_remote_source"
+        "ExpectedSource", "RemoteResume", "RemoteNavMesh", "PreflightHost",
+        "_verify_extracted_provenance", "_validate_remote_resume", "_verify_nav_mesh",
+        "_hash_dumped_config", "_verify_archive_then_enter_preparing", "_extract_verified_source",
+        "_BuiltSource", "_build_in_source", "_fail_preflight", "prepare_remote_source"
     ],
     "training.py": [
         "RunResult", "CHECKPOINT_SETTLE_SECONDS", "TERM_GRACE_SECONDS", "DEAD_RUN_EXIT_CODE",

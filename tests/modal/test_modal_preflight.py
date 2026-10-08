@@ -393,6 +393,109 @@ def test_prepare_rejects_resume_hash_mismatch(tmp_path):
         mrl.prepare_remote_source(**kwargs)
 
 
+def _nav_mesh(tmp_path: Path) -> preflight.RemoteNavMesh:
+    """dust2's nav mesh as a launch leaves it on the mount: one content-addressed blob."""
+    blobs = tmp_path / "artifacts" / "inputs" / "sha256"
+    blobs.mkdir(parents=True, exist_ok=True)
+    blob = blobs / "n.json"
+    blob.write_text('{"areas": {}}')
+    return preflight.RemoteNavMesh(path=blob, sha256=core.sha256_file(blob))
+
+
+def test_prepare_verifies_the_nav_mesh_and_gives_every_command_its_path(tmp_path, monkeypatch):
+    """dust2: every command's env names the mounted mesh, under the name nav reads (#270).
+
+    Install, dump-config and CUDA probe all get the same env, the one training gets: the
+    runner's allowlisted child env plus CS2RL_NAV_PATH. The name is typed in preflight.py
+    and in cs2rl.env.nav, so the value is resolved through nav's own resolver here.
+    """
+    from cs2rl.env import nav
+
+    nav_mesh = _nav_mesh(tmp_path)
+    envs: list[dict[str, str]] = []
+
+    def fake_run(cmd, **kwargs):
+        envs.append(dict(kwargs["env"]))               # a copy: the env at call time
+        if "--dump-config" in list(cmd):
+            _write_dumped_config(kwargs_run_root)
+        return subprocess.CompletedProcess(cmd, 0)
+
+    kwargs = _preflight_kwargs(tmp_path)
+    kwargs["host"] = dataclasses.replace(kwargs["host"],
+                                         run=fake_run,
+                                         start_heartbeat=_noop_heartbeat)
+    kwargs["manifest"] = _make_manifest(run_id="ok-id")
+    kwargs["nav_mesh"] = nav_mesh
+    kwargs_run_root = kwargs["attempt"].run_root
+    prepared = mrl.prepare_remote_source(**kwargs)
+    assert len(envs) == 3
+    assert all(env == prepared.child_env for env in envs)
+    for name, value in prepared.child_env.items():
+        if name.startswith("CS2RL_"):
+            monkeypatch.setenv(name, value)
+    assert nav._resolve_nav_path() == str(nav_mesh.path)
+
+
+def test_prepare_rejects_a_nav_mesh_hash_mismatch_before_any_command(tmp_path):
+    """A blob whose bytes differ from the client's digest fails BUILDING before the install.
+
+    No command runs, and STATUS is build_failed.
+    """
+    nav_mesh = _nav_mesh(tmp_path)
+    ran: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        ran.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    kwargs = _preflight_kwargs(tmp_path)
+    kwargs["host"] = dataclasses.replace(kwargs["host"],
+                                         run=fake_run,
+                                         start_heartbeat=_noop_heartbeat)
+    kwargs["manifest"] = _make_manifest(run_id="ok-id")
+    kwargs["nav_mesh"] = dataclasses.replace(nav_mesh, sha256="0" * 64)
+    with pytest.raises(mrl.ValidationError, match="nav mesh sha256"):
+        mrl.prepare_remote_source(**kwargs)
+    assert ran == []
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "build_failed"
+
+
+@pytest.mark.parametrize("fault", ["blob missing", "no nav mesh"])
+def test_prepare_fails_loudly_on_a_dust2_run_without_its_nav_mesh(tmp_path, fault):
+    """A dust2 run whose blob is gone, or whose payload has no nav mesh, fails BUILDING.
+
+    No command runs, so nothing runs on another mesh and the run never reaches the
+    dump-config's missing-file error. The error names the cause, and STATUS is
+    build_failed (#270).
+    """
+    nav_mesh = _nav_mesh(tmp_path)
+    ran: list[list[str]] = []
+
+    def fake_run(cmd, **_kwargs):
+        ran.append(list(cmd))
+        return subprocess.CompletedProcess(cmd, 0)
+
+    kwargs = _preflight_kwargs(tmp_path)
+    kwargs["request"] = mrl.build_run_request(
+        **_valid_run_kwargs(run_id="ok-id", effective_map="dust2"))
+    kwargs["host"] = dataclasses.replace(kwargs["host"],
+                                         run=fake_run,
+                                         start_heartbeat=_noop_heartbeat)
+    kwargs["manifest"] = _make_manifest(run_id="ok-id")
+    if fault == "no nav mesh":
+        match = "a dust2 run needs the nav mesh"
+    else:
+        nav_mesh.path.unlink()
+        kwargs["nav_mesh"] = nav_mesh
+        match = "nav mesh missing on the Volume"
+    with pytest.raises(mrl.ValidationError, match=match):
+        mrl.prepare_remote_source(**kwargs)
+    assert ran == []
+    persisted = json.loads((kwargs["attempt"].run_root / mrl.STATUS_FILENAME).read_text())
+    assert persisted["status"] == "build_failed"
+
+
 def test_prepare_rejects_non_checkpoint_resume(tmp_path):
     ckpt = tmp_path / "warm.pt"
     ckpt.write_text("not a checkpoint\n")

@@ -140,7 +140,11 @@ MANIFEST = ROOT / "tests" / "fixtures" / "modal_test_seam_manifest.json"
 # 293, after #234: `_advance_to_training` (tests/modal/test_modal_state.py) and
 # `_advance_to_building` (tests/modal/test_modal_training.py) merged into one
 # `_advance_to` in tests/modal/modal_test_helpers.py: two names removed, one added.
-GOVERNED_NAME_COUNT = 293
+# 300, after #270: seven names for dust2's uploaded nav mesh. In
+# tests/modal/test_modal_client.py `_StopAtPrepare` and the two `test_dust2_launch_*`
+# tests; in tests/modal/test_modal_preflight.py `_nav_mesh` and the three
+# `test_prepare_*_nav_mesh*` tests.
+GOVERNED_NAME_COUNT = 300
 
 # THE PLACEMENT RULE FOR RUNNER TESTS. The docstring of every runner test file
 # points here, so this is the one statement of it: change it here, not there.
