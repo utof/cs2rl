@@ -45,6 +45,9 @@ dev = [
     # #354: 12 dropped, 2 reworded, none added (#358). Bump on purpose, then
     # refreeze with `--update` and read the row diff.
     "pyrefly==1.3.2",
+    # Pinned EXACTLY: the pre-commit complexity ratchet (`--diff HEAD --staged`, #216)
+    # was measured on 7.0.1 only. Run by .githooks/pre-commit and pre-merge-commit.
+    "complexipy==7.0.1",
     # Enforces the package's layering: the contracts are [tool.importlinter] below,
     # and tests/integration/test_import_layers.py runs them on every suite run. Dev-only (no
     # runtime import), so the Modal image, built from the runtime graph alone, does
@@ -340,6 +343,10 @@ ignore = ["E501"]
 "cs2rl.train.tag_grad_cossim".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train.train".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train.validate_aim_log_std_max".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+
+[tool.complexipy]
+# Cognitive-complexity limit of the hook ratchet (#216); the hooks also pass it explicitly.
+max-complexity-allowed = 40
 
 [tool.ruff.format]
 quote-style = "double"
