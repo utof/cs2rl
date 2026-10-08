@@ -956,7 +956,15 @@ def _map_arrays(md: MapData) -> dict[str, np.ndarray]:
     def _arr(a, dtype):
         return np.ascontiguousarray(a.astype(dtype, copy=False).flatten())
 
-    vis_matrix = _arr(md.vis_matrix, np.int8)
+    # dust2's vis_matrix is None: envs load it with make_cs2_map(build_vis=False) (#270).
+    # No C code reads sd->vis_matrix since combat switched to the per-tick raycast
+    # (cs2_combat.h, build_vis_matrix: "Was: O(1) lookup into the pre-baked area→area
+    # sd->vis_matrix"). binding.init still takes one array per pointer field and stores its
+    # address, so the field gets an empty array: no visibility data at all, not made-up data.
+    if md.vis_matrix is None:
+        vis_matrix = np.zeros(0, dtype=np.int8)
+    else:
+        vis_matrix = _arr(md.vis_matrix, np.int8)
     raster_grid = _arr(md.grid, np.int32)
     adjacency = _arr(md.adjacency, np.int8)
     centroid_xy = _arr(md.centroids, np.float32)
@@ -1769,7 +1777,8 @@ def make_env(
         key = (nav.NAV_PATH, nav.CACHE_PATH)
         md = _ENV_CACHE.get(key)
         if md is None:
-            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)
+            # build_vis=False: C never reads the matrix (_map_arrays), #270.
+            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH, build_vis=False)
             _ENV_CACHE[key] = md
     else:
         md = map_data

@@ -364,9 +364,9 @@ def test_config_env_label(tmp_path):
 # gh#251: run the REAL `train.py --dump-config --map dust2` main() with
 # NavGraph.build_vis_matrix booby-trapped. main() must reach the dump without
 # the vis build (its cold-cache ProcessPoolExecutor was the fork a killed dump
-# orphaned — 12 workers at ~900 MB each). Knock-out: main() passing
-# build_vis=True (or dropping the kwarg) makes the child exit non-zero here,
-# warm cache or cold, because the trap fires before the cache check.
+# orphaned — 12 workers at ~900 MB each). Knock-out: pin_pitch_for_map loading
+# dust2 with build_vis=True makes the child exit non-zero here, warm cache or
+# cold, because the trap fires before the cache check.
 # run_module(alter_sys=True) is `python -m cs2rl.train` in-process: the entry
 # module runs as __main__ against the same `cs2rl.env.nav` the trap patched.
 _DUMP_WITHOUT_VIS = """

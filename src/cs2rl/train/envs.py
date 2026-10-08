@@ -330,7 +330,7 @@ def check_spawn_counts(vecenv, map_name: str) -> tuple[int, int]:
     return n_t, n_ct
 
 
-def resolve_pin_pitch(args, verbose: bool = True, build_vis: bool = True) -> int:
+def resolve_pin_pitch(args, verbose: bool = True) -> int:
     """R0-E.2 (#131): set/validate args.pin_pitch from args.map_data; returns it.
 
     WHAT: ``args.pin_pitch is None`` (CLI default) ⇒ pin_pitch_for_map(
@@ -350,11 +350,10 @@ def resolve_pin_pitch(args, verbose: bool = True, build_vis: bool = True) -> int
     (costs ~1 s for dust2 from the nav cache, ~0.8 s for `from cs2rl.env import map`). train()
     calls it again as a cache-safe cross-check for programmatic callers (second
     call is silent, see `verbose`). verbose=False for the train() cross-check
-    so the value is printed once per launch. main() passes build_vis=False for
-    --dump-config (gh#251): the dump needs geometry only, and a cold dust2 vis
-    cache would otherwise fork cpu_count() build workers before the dump exits.
+    so the value is printed once per launch. The dust2 load skips the vis
+    matrix (pin_pitch_for_map), so neither call forks build workers (gh#251).
     """
-    flat = bool(pin_pitch_for_map(getattr(args, "map_data", None), build_vis=build_vis))
+    flat = bool(pin_pitch_for_map(getattr(args, "map_data", None)))
     if getattr(args, "pin_pitch", None) is None:
         args.pin_pitch = int(flat)
     if bool(args.pin_pitch) != flat:
@@ -520,7 +519,7 @@ def assert_eval_env_agreement(eval_env, driver_env):
                                f"{getattr(driver_env.config, _f.name)!r}")
 
 
-def pin_pitch_for_map(map_data, *, build_vis: bool = True) -> int:
+def pin_pitch_for_map(map_data) -> int:
     """R0-E.2 (#131): 1 iff the map is FLAT (every area centroid shares one z).
 
     WHAT: pure geometry test on the MapData the envs will actually run on.
@@ -542,24 +541,22 @@ def pin_pitch_for_map(map_data, *, build_vis: bool = True) -> int:
     itself and every dust2 resume is refused by the config guard (pin_pitch is
     not allowlisted) — the intended tripwire.
 
-    ``build_vis=False`` (gh#251, `--dump-config` only): resolve None WITHOUT
-    the visibility matrix — make_cs2_map(build_vis=False), NOT stored in
-    _ENV_CACHE. The answer reads centroids_z only, so it is identical; what is
-    skipped is the cold-cache vis build, which forks cpu_count() workers that a
-    killed dump used to orphan (~900 MB each). A warm _ENV_CACHE entry is still
-    reused.
+    None is loaded WITHOUT the visibility matrix, make_cs2_map(build_vis=False),
+    the same MapData make_env loads (#270), so it is stored in _ENV_CACHE for
+    make_env to reuse. The answer reads centroids_z only; what is skipped is the
+    cold-cache vis build, which forks cpu_count() workers that a killed
+    `--dump-config` used to orphan (~900 MB each, gh#251).
     """
     md = map_data
     if md is None:
-        # Same cache key make_env uses, so train() never loads the nav twice.
+        # Same cache key and the same load make_env uses, so train() never loads the nav twice.
         from cs2rl.env import nav
         from cs2rl.env.c.cs2_env import _ENV_CACHE
         from cs2rl.env.map import make_cs2_map
         key = (nav.NAV_PATH, nav.CACHE_PATH)
         md = _ENV_CACHE.get(key)
         if md is None:
-            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH, build_vis=build_vis)
-            if build_vis:              # a vis-less MapData must never reach make_env
-                _ENV_CACHE[key] = md
+            md = make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH, build_vis=False)
+            _ENV_CACHE[key] = md
     z = np.asarray(md.centroids_z, dtype=np.float32)
     return int(float(z.max() - z.min()) == 0.0)

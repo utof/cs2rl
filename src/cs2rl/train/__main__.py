@@ -354,18 +354,18 @@ if __name__ == "__main__":
     # None) loads it via the same _ENV_CACHE make_env uses, so nothing is
     # loaded twice). PITFALL: `--dump-config --map dust2` (or --dust2)
     # therefore needs nav/de_dust2.nav on the HOST that runs the dump (Modal
-    # fingerprints run host-side). It does NOT need the vis cache: the dump
-    # loads the map with build_vis=False (gh#251), because building that
-    # cache forks a 12-worker pool that a killed dump leaves orphaned.
+    # fingerprints run host-side). It does NOT need the vis cache: every dust2
+    # load skips the vis matrix, which the sim does not read (make_cs2_map,
+    # build_vis=False; #270).
     if args.map is None:
         args.map = "dust2" if args.dust2 else "simple"
     args.map_data = build_map_data(args.map)
     print(f"[Map] Using {args.map} map")
     # gh#251: the dump must exit before ANY process is forked. For dust2 the
-    # only fork on this path is the cold-cache vis-matrix build (cpu_count()
+    # only fork this path had was the cold-cache vis-matrix build (cpu_count()
     # workers, ~900 MB each, orphaned to PID 1 when a test killed the dump);
-    # pin_pitch reads centroids_z only, so the dump skips the vis build.
-    resolve_pin_pitch(args, build_vis=not args.dump_config)
+    # pin_pitch_for_map loads dust2 without it.
+    resolve_pin_pitch(args)
 
     if args.dump_config:
         # Zero-side-effect mode: write config.json and exit. Runs BEFORE device

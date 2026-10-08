@@ -364,33 +364,64 @@ def test_pin_pitch_for_map_none_loads_dust2():
     assert (nav.NAV_PATH, nav.CACHE_PATH) in _ENV_CACHE                # cached for make_env
 
 
-def test_pin_pitch_build_vis_false_never_builds_vis_nor_caches(monkeypatch):
-    """gh#251: the --dump-config path resolves dust2's pin_pitch WITHOUT the
-    vis-matrix build (whose cold-cache ProcessPoolExecutor forked cpu_count()
-    workers that a killed dump orphaned, ~900 MB each) and WITHOUT caching the
-    vis-less MapData (a later make_env would get vis_matrix=None).
+@pytest.mark.parametrize("entry",
+                         ["make_env", "pin_pitch_for_map", "resolve_pin_pitch", "record_episode"])
+def test_dust2_loads_never_build_vis(monkeypatch, tmp_path, entry):
+    """#270: every dust2 env load skips the vis-matrix build. The C sim does not read
+    the matrix, and the cold build forked cpu_count() workers that a killed
+    `--dump-config` orphaned (~900 MB each, gh#251).
 
-    Caches are emptied first so the cold path is exercised even when an earlier
-    test warmed them; build_vis_matrix raising proves it is never called."""
+    Each entry point loads dust2 from emptied caches, with build_vis_matrix raising.
+    The MapData it leaves in _ENV_CACHE has no matrix, and an env built from it
+    steps. The vis-less MapData is never put in map.py's _CS2_MAP_CACHE, where a
+    build_vis=True caller would get it. `--record` runs one random-policy episode
+    with the rerun calls stubbed; it must log the env's own nav graph."""
     import argparse
+
+    import numpy as np
 
     from cs2rl.env import map as map_mod
     from cs2rl.env import nav
     from cs2rl.env.c import cs2_env
+    from cs2rl.env.nav import N_AGENTS
+    from cs2rl.spec.action import ACTION_DIM, AIM_DIM
     from cs2rl.train.envs import pin_pitch_for_map, resolve_pin_pitch
 
     def _boom(self):
-        raise AssertionError("build_vis_matrix called on the build_vis=False path")
+        raise AssertionError("build_vis_matrix called on a dust2 env load")
 
     monkeypatch.setattr(nav.NavGraph, "build_vis_matrix", _boom)
     monkeypatch.setattr(map_mod, "_CS2_MAP_CACHE", {})
     monkeypatch.setattr(cs2_env, "_ENV_CACHE", {})
-    assert pin_pitch_for_map(None, build_vis=False) == 1               # same zero-fill answer as the full load
-    a = argparse.Namespace(map_data=None, pin_pitch=None)
-    assert resolve_pin_pitch(a, build_vis=False) == 1 and a.pin_pitch == 1
-    assert map_mod._CS2_MAP_CACHE == {} and cs2_env._ENV_CACHE == {}   # vis-less MapData never cached
+    logged = []                                                        # record_episode's log_navmesh calls
+    if entry == "make_env":
+        cs2_env.make_env().close()
+    elif entry == "pin_pitch_for_map":
+        assert pin_pitch_for_map(None) == 1                            # same zero-fill answer as the full load
+    elif entry == "resolve_pin_pitch":
+        a = argparse.Namespace(map_data=None, pin_pitch=None)
+        assert resolve_pin_pitch(a) == 1 and a.pin_pitch == 1
+    else:
+        from cs2rl.train.record import record_episode
+        from cs2rl.viz import render
+        for name in ("init_recording", "log_trimap", "log_tick"):
+            monkeypatch.setattr(render, name, lambda *_a, **_k: None)
+        monkeypatch.setattr(render, "log_navmesh", logged.append)
+        record_episode(policy_mode="random", save_path=str(tmp_path / "ep.rrd"))
+    md = cs2_env._ENV_CACHE[(nav.NAV_PATH, nav.CACHE_PATH)]
+    assert md.vis_matrix is None and map_mod._CS2_MAP_CACHE == {}
+    if entry == "record_episode":
+        assert logged == [md.nav_graph]
+    env = cs2_env.make_env(seed=3)                                     # reuses md: the trap stays armed
+    try:
+        assert env.map_data is md
+        env.reset()
+        env.step(np.zeros((N_AGENTS, ACTION_DIM), np.int32),
+                 np.zeros((N_AGENTS, AIM_DIM), np.float32))
+    finally:
+        env.close()
     with pytest.raises(AssertionError, match="build_vis_matrix called"):
-        pin_pitch_for_map(None)                                        # positive control: default still builds vis
+        map_mod.make_cs2_map(nav.NAV_PATH, nav.CACHE_PATH)             # positive control: the default builds it
 
 
 def test_resolve_pin_pitch_dust2_and_simple(simple_map, capsys):

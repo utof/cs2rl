@@ -34,7 +34,10 @@ before believing a pass OR a failure.
 """
 
 import ctypes
+import dataclasses
 import hashlib
+
+import numpy as np
 
 from cs2rl.env.c import binding, cs2_env
 from cs2rl.env.c.cs2_env import StaticDataC
@@ -72,6 +75,24 @@ def test_pointer_fields_receive_their_own_arrays(simple_map):
         for name in cs2_env._SD_POINTER_FIELDS:
             stored = ctypes.cast(getattr(sd, name), ctypes.c_void_p).value
             assert stored == arrays[name].ctypes.data, f"sd->{name} does not point at its array"
+    finally:
+        env.close()
+
+
+def test_a_map_without_its_vis_matrix_hands_c_an_empty_array(simple_map):
+    """A MapData whose vis_matrix is None (every dust2 env since #270) still builds an env.
+
+    C does not read sd->vis_matrix (cs2_env._map_arrays), so the field gets an empty
+    array: it holds that array's address, and the array carries no visibility data.
+    """
+    md = dataclasses.replace(simple_map, vis_matrix=None)
+    env = cs2_env.make_env(map_data=md)
+    try:
+        names = list(cs2_env._map_arrays(md))
+        placeholder = env._refs[names.index("vis_matrix")]
+        stored = ctypes.cast(env._c_env.sd.contents.vis_matrix, ctypes.c_void_p).value
+        assert stored == placeholder.ctypes.data
+        assert placeholder.size == 0 and placeholder.dtype == np.int8
     finally:
         env.close()
 

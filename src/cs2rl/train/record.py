@@ -32,8 +32,6 @@ def record_episode(
         map_data=None,
 ):
     from cs2rl.env.c.cs2_env import make_env as make_c_env
-    from cs2rl.env.map import make_cs2_map
-    from cs2rl.env.nav import CACHE_PATH, NAV_PATH
     from cs2rl.viz.render import init_recording, log_navmesh, log_tick, log_trimap
 
     save_path = Path(save_path)
@@ -43,9 +41,9 @@ def record_episode(
     init_recording(save_path=str(save_path))
     env = make_c_env(seed=seed, auto_reset=False, map_data=map_data)
     if map_data is None:
-        md = make_cs2_map(NAV_PATH, CACHE_PATH)
+        # The env's own dust2 MapData; a second make_cs2_map call would build the vis matrix.
         log_trimap()
-        log_navmesh(md.nav_graph)
+        log_navmesh(env.map_data.nav_graph)
     else:
         from cs2rl.viz.render import log_simple_map
 
