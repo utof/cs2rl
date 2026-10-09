@@ -49,7 +49,7 @@ Read off the C state after each step: positions and facing as ``process_combat``
     i.e. how many ticks of the line of sight's motion the crosshair trails by; its standard
     error comes from resampling whole episodes. Aiming at where the target was one tick ago
     reads exactly 1 (ObsOracleActor); a one-tick velocity lead reads near 0 (OracleActor: 0.08
-    and 0.125 against the walkers on 2026-10-09).
+    to 0.16 against the three walkers on 2026-10-09).
     ``lag_by_speed`` gives the same ratio per quintile of |w|: flat means the lag is
     proportional to the angular speed. Tracking starts at the round's first on-target tick:
     the opening turn is acquisition, and its errors are tens of half-windows wide.
@@ -377,16 +377,18 @@ def _fmt(v, spec):
 
 def format_table(out: dict) -> str:
     """One row per reference hero and per policy cell."""
+    rows = out["references"] + out["cells"]
+    wo = max(len(r["opponent"]) for r in rows)
     lines = [
         f"aim_eval: {out['episodes']} episodes per cell, seed {out['seed']}, "
         f"bptt_horizon {out['bptt_horizon']}; e in hit half-windows asin(16/d)",
-        f"{'opponent':<14} {'hero':<10} {'aim':<6} {'lstm':<7} kills  ttk50 ttk90 hit/f "
+        f"{'opponent':<{wo}} {'hero':<10} {'aim':<6} {'lstm':<7} kills  ttk50 ttk90 hit/f "
         f" |e|50 |e|90 off   along across lag(t)  se   ticks  hit/f<=H hit/f>H gap_k  gap_ttk"
     ]
-    for r in out["references"] + out["cells"]:
+    for r in rows:
         gap = r.get("gap_to_oracle", {})
         lines.append(
-            f"{r['opponent']:<14} {r['hero']:<10} {r['aim'] or '-':<6} {r['lstm'] or '-':<7} "
+            f"{r['opponent']:<{wo}} {r['hero']:<10} {r['aim'] or '-':<6} {r['lstm'] or '-':<7} "
             f"{r['kills']:>3}/{r['episodes']:<3} {r['ttk_median']:5.1f} {r['ttk_p90']:5.1f} "
             f"{r['hit_per_fired']:.3f}  {_fmt(r['abs_err_median'], '5.2f')} "
             f"{_fmt(r['abs_err_p90'], '5.2f')} {_fmt(r['off_window_frac'], '.2f')} "
