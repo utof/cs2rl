@@ -6,7 +6,9 @@ Each walker row holds one move direction for a random number of ticks, then draw
 fresh one:
 
   * the direction is a move-head bin drawn uniformly from 1..8 (``MOVE_BINS``). Bin 0
-    (no move) is never drawn, so a live walker row is always pressing a direction;
+    (no move) is never drawn for a walker without a mix, so such a row always presses a
+    direction; a mix family can also stand still (``p_stop``) or press only some ticks
+    (``duty``);
   * the hold is drawn uniformly from ``hold_min..hold_max`` ticks, both ends included
     (default ``HOLD_MIN..HOLD_MAX`` = 4..16);
   * every other discrete head is 0 and the aim is (0, 0): it never shoots, reloads,
