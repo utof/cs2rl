@@ -508,6 +508,11 @@ _C_SIZE_MIRRORS = (
 # appended after a long run of float reward weights, and pbrs_nav_weight_ct pins
 # the end of that run, so a drift inside the run is localised rather than only
 # surfacing at the very end.
+#
+# KNOWN LIMIT: a TAIL field mis-sized into the struct's trailing padding (a
+# c_uint64 mirror of Dust2Env's uint32 accuracy_rng, say) keeps sizeof and the
+# tail offset equal, so both guards pass (measured, lane D quality review). The
+# extra bytes are the struct's padding, so the review judged it harmless.
 _C_OFFSET_FIELDS = (
     (StaticDataC, "pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
     (StaticDataC, "wall_list", "StaticData_wall_list_offset"),
