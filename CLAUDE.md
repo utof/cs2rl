@@ -11,8 +11,8 @@
 
 ## Show behaviour with a replay
 
-- Before describing what a policy or scripted bot does ("a sluggish follower", "never leads"), save a replay: `uv run python -m cs2rl.experiment.replay <checkpoint.pt | oracle | obs-oracle> --vs <opponent>` (README, "Watch replays"). Check it headless through the per-tick `.txt` beside the `.rrd`, or a PNG from `rerun --screenshot-to`, which you can Read.
-- Give the owner the `view: rerun ...` line the save prints, plus the round number to watch.
+- Before describing what a policy or scripted bot does ("a sluggish follower", "never leads"), save a replay: `python -m cs2rl.experiment.replay <checkpoint.pt | oracle | obs-oracle> --vs <opponent>` (README, "Watch replays"). In a worktree run it the way the setup bullet above says (its `src/` on PYTHONPATH, UV_NO_SYNC=1, the venv's python), never with `uv run`. Check it headless through the per-tick `.txt` beside the `.rrd`, or a PNG from the venv's `rerun --window-size 1280x720 --screenshot-to OUT.png FILE.rrd` (it exits 102 after writing the PNG), which you can Read.
+- Give the owner the `view:` line the save prints (it runs from any directory), plus the round number to watch.
 
 ## Measure first, then spec/plan
 

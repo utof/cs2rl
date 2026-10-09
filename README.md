@@ -76,18 +76,20 @@ uv run python -m cs2rl.experiment.replay oracle --vs walker-4-16 --rounds 10   #
 uv run rerun outputs/recordings/<the name it printed>.rrd
 ```
 
-- The save prints one line per round (kill tick, shots, hits) and the exact `rerun` command
-  that opens the file.
+- The save prints one line per round (kill tick, shots, hits), then a `view:` line: the
+  command that opens the file, runnable from any directory.
 - The hero is a checkpoint with its run's `config.json` beside it, `oracle` or `obs-oracle`.
   `--vs` is `statue`, `walker-4-16`, `walker-2-8-stop` or `heldout-24-48`.
-- Optional: `--rounds` (default 5), `--seed`, `--aim sample/mean`, `--lstm carried/zeroed`
-  and `--out`.
+- Optional: `--rounds` (default 5), `--seed`, `--aim` (`sample` or `mean`), `--lstm`
+  (`carried` or `zeroed`) and `--out`.
 - Files go to `outputs/recordings/` (gitignored), with a per-tick text dump (`.txt`) beside each
   replay.
-- `python -m cs2rl.train --record` writes one episode of the run's map with the same recorder.
+- `python -m cs2rl.train --record` writes one episode of the run's map with the same recorder,
+  as an `.rrd` only (no `.txt`).
 
 In the viewer, each round is a recording under Sources: click one, or press Ctrl+Alt+Down/Up
-for the next/previous round.
+for the next/previous round. Some desktops (Cinnamon, for one) keep Ctrl+Alt+Up/Down for
+switching workspaces; there, press Ctrl+P and run "Next recording".
 - Tabs: "free camera" (noclip: WASD/QE to fly, left-drag to look, Shift faster, Alt slower),
   "follow <hero>", and "<agent> eyes" for each side. Alt+double-click any agent to track it;
   Escape lets go.
