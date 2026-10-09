@@ -10,17 +10,24 @@ WHAT IS PINNED
   step in every slot but the round clock. Nothing moves, fires or is heard on
   that step, so compute_observations must write the same vector both times;
   any slot env_reset gets wrong (or leaves zero) differs.
+* On the arena, env.reset() leaves both agents' enemy memory at init_agent's
+  values (no area, stale tick), although each sees the other. That memory is
+  what update_enemy_memory would write; the C comment forbids calling it at
+  reset because env_step reads that memory.
 
 WHY: env_reset used to zero the obs buffer and never call
 compute_observations, so every actor's first action of a round was blind
-(gh #157). The fix must change ONLY that obs; the per-tick parent-vs-HEAD stream
-compare for that lives in the #157 prototype report, not here.
+(gh #157). The fix must change ONLY that obs. The per-tick parent-vs-HEAD stream
+compare that showed it lives in the #157 prototype report. The memory pin holds
+in a test the state write that compare's knock-out caught (update_enemy_memory
+added at reset).
 """
 import math
 
 import numpy as np
 import pytest
 
+from cs2rl.env import nav
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
 from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_STRIDE
@@ -35,16 +42,21 @@ def _wrap_pi(a):
     return (a + math.pi) % (2.0 * math.pi) - math.pi
 
 
+def _arena_env(seed):
+    """The Rung 1a arena duel (n_active=1, permanent 2D LoS), no auto-reset."""
+    from cs2rl.env.map import make_arena_duel_map
+    return make_env(config=EnvConfig(n_active_per_team=1,
+                                     pin_pitch=1,
+                                     crouch_enabled=0,
+                                     round_time=160),
+                    map_data=make_arena_duel_map(),
+                    auto_reset=False,
+                    seed=seed)
+
+
 @pytest.mark.parametrize("seed", [0, 1, 2, 3])
 def test_arena_reset_obs_decodes_to_the_c_state_geometry(seed):
-    from cs2rl.env.map import make_arena_duel_map
-    env = make_env(config=EnvConfig(n_active_per_team=1,
-                                    pin_pitch=1,
-                                    crouch_enabled=0,
-                                    round_time=160),
-                   map_data=make_arena_duel_map(),
-                   auto_reset=False,
-                   seed=seed)
+    env = _arena_env(seed)
     try:
         obs, _ = env.reset()
         sd = env._c_env.sd.contents
@@ -91,5 +103,24 @@ def test_reset_obs_equals_the_obs_after_a_zero_action_step(simple_map):
         differs = np.argwhere(reset_obs != step_obs)
         assert set(differs[:, 1].tolist()) == {clock}, differs
         assert (reset_obs[:, clock] == 1.0).all()
+    finally:
+        env.close()
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_reset_leaves_enemy_memory_at_its_init_values(seed):
+    """Both agents see each other at reset, so an update_enemy_memory call in
+    env_reset would record the enemy's area and the reset tick here. The
+    visibility check keeps the pin from going vacuous: an enemy nobody sees
+    would leave the memory untouched either way.
+    """
+    env = _arena_env(seed)
+    try:
+        obs, _ = env.reset()
+        ag = env._c_env.game.agents
+        for i in (HERO, ENEMY):
+            assert list(ag[i].enemy_mem_idx) == [-1] * nav.TEAM_SIZE, (i, list(ag[i].enemy_mem_idx))
+            assert list(ag[i].enemy_mem_tick) == [int(nav.STALE_MEMORY_TICK)] * nav.TEAM_SIZE, i
+        assert obs[HERO][ENEMY_BASE + 3] == 1.0, "the hero must see the enemy at reset"
     finally:
         env.close()
