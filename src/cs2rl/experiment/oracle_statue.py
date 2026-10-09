@@ -5,7 +5,9 @@ WHAT
 ----
 Drives the EXACT Rung 1a environment (ARENA_DUEL_V1, ``n_active_per_team=1``,
 ``round_time=160``, ``pin_pitch=1``, ``crouch_enabled=0``, ``jump_enabled=0``) with two scripted
-actors and no learning anywhere in the loop:
+actors and no learning anywhere in the loop. One exception: the movement-inaccuracy cone,
+which the Rung 1a smoke ran without, follows EnvConfig.accuracy (on by default since the
+owner's decision of 2026-10-09), so ``--accuracy 0`` is the exact Rung 1a env:
 
   * hero   — agent 0 (T): ``eval.baselines.OracleActor``. Per tick it reads the
              enemy's position from the live C state, turns the continuous Δyaw
@@ -260,7 +262,7 @@ def build_env(seed: int, round_time: int = ROUND_TIME, accuracy: bool | None = N
     different env is asking a different question and should say so in code.
     ``accuracy`` is that question asked in code: True turns on the movement-inaccuracy
     cone (EnvConfig.accuracy), which the Rung 1a smoke ran without. None leaves the field at
-    its EnvConfig default.
+    its EnvConfig default, which is on since 2026-10-09, so the smoke's exact env is False.
     """
     from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig

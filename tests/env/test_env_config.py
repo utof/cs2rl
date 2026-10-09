@@ -44,7 +44,7 @@ KNOB_DEFAULTS = {
     "pbrs_gamma": 0.999,
     "reward_symmetrize": False,
     "recoil": False,
-    "accuracy": False,
+    "accuracy": True,                                                                # owner decision 2026-10-09: on by default, closer to CS
     "n_active_per_team": 5,
     "pin_pitch": 0,
     "crouch_enabled": 1,

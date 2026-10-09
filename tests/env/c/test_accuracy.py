@@ -2,8 +2,9 @@
 law (cs2_weapons.h accuracy_cone_radius) and the ray tilt (cs2_combat.h accuracy_cone_ray).
 
 WHAT IS PINNED, and the knock-out each one catches:
-  * default off reaches C, and an off shot draws nothing from either RNG stream (the
-    default-off identity: every pre-cone pin and fingerprint depends on it);
+  * the default (on since the owner's decision of 2026-10-09) reaches C, and an explicitly
+    off shot draws nothing from either RNG stream (the explicit-off identity: every pre-cone
+    pin and reproduction that passes accuracy=False depends on it);
   * an on shot draws exactly two values from env->accuracy_rng and none from env->rng (the
     shared stream also rolls hit locations and spawns);
   * the units: the rifle row is the averaged AK-47/M4A4 research row, and C's per-shot radius
@@ -138,11 +139,11 @@ def env_off():
     env.close()
 
 
-def test_the_switch_is_off_by_default_and_reaches_c():
-    assert EnvConfig().accuracy is False
-    # pyrefly: ignore[bad-argument-type]  an int flag is the point: it must normalise to bool
-    assert EnvConfig(accuracy=1).accuracy is True
-    for cfg, want in ((EnvConfig(), 0), (EnvConfig(accuracy=True), 1)):
+def test_the_switch_is_on_by_default_and_reaches_c():
+    assert EnvConfig().accuracy is True                # owner decision 2026-10-09: closer to CS
+                                                       # pyrefly: ignore[bad-argument-type]  an int flag is the point: it must normalise to bool
+    assert EnvConfig(accuracy=0).accuracy is False
+    for cfg, want in ((EnvConfig(), 1), (EnvConfig(accuracy=False), 0)):
         env = make_env(config=cfg, map_data=make_arena_duel_map(), auto_reset=False, seed=0)
         try:
             assert env._c_env.accuracy_enabled == want
@@ -219,9 +220,10 @@ def test_the_resolver_config_json_and_modal_carry_the_switch():
     from cs2rl.train.config import env_config_from_args
     from scripts.modal_runner import request
 
-    assert env_config_from_args(SimpleNamespace(accuracy=True)).accuracy is True
+    flipped = not EnvConfig().accuracy                 # the non-default value, so a dropped key shows
+    assert env_config_from_args(SimpleNamespace(accuracy=flipped)).accuracy is flipped
     assert env_config_from_args(SimpleNamespace()).accuracy is EnvConfig().accuracy
-    assert EnvConfig(accuracy=True).to_config_dict()["accuracy"] is True
+    assert EnvConfig(accuracy=flipped).to_config_dict()["accuracy"] is flipped
     assert request.LIVE_TRAIN_OPTION_ARITY["--accuracy"] == 1
     assert request.validate_train_args(["--timesteps", "1000", "--accuracy", "0"]) == 1000
 

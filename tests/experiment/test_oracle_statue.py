@@ -2,8 +2,9 @@
 
 WHAT IS PINNED HERE
 -------------------
-* The scripted oracle kills a stationary CT on the exact Rung 1a env
-  (arena-duel, n_active=1, round_time=160, pin_pitch=1, crouch=0, jump=0) in a small
+* The scripted oracle kills a stationary CT on the Rung 1a preset
+  (arena-duel, n_active=1, round_time=160, pin_pitch=1, crouch=0, jump=0; the
+  movement-inaccuracy cone at EnvConfig's default, which the smoke ran without) in a small
   fraction of the round. If this ever goes red, no Rung 1a §3 learning verdict
   measured on that env means anything — read the sim, not the policy.
 * The ``--statue-z`` hold is LIVE. This needs saying because at an offset of
@@ -43,7 +44,7 @@ GRAVITY_SAG = 0.5 * 800.0 * (1.0 / 16.0)**2
 
 
 def test_build_env_runs_the_smoke_knobs():
-    """The harness env is the Rung 1a smoke's env, read back from the live C StaticData.
+    """The harness env has the Rung 1a smoke's knobs, read back from the live C StaticData.
 
     jump_enabled is the knob this preset once inherited from EnvConfig's default
     (1) while the smoke ran 0. The scripted actors never jump, so no kill or TTK

@@ -22,7 +22,7 @@
         "call_source": "build_env_for('eval', map_data=_map_data, reward_overrides=reward_overrides_from_args(args), env_knobs=env_knobs_from_args(args))",
         "enclosing": "train",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -60,7 +60,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -165,7 +165,7 @@
         "call_source": "build_env_for('eval', map_data=_map_data, reward_overrides=reward_overrides_from_args(args), env_knobs=env_knobs_from_args(args))",
         "enclosing": "train",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,
@@ -203,7 +203,7 @@
           "round_time": 900
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,
@@ -309,7 +309,7 @@
         "call_source": "build_env_for('eval', map_data=_map_data, reward_overrides=reward_overrides_from_args(args), env_knobs=env_knobs_from_args(args))",
         "enclosing": "train",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,
@@ -347,7 +347,7 @@
           "round_time": 900
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,
@@ -443,7 +443,7 @@
         "call_source": "build_env_for('eval_legacy')",
         "enclosing": "load_policy_from_checkpoint",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -481,7 +481,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -553,7 +553,7 @@
         "call_source": "build_env_for('eval_legacy', seed=seed)",
         "enclosing": "evaluate_checkpoint",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -591,7 +591,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -666,7 +666,7 @@
         "call_source": "build_env_for('external', team_spirit=team_spirit, map_data=map_data)",
         "enclosing": "make_env",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -704,7 +704,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -777,7 +777,7 @@
         "call_source": "build_env_for('external', team_spirit=team_spirit, map_data=map_data)",
         "enclosing": "make_env",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -815,7 +815,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -896,7 +896,7 @@
         "call_source": "build_env_for('harness', shared_ts=shared_ts, buf=buf, seed=seed, map_data=map_data, n_active_per_team=n_active_per_team, pin_pitch=pin_pitch, crouch_enabled=crouch_enabled, jump_enabled=jump_enabled)",
         "enclosing": "_build_trainer_for_test.env_factory",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -934,7 +934,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1013,7 +1013,7 @@
         "call_source": "build_env_for('harness', shared_ts=shared_ts, buf=buf, seed=seed, map_data=map_data, n_active_per_team=n_active_per_team, pin_pitch=pin_pitch, crouch_enabled=crouch_enabled, jump_enabled=jump_enabled)",
         "enclosing": "_build_trainer_for_test.env_factory",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 0,
           "laser_range": null,
@@ -1051,7 +1051,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 0,
           "laser_range": null,
@@ -1123,7 +1123,7 @@
         "call_source": "build_env_for('smoke')",
         "enclosing": "smoke_test",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1161,7 +1161,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1247,7 +1247,7 @@
         "call_source": "build_env_for('train', shared_ts=shared_ts, buf=buf, seed=seed, _seed=_seed, map_data=map_data, reward_overrides=reward_overrides, reward_symmetrize=reward_symmetrize, env_knobs=env_knobs)",
         "enclosing": "build_env_factory.env_factory",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1285,7 +1285,7 @@
           "round_time": 900
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1383,7 +1383,7 @@
         "call_source": "build_env_for('train', shared_ts=shared_ts, buf=buf, seed=seed, _seed=_seed, map_data=map_data, reward_overrides=reward_overrides, reward_symmetrize=reward_symmetrize, env_knobs=env_knobs)",
         "enclosing": "build_env_factory.env_factory",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1421,7 +1421,7 @@
           "round_time": null
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 1,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1529,7 +1529,7 @@
         "call_source": "build_env_for('train', shared_ts=shared_ts, buf=buf, seed=seed, _seed=_seed, map_data=map_data, reward_overrides=reward_overrides, reward_symmetrize=reward_symmetrize, env_knobs=env_knobs)",
         "enclosing": "build_env_factory.env_factory",
         "expected_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,
@@ -1567,7 +1567,7 @@
           "round_time": 900
         },
         "input_config": {
-          "accuracy": false,
+          "accuracy": true,
           "crouch_enabled": 0,
           "jump_enabled": 1,
           "laser_range": null,

@@ -160,7 +160,7 @@ class EnvConfig:
     pbrs_gamma: float = 0.999                          # MUST equal the training gamma (PBRS policy-invariance)
     reward_symmetrize: bool = False
     recoil: bool = False
-    accuracy: bool = False                             # the movement-inaccuracy cone (Dust2Env.accuracy_enabled)
+    accuracy: bool = True                              # the movement-inaccuracy cone (Dust2Env.accuracy_enabled)
     n_active_per_team: int = TEAM_SIZE
     pin_pitch: int = 0
     crouch_enabled: int = 1
