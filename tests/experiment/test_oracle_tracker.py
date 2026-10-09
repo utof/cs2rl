@@ -4,7 +4,9 @@ WHAT IS PINNED HERE
 -------------------
 * The floor, at the observed rate: the ground-truth oracle kills the walker in all
   200 episodes of seed 0 (2026-10-09). A miss fails with its episode and spawn, so it
-  can be replayed (same seed, ``--episodes k+1``) and then explained or filed.
+  can be replayed (same seed, ``--episodes k+1``) and then explained or filed. The
+  TTK is pinned at its observed median 10 / p90 13 too, so a sim change that slows
+  the seed-0 kill past either value fails here.
 * The motion checks have teeth. A statue (``IdleActor``) and a walker whose move bins
   are forced to 0 both FAIL the L1 verdict while passing every L0 check, because kills
   cannot tell a moving target from a still one. A walker that redraws its direction
@@ -35,6 +37,8 @@ def test_the_oracle_kills_the_walker_in_every_episode():
     passed, checks = verdict(res)
     assert passed, checks
     assert res["ttk_median"] < 120 and res["unmatched_vis_slots"] == 0
+    # Observed 2026-10-09 at seed 0: median 10, p90 13 ticks. Re-pin on a deliberate sim change.
+    assert res["ttk_median"] <= 10 and res["ttk_p90"] <= 13, (res["ttk_median"], res["ttk_p90"])
 
 
 @pytest.mark.parametrize("opponent", ["statue", "move bins forced to 0"])
