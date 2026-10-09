@@ -59,7 +59,7 @@ from tests.conftest import REPO_ROOT
 
 DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env" / "config.py"
 
-# name -> default, for the 23 weights and the seven non-None knobs. The three
+# name -> default, for the 23 weights and the eight non-None knobs. The three
 # None-valued R0-G knobs are excluded: `x = None` is not a restatement of
 # anything, it is the sentinel.
 _CFG = EnvConfig()

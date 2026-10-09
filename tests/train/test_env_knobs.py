@@ -254,7 +254,7 @@ def test_args_knob_coverage_is_exhaustive():
     """Every EnvConfig knob has a decided route from args — or this fails.
 
     _ARGS_KNOB_FIELDS and _ENV_KNOB_ARG_PAIRS are hand-written (they are the CLI-name ↔
-    field-name map), so an eleventh knob added to EnvConfig would otherwise be
+    field-name map), so a new knob added to EnvConfig would otherwise be
     silently unreachable from the CLI and every run would keep its default with
     the whole suite green. `recoil` is listed as deliberately unreachable: there
     is no flag and reading one would be new behaviour.
