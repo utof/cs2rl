@@ -28,9 +28,9 @@ obs is the generalization answer, not spawn diversity). `spawn_area` metadata
 
 Recording pitfalls handled here (see ScriptedBomber docstring for the yield
 contract):
-  * env.reset() does NOT populate observations (it only zeroes the buffer;
-    compute_observations runs inside env.step) — a priming zero-action step
-    runs after the carrier pokes so the first recorded obs is real, not zeros.
+  * env.reset() returns the spawn-state obs (#157), but it is computed BEFORE
+    the carrier pokes, so it cannot reflect them — a priming zero-action step
+    runs after the pokes so the first recorded obs carries them.
   * The generator's yielded (disc, cont) buffers AND env.observations are
     REUSED every tick — everything recorded is .copy()'d.
   * auto_reset=False — a silent mid-capture round reset would splice rounds.
@@ -103,10 +103,10 @@ def generate_episode(seed: int, carrier_idx: int, git_sha: str) -> dict | None:
         env.reset(seed=seed)
         setup_bomb_carrier(env, carrier_idx)
 
-        # Priming step: populate env.observations (reset only zeroes the
-        # buffer) AND let the carrier pokes (bomb, knife, role bit) land in
-        # the obs before the first recorded tick. Costs 1 tick of the round
-        # budget; the bomber budget below is reduced accordingly.
+        # Priming step: let the carrier pokes (bomb, knife, role bit) land in
+        # the obs before the first recorded tick. The reset obs is real (#157)
+        # but predates the pokes. Costs 1 tick of the round budget; the bomber
+        # budget below is reduced accordingly.
         env.step(np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32),
                  np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32))
 

@@ -58,8 +58,8 @@ The kill-rate and TTK bars are the same ones: this is not a second gate with a
 second threshold. It does add three checks that exist only in this mode, and
 they are part of the EXIT CODE rather than advisory prints (see ``verdict``):
 the enemy slot's two encodings of the relative position must agree, the rz
-decoded from slot +2 must match the rz measured off the C state, and the blind
-ticks must not exceed one per episode. They carry the mode, because the failures
+decoded from slot +2 must match the rz measured off the C state, and there must
+be no blind tick at all. They carry the mode, because the failures
 they see are invisible to the kill rate — mutation-tested, both at 1.000 kills:
 ``EN_DIST`` pointed one slot over, and ``OBS_Z_SCALE`` halved.
 
@@ -106,23 +106,39 @@ One tick of leapfrog gravity runs between the hold and ``process_combat``, so
 the |rz| the ray actually sees is ``OFF − 1.5625`` (g = 800, dt = 1/16). The
 summary prints the MEASURED offset rather than assuming it.
 
+The hold runs before each step, so the obs ``env.reset()`` returns still shows
+the statue on the ground (rz 0). That obs is a correct encoding of the reset
+state, and ``--obs-only`` reads it on tick 1. The obs rz check therefore
+compares against the C rz of the states the hero observed, the reset state
+included (``observed_rz_*``), not against the realised rz at combat.
+
 PITFALLS
 --------
 * ``auto_reset=False`` is mandatory: with auto-reset the C ``episode_stats`` are
   cleared on the terminal tick and every counter below reads 0.
-* ``vis_prev`` must be threaded tick to tick. ``OracleActor`` only fires at an
-  enemy that was visible in the PREVIOUS tick's observation; feeding it ``None``
-  every tick silently degrades it into a walking, non-firing actor that times
-  out — which looks exactly like a broken sim. ``unmatched_vis_slots`` in the
-  summary is the tripwire for that thread going wrong (it must be 0).
+* ``vis_prev`` must be threaded tick to tick, starting from the obs
+  ``env.reset()`` returns. ``OracleActor`` only fires at an enemy that was
+  visible in the PREVIOUS tick's observation; feeding it ``None`` every tick
+  silently degrades it into a walking, non-firing actor that times out — which
+  looks exactly like a broken sim. ``unmatched_vis_slots`` in the summary is the
+  tripwire for that thread going wrong (it must be 0). Starting it at ``None``
+  instead of the reset obs makes the ground-truth hero blind on tick 1 while
+  ``--obs-only`` is not, and the two modes stop matching.
+* Because it sees the statue on tick 1, the hero also fires on tick 1. On a
+  spawn row whose opening yaw error is wider than max_turn_speed (56.3 deg
+  against 45 in the arena) that shot leaves before the turn lands and misses:
+  the actors' fire rule does not wait for the aim. One wasted shot plus its
+  cooldown per wide-spawn round is why, at #157, 200 rounds went from 671 to
+  695 shots and p90 TTK from 11 to 13 while median TTK fell from 11 to 10.
 * Importing ``eval.baselines`` pulls in torch (``PolicyActor`` needs it). Nothing
   here uses it, but the import cost is real; that is the price of reusing the
   evaluator's actors instead of writing a second oracle that can drift from it.
-* ``env.reset()`` returns an ALL-ZERO obs (compute_observations has not run
-  yet), so ``--obs-only`` is necessarily blind on tick 1 of every round and
-  stands still for it. That is one tick of TTK, reported as ``obs blind ticks``
-  (expected value: exactly one per episode — more means the hero lost sight of
-  the statue mid-round, which is a different failure than a bad encoding).
+* ``env.reset()`` returns the spawn-state obs (#157; env_reset runs
+  compute_observations). Before #157 that obs was all zero, so ``--obs-only``
+  was blind on tick 1 of every round, and the blind tick cost it exactly one
+  tick of TTK per episode on the statue. ``obs blind ticks`` must now be 0:
+  both agents are in permanent 2D LoS in the arena, so a blind tick means the
+  hero lost the statue mid-round or the reset obs went back to zero.
 * This script never writes to ``outputs/`` and never touches training state.
 """
 from __future__ import annotations
@@ -458,12 +474,21 @@ def _hold_statue_above_ground(env, ground_z: float, offset: float) -> None:
 
 
 def _episode(env, ev, oracle, statue, statue_z, round_time):
-    """One round. Returns a dict: ttk, realised rz samples, unmatched slots, spawn geometry.
+    """One round. Returns a dict: ttk, rz samples, unmatched slots, spawn geometry.
 
     ``ttk`` is the tick index on which the statue's ``alive`` flag flipped to 0,
     counting from 1 (``g->tick`` after the k-th step is exactly k), or None if it
     survived the round. Per-episode shot counters are left in the env's
     ``episode_stats`` for the caller to read before the next reset clears them.
+
+    Two rz sample lists, from different states on purpose:
+      * ``rz_samples``: the C state AFTER each step, i.e. what the combat ray
+        saw (the "realised rz at combat" of the summary);
+      * ``observed_rz_samples``: the C state each tick's obs was computed from,
+        i.e. the reset state plus every post-step state but the last. This is
+        what the obs-decoded rz is checked against. Under ``--statue-z`` the
+        reset state is the only one whose rz differs from the held value: the
+        statue is still on the ground there.
 
     The spawn geometry (``spawn_dist``, ``yaw_err`` and both xy pairs, all read
     at reset before the first step) is what the FAIL report prints. WHY it is
@@ -484,10 +509,14 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
         "spawn_dist": math.hypot(spawn_dx, spawn_dy),
         "yaw_err": float(wrap_pi(math.atan2(spawn_dy, spawn_dx) - st["facing"][HERO])),
     }
-    vis_prev = None
+    # The reset obs is real (#157), so tick 1's visibility comes from it, as
+    # every later tick's comes from the previous step's obs. On an all-zero obs
+    # this is all False, the same as passing None.
+    vis_prev, unmatched_total = vis_from_obs(obs, st, ev.map_diag)
+    unmatched_total = int(unmatched_total)
     ttk = None
     rz_samples = []
-    unmatched_total = 0
+    observed_rz_samples = []
     hero_rows = slice(0, TEAM_SIZE)
 
     # round_time + 1 for the same reason BaselineEvaluator uses it: the timeout
@@ -495,6 +524,10 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
     # terminal means the env's round timer is broken, which must not read as a
     # quiet "no kill".
     for tick in range(1, int(round_time) + 2):
+        if st["alive"][HERO] and st["alive"][STATUE]:
+            # `st` is the snapshot taken with this tick's obs (reset, or the
+            # previous step), so this is the rz an obs-decoded rz must match.
+            observed_rz_samples.append(float(st["z"][STATUE] - st["z"][HERO]))
         if statue_z:
             _hold_statue_above_ground(env, ground_z, statue_z)
 
@@ -518,7 +551,13 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
     else:
         raise RuntimeError(f"episode did not terminate within round_time+1={round_time + 1} "
                            "ticks — the env's timeout terminal is broken")
-    return {"ttk": ttk, "rz_samples": rz_samples, "unmatched": unmatched_total, **geometry}
+    return {
+        "ttk": ttk,
+        "rz_samples": rz_samples,
+        "observed_rz_samples": observed_rz_samples,
+        "unmatched": unmatched_total,
+        **geometry
+    }
 
 
 def run_check(episodes: int = 200,
@@ -559,6 +598,7 @@ def run_check(episodes: int = 200,
         statue = IdleActor()
 
         ttks, rz_min, rz_max, unmatched = [], None, None, 0
+        observed_rz = []
         totals = dict.fromkeys(("shots_fired", "shots_with_enemy_in_los", "shots_facing_enemy",
                                 "shots_on_target", "shots_hit", "shots_stance_blocked"), 0)
         kills = 0
@@ -566,6 +606,7 @@ def run_check(episodes: int = 200,
         for ep in range(episodes):
             r = _episode(env, ev, oracle, statue, statue_z, round_time)
             unmatched += r["unmatched"]
+            observed_rz += r["observed_rz_samples"]
             if r["rz_samples"]:
                 ep_lo, ep_hi = min(r["rz_samples"]), max(r["rz_samples"])
                 rz_min = ep_lo if rz_min is None else min(rz_min, ep_lo)
@@ -604,6 +645,8 @@ def run_check(episodes: int = 200,
         "ttk_censored": episodes - kills,
         "rz_min": rz_min,
         "rz_max": rz_max,
+        "observed_rz_min": min(observed_rz) if observed_rz else None,
+        "observed_rz_max": max(observed_rz) if observed_rz else None,
         "unmatched_vis_slots": unmatched,
         "obs_only": obs_only,
         "obs_blind_ticks": obs_actor.blind_ticks if obs_actor is not None else None,
@@ -628,24 +671,25 @@ def _rz_range(lo, hi) -> str:
 def _rz_disagrees(res: dict) -> bool:
     """Does the rz DECODED from enemy slot +2 differ from the one measured in C?
 
-    They are the same physical quantity (eye-to-torso vertical offset) and the
-    obs sample is at most one tick older, which on a flat arena holding a
-    motionless statue is no difference at all. A gap past ``OBS_RZ_TOL`` means
-    the slot is encoded or normalised wrongly — which nothing else in this run
-    would notice, because ``pin_pitch=1`` makes the pitch it feeds inert and the
-    range test never binds (see ``ObsOracleActor``). Vacuously False when either
-    side has no samples.
+    Compared against ``observed_rz_*``: the C rz of the same states the obs rows
+    were computed from (``_episode``), so both sides describe the same moments.
+    The realised rz at combat (``rz_*``) is NOT the comparison: under
+    ``--statue-z`` the reset obs shows the statue on the ground (the hold runs
+    before each step), so the obs range legitimately includes an rz of 0 that
+    no combat tick ever sees. A gap past ``OBS_RZ_TOL`` means the slot is
+    encoded or normalised wrongly — which nothing else in this run would
+    notice, because ``pin_pitch=1`` makes the pitch it feeds inert and the range
+    test never binds (see ``ObsOracleActor``). Vacuously False when either side
+    has no samples.
 
-    PITFALL: the two ranges are drawn from DIFFERENT tick populations — the obs
-    range accumulates only on ticks where the actor engages, the C range on every
-    tick where both agents are alive. Comparing them is exact here only because
-    the statue's height is constant over a round; against a target whose height
-    varies (a jumping or crouching opponent) the two would differ legitimately
-    and this would warn on a correct encoding. Re-scope it to a common tick set
-    before reusing it on such a target.
+    PITFALL: the populations still differ in one way — the obs range
+    accumulates only on ticks where the actor engages, the C range on every tick
+    where both agents are alive. In the arena (permanent 2D LoS) those are the
+    same ticks. Against an opponent that can be unseen while alive, re-scope it
+    to the engaged ticks first.
     """
     obs_lo, obs_hi = res.get("obs_rz_min"), res.get("obs_rz_max")
-    c_lo, c_hi = res.get("rz_min"), res.get("rz_max")
+    c_lo, c_hi = res.get("observed_rz_min"), res.get("observed_rz_max")
     if obs_lo is None or obs_hi is None or c_lo is None or c_hi is None:
         return False
     return abs(obs_lo - c_lo) > OBS_RZ_TOL or abs(obs_hi - c_hi) > OBS_RZ_TOL
@@ -687,17 +731,16 @@ def verdict(res: dict) -> tuple[bool, list[tuple[str, bool, str]]]:
         # obs_only flag was set by hand, and None does not compare with int.
         inconsistent = res.get("obs_inconsistent_slots") or 0
         blind = res.get("obs_blind_ticks") or 0
-        episodes = res.get("episodes") or 0
-        # The blind-tick bound is `<= episodes`, not `== episodes`: exactly one
-        # blind tick per episode is structural (env.reset returns an all-zero
-        # obs). MORE than that means the hero lost the statue mid-round, which
-        # makes the kill numbers a statement about LoS rather than about the
-        # encoding — the same condition the report has always warned on.
+        # No blind tick at all: env.reset returns the spawn-state obs (#157)
+        # and the arena has permanent 2D LoS. A blind tick means the hero lost
+        # the statue mid-round (the kill numbers are then a statement about
+        # LoS, not the encoding) or the reset obs went back to zero. Before
+        # #157 this bound was `<= episodes`, one structural blind tick each.
         checks += [
             ("obs_inconsistent_slots == 0", inconsistent == 0, str(inconsistent)),
             (f"|obs_rz - C rz| <= {OBS_RZ_TOL}", not _rz_disagrees(res),
              _rz_range(res.get("obs_rz_min"), res.get("obs_rz_max"))),
-            (f"obs_blind_ticks <= {episodes}", blind <= episodes, str(blind)),
+            ("obs_blind_ticks == 0", blind == 0, str(blind)),
         ]
     return all(ok for _, ok, _ in checks), checks
 
@@ -779,13 +822,14 @@ def format_summary(res: dict) -> str:
         lines += [
             "aim source               OBSERVATION VECTOR (enemy block +2/+3/+5/+6/+7), "
             "ground truth NOT read",
-            f"obs blind ticks          {blind}  (expected {res['episodes']}: the all-zero obs "
-            f"env.reset returns, one per episode)"
-            f"{'   <-- hero lost the statue mid-round' if blind > res['episodes'] else ''}",
+            f"obs blind ticks          {blind}  (expected 0: env.reset returns the spawn-state "
+            f"obs, #157)"
+            f"{'   <-- hero lost the statue, or the reset obs is zero again' if blind else ''}",
             f"obs slot inconsistency   {inconsistent}"
             f"{'   <-- WARNING: rel-pos and bearing/distance encodings disagree' if inconsistent else ''}",
             f"obs-decoded rz           {_rz_range(res['obs_rz_min'], res['obs_rz_max'])} u  "
-            f"(enemy slot +2; must match the realised rz above)"
+            f"(enemy slot +2; must match the C rz of the observed states, "
+            f"{_rz_range(res['observed_rz_min'], res['observed_rz_max'])} u)"
             f"{'   <-- WARNING: the obs z-delta is not what the C state says' if _rz_disagrees(res) else ''}",
         ]
     if not passed:

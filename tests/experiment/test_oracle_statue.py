@@ -18,9 +18,8 @@ WHAT IS PINNED HERE
   the C state. The ground-truth oracle would pass this gate 200/200 with the
   enemy block of the obs encoded wrongly, because it never reads it — that bug
   class makes a solvable env unlearnable, and this mode is what sees it. The
-  two modes must agree; where they do not, the difference has to be explainable
-  by the obs the policy actually gets (here: ``env.reset`` returns an all-zero
-  obs, so tick 1 is blind).
+  two modes must agree exactly: both see the obs ``env.reset`` returns (real
+  since #157), and against a statue the ground-truth lead is zero.
 * The FAIL report's diagnostics: censored TTK printed as "n/a (no kills)"
   rather than "None", and the failing episodes' spawn geometry.
 
@@ -84,19 +83,30 @@ def test_statue_above_the_standing_semi_axis_is_unkillable():
 
     At 57 u the target centre sits ~55 u above the shooter's eye, past
     HIT_HALF_HEIGHT_STAND = 36, so the ellipsoid gate rejects every shot no
-    matter how perfect the yaw. Every shot must be on target (the yaw window is
-    a 2D quantity, unaffected by z) AND stance-blocked AND a miss. If the hold
-    were a no-op this test would look exactly like the grounded run and fail on
-    the first assert, which is what makes the 24 u case meaningful.
+    matter how perfect the yaw. Every shot must be stance-blocked AND a miss,
+    and every shot but one kind must be on target (the yaw window is a 2D
+    quantity, unaffected by z). If the hold were a no-op this test would look
+    exactly like the grounded run and fail on the first assert, which is what
+    makes the 24 u case meaningful.
+
+    The one kind of off-target shot is the opening shot on a spawn row whose
+    yaw error is wider than max_turn_speed (56.3 deg vs 45 on the arena).
+    ``vis_prev`` comes from the real reset obs (#157), so the oracle fires on
+    tick 1, and its fire rule does not wait for the turn to land. Exactly one
+    such shot per wide-spawn episode, measured.
 
     Few episodes on purpose: nothing dies, so each one runs the full 160 ticks.
     """
+    from cs2rl.env.nav import MAX_TURN_SPEED_RAD
     from cs2rl.experiment.oracle_statue import run_check, verdict
     res = run_check(episodes=4, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET)
     assert res["rz_min"] == pytest.approx(ABOVE_SEMI_AXIS_OFFSET - GRAVITY_SAG, abs=0.05), res
     assert res["kills"] == 0 and res["ttk_min"] is None, res
     assert res["shots_fired"] > 0, res
-    assert res["shots_on_target"] == res["shots_fired"], res
+    # Nothing died, so every episode is in `failures`, with its spawn yaw error.
+    wide = sum(abs(f["yaw_err"]) > MAX_TURN_SPEED_RAD for f in res["failures"])
+    assert len(res["failures"]) == res["episodes"], res
+    assert res["shots_fired"] - res["shots_on_target"] == wide, (wide, res)
     assert res["shots_stance_blocked"] == res["shots_fired"], res
     assert res["shots_hit"] == 0, res
     assert not verdict(res)[0], res
@@ -113,18 +123,18 @@ def test_obs_only_oracle_kills_the_statue_it_can_only_see_in_the_obs():
     are equal on every tick of this env, so reading the wrong one of the two is
     undetectable here (see the script's "DOES NOT CERTIFY" list).
 
-    ``obs_blind_ticks == episodes`` is exact, not a bound: ``env.reset``
-    returns an all-zero obs, so the hero is blind on tick 1 of every round and
-    on no other tick (both agents are in permanent 2D LoS in the arena). More
-    than one per episode means visibility dropped mid-round, which would make
-    the kill numbers below a statement about LoS rather than about encoding.
+    ``obs_blind_ticks == 0``: ``env.reset`` returns the spawn-state obs (#157)
+    and both agents are in permanent 2D LoS in the arena, so the hero sees the
+    statue on every tick. A blind tick means visibility dropped mid-round (the
+    kill numbers below would then be a statement about LoS, not encoding) or
+    the reset obs went back to zero (before #157 this pinned one per episode).
     """
     from cs2rl.experiment.oracle_statue import run_check, verdict
     res = run_check(episodes=20, seed=0, obs_only=True)
     assert res["kill_rate"] >= 0.8, res
     assert res["ttk_min"] is not None and res["ttk_min"] < 160, res
     assert res["shots_fired"] > 0 and res["shots_stance_blocked"] == 0, res
-    assert res["obs_blind_ticks"] == res["episodes"], res
+    assert res["obs_blind_ticks"] == 0, res
     # The slot encodes the relative position twice ((rx, ry) vs bearing +
     # distance); disagreement is an encoding bug the kill rate cannot see,
     # because the actor steers by only one of the two.
@@ -140,12 +150,20 @@ def test_obs_only_decodes_the_enemy_z_delta_the_c_state_reports():
     would kill 200/200 with the enemy z-delta scaled by the wrong constant or
     dropped entirely. The elevated statue puts a known, non-zero offset in that
     slot (24 u minus one half gravity step) and asserts the actor read it back.
+
+    The low end is 0: the hold runs before each step, so the reset obs (which
+    the actor reads on tick 1, #157) shows the statue still on the ground. The
+    C side of the comparison is the rz of the same observed states, so it
+    carries that 0 too; the realised rz at combat never does.
     """
     from cs2rl.experiment.oracle_statue import OBS_RZ_TOL, _rz_disagrees, run_check
     res = run_check(episodes=4, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
-    assert res["obs_rz_min"] == pytest.approx(expect_rz, abs=0.05), res
     assert res["obs_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
+    assert res["obs_rz_min"] == pytest.approx(0.0, abs=0.05), res
+    assert res["observed_rz_min"] == pytest.approx(0.0, abs=0.05), res
+    assert res["observed_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
+    assert res["rz_min"] == pytest.approx(expect_rz, abs=0.05), res
     # ... and agrees with the same quantity read off the live C state.
     assert not _rz_disagrees(res), res
     # The agreement check must have teeth: a decode off by more than the
@@ -157,19 +175,19 @@ def test_obs_only_and_ground_truth_modes_agree():
     """Cross-mode tie: the obs must say the same thing the C state says.
 
     Both modes run the same env, seed, statue and loop, so a divergence is the
-    encoding — that is the whole design. Tolerances are the known, explainable
-    gap and nothing more: the obs actor loses tick 1 of each round to the
-    all-zero reset obs, which costs it a couple of ticks and a wasted shot on
-    the widest-angle spawn rows (a 56 deg opening turn at 360 u). It must not
-    lose a KILL, and its shots must still overwhelmingly land — an encoding bug
-    shows up here as a collapsed hit rate, not as a two-tick delay.
+    encoding — that is the whole design. No tolerance: both see the obs
+    ``env.reset`` returns (#157, with ``vis_prev`` threaded from it), and the
+    ground-truth lead is zero against a statue, so the two modes take the same
+    action on every tick (measured over 200 episodes: same TTK and same shots
+    in every one). Before #157 the obs actor lost tick 1 to an all-zero reset
+    obs, and this test had to allow that gap.
     """
     from cs2rl.experiment.oracle_statue import run_check
     truth = run_check(episodes=20, seed=0)
     obs = run_check(episodes=20, seed=0, obs_only=True)
-    assert obs["kills"] == truth["kills"], (truth, obs)
-    assert abs(obs["ttk_median"] - truth["ttk_median"]) <= 2.0, (truth, obs)
-    assert obs["shots_hit"] / obs["shots_fired"] >= 0.9, obs
+    for k in ("kills", "ttk_median", "ttk_p90", "ttk_min", "shots_fired", "shots_hit",
+              "shots_on_target"):
+        assert obs[k] == truth[k], (k, truth, obs)
     # Both modes fire only at an enemy the sim says is visible and in range, so
     # neither may waste a shot with no line of sight.
     assert obs["shots_with_enemy_in_los"] == obs["shots_fired"], obs
@@ -210,11 +228,11 @@ def test_obs_only_verdict_gates_on_each_obs_tripwire():
         "obs_only": True,
         "episodes": 20,
         "obs_inconsistent_slots": 0,
-        "obs_blind_ticks": 20,
+        "obs_blind_ticks": 0,
         "obs_rz_min": 22.44,
         "obs_rz_max": 22.44,
-        "rz_min": 22.44,
-        "rz_max": 22.44,
+        "observed_rz_min": 22.44,
+        "observed_rz_max": 22.44,
     }
     passed, checks = verdict(ok)
     assert passed and len(checks) == 6, checks
@@ -225,9 +243,14 @@ def test_obs_only_verdict_gates_on_each_obs_tripwire():
     assert not verdict({**ok, "obs_rz_max": 22.44 + 2 * OBS_RZ_TOL})[0]
     # ...but the tolerance is a real band, not a float-equality test.
     assert verdict({**ok, "obs_rz_min": 22.44 + 0.9 * OBS_RZ_TOL})[0]
-    # Sight lost mid-round; one blind tick per episode is the structural floor.
-    assert not verdict({**ok, "obs_blind_ticks": 21})[0]
-    assert verdict({**ok, "obs_blind_ticks": 19})[0]
+    # Any blind tick fails: the reset obs is real (#157), so there is no
+    # structural one any more. 1 is sight lost once; 20 is the pre-#157 zero
+    # reset obs coming back (one blind tick per episode).
+    assert not verdict({**ok, "obs_blind_ticks": 1})[0]
+    assert not verdict({**ok, "obs_blind_ticks": 20})[0]
+    # The C side of the rz check is the OBSERVED states, not the combat rz.
+    assert not verdict({**ok, "observed_rz_min": 0.0})[0]
+    assert verdict({**ok, "rz_min": 0.0})[0]
 
 
 def test_ground_truth_verdict_ignores_the_obs_diagnostics():
@@ -303,11 +326,40 @@ def test_a_mutated_z_normaliser_fails_the_obs_only_exit_code(monkeypatch):
     res = mod.run_check(episodes=2, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
     assert res["kill_rate"] == 1.0 and res["obs_inconsistent_slots"] == 0, res
-    assert res["rz_min"] == pytest.approx(expect_rz, abs=0.05), res
-    assert res["obs_rz_min"] == pytest.approx(expect_rz / 2, abs=0.05), res
+    assert res["observed_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
+    assert res["obs_rz_max"] == pytest.approx(expect_rz / 2, abs=0.05), res
     passed, checks = mod.verdict(res)
     failed = [n for n, ok, _ in checks if not ok]
     assert not passed and failed == ["|obs_rz - C rz| <= 0.5"], checks
+    assert mod.main(argv) == 1
+
+
+def test_a_zeroed_reset_obs_fails_the_obs_only_exit_code(monkeypatch):
+    """End-to-end teeth for the #157 bound: a reset obs that is all zero again.
+
+    Before #157 env_reset left the obs buffer zeroed, and the obs-only hero was
+    blind on tick 1 of every round. Kills stay 2/2 that way (it is a one-tick
+    delay), so only ``obs_blind_ticks == 0`` can see the regression. Simulated
+    here by zeroing what ``Cs2Env.reset`` returns.
+    """
+    import numpy as np
+
+    from cs2rl.env.c import cs2_env
+    from cs2rl.experiment import oracle_statue as mod
+    argv = ["--episodes", "2", "--seed", "0", "--obs-only"]
+    assert mod.main(argv) == 0
+    real_reset = cs2_env.Cs2Env.reset
+
+    def zeroed_reset(self, seed=None):
+        obs, infos = real_reset(self, seed)
+        return np.zeros_like(obs), infos
+
+    monkeypatch.setattr(cs2_env.Cs2Env, "reset", zeroed_reset)
+    res = mod.run_check(episodes=2, seed=0, obs_only=True)
+    assert res["kill_rate"] == 1.0 and res["obs_blind_ticks"] == 2, res
+    passed, checks = mod.verdict(res)
+    failed = [n for n, ok, _ in checks if not ok]
+    assert not passed and failed == ["obs_blind_ticks == 0"], checks
     assert mod.main(argv) == 1
 
 

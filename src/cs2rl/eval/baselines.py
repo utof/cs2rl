@@ -28,9 +28,10 @@ PROVENANCE / PITFALLS
 The block between the two ``# ── vendored`` markers is copied from
 ``probe/combat-dead:scripts/probe/combat_rollout.py`` lines 123–558 (see that
 file's module docstring for the sim conventions it relies on: Δyaw relative /
-pitch absolute, env_step ordering, obs after reset() is all zeros, a killed
-enemy reads invisible on its death tick). Edits after vendoring are limited to
-``PolicyActor`` taking a live policy (+ ``from_policy``).
+pitch absolute, env_step ordering, obs after reset() is all zeros (no longer
+true: since #157 env_reset computes the obs), a killed enemy reads invisible on
+its death tick). Edits after vendoring are limited to ``PolicyActor`` taking a
+live policy (+ ``from_policy``).
 
 * Geometry constants below MIRROR cs2_combat.h; the header is not exported
   through the binding. If EYE_* / TORSO_* change there, the
@@ -584,6 +585,9 @@ class BaselineEvaluator:
         side_actor.reset()
         opp_actor.reset()
         st = self.reader.read().snapshot()
+        # KNOWN LIMIT (#157): the reset obs is real now, but vis_prev still
+        # starts at None, so OracleActor is blind on tick 1 here while a
+        # policy is not. experiment.oracle_statue threads it from the reset obs.
         vis_prev = None
         rows = slice(0, TEAM_SIZE) if side == 0 else slice(TEAM_SIZE, N_AGENTS)
         term = trunc = None
