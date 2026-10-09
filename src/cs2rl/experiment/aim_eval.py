@@ -361,13 +361,22 @@ def load_checkpoint(path) -> tuple:
 
 
 def env_mismatches(cfg) -> list[str]:
-    """The run's env knobs that differ from the arena preset every cell plays."""
+    """The config.json env keys that differ from the arena preset every cell plays: the map
+    label, the agent count, the pitch, crouch and jump switches, the round length, the laser
+    range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves).
+
+    KNOWN LIMIT: recoil is not compared: config.json has no recoil key (no training flag sets it).
+    """
+    # "env" is the label train/config.py writes for --map arena-duel.
     preset = {
+        "env": "cs2-arena-duel",
         "n_active_per_team": L0.N_ACTIVE_PER_TEAM,
         "pin_pitch": L0.PIN_PITCH,
         "crouch_enabled": L0.CROUCH_ENABLED,
         "jump_enabled": L0.JUMP_ENABLED,
-        "round_time_ticks": L0.ROUND_TIME
+        "round_time_ticks": L0.ROUND_TIME,
+        "laser_range": None,
+        "max_turn_speed": None,
     }
     return [f"{k}: run {cfg.get(k)} vs harness {v}" for k, v in preset.items() if cfg.get(k) != v]
 

@@ -22,6 +22,7 @@ WHAT IS PINNED HERE
   seed it returns the sampled mode's discrete actions tick after tick, and cont = mu.
 * ``LstmZeroedEvery`` zeroes before forward ``period``, ``2 * period``, ... counted across
   rounds, as ``Cs2PuffeRL.evaluate`` zeroes at every rollout start.
+* ``env_mismatches`` flags a run trained on another map, laser range or turn speed.
 * The CLI on the Rung 1a checkpoint, 5 episodes per cell. It needs the checkpoint, which only
   the owner's checkouts have (outputs/ is not in git), so it skips without one.
 """
@@ -315,6 +316,15 @@ def test_cells_reproduce_in_any_order():
         return {(c["aim"], c["lstm"]): c["per_episode"] for c in out["cells"]}
 
     assert cells(modes, 1) == cells(modes[::-1], 2)
+
+
+def test_a_run_on_another_map_or_turn_speed_is_flagged():
+    from cs2rl.experiment.aim_eval import env_mismatches
+    flagged = env_mismatches({"env": "cs2-dust2", "laser_range": 1500.0, "max_turn_speed": 0.5})
+    assert {
+        "env: run cs2-dust2 vs harness cs2-arena-duel", "laser_range: run 1500.0 vs harness None",
+        "max_turn_speed: run 0.5 vs harness None"
+    } <= set(flagged), flagged
 
 
 def _rung1a_checkpoint():
