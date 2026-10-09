@@ -7,7 +7,7 @@ WHAT IS PINNED HERE
   trails the target reads along > 0 whichever way the target moves, one that leads it reads
   along < 0, and a vertical error against horizontal motion is all across.
 * The recorder: errors in half-window units, the hit flag from the opponent's hp, and the lag's
-  tracking ticks starting at the round's first on-target tick.
+  tracking ticks starting at each round's first on-target tick.
 * The summary on hand-set fires: hit/fired up to and after tick ``bptt_horizon``, the
   off-window share, the |e| quantiles and the along/across means; and in every played cell the
   gap to the oracle row of the same opponent, found by name, with the policy-worse sign.
@@ -96,6 +96,9 @@ def test_the_recorder_scales_by_the_half_window_and_tracks_from_acquisition():
     for k in range(2, 13):
         rec(k, _state((300.0, 5.0 * (k - 1)), math.atan2(5.0 * (k - 2), 300.0)),
             _state((300.0, 5.0 * k), math.atan2(5.0 * (k - 1), 300.0), hp=(100, 90), fired=k == 12))
+    # A second round opens 0.5 rad off target: acquisition restarts, so none of it is tracked.
+    for k in (1, 2):
+        rec(k, _state((300.0, 5.0 * (k - 1)), 0.5), _state((300.0, 5.0 * k), 0.5))
     s = rec.summary(64)
     assert s["track_ticks"] == 11 and s["lag_ticks"] == pytest.approx(1.0, abs=0.02)
     assert s["fires"] == 2 and s["hit_recount"] == 1
