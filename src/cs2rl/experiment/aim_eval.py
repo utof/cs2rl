@@ -85,6 +85,8 @@ import numpy as np
 import torch
 
 from cs2rl.eval.baselines import (
+    ACTION_DIM,
+    AIM_DIM,
     EYE_CROUCH,
     EYE_STAND,
     TORSO_CROUCH,
@@ -93,7 +95,7 @@ from cs2rl.eval.baselines import (
     PolicyActor,
     wrap_pi,
 )
-from cs2rl.eval.walker import WalkerActor
+from cs2rl.eval.walker import H_MOVE, HELD_OUT, TRAIN_MIX, RandomWalker, WalkerActor, WalkerParams
 from cs2rl.experiment import oracle_statue as L0
 
 HIT_HALF_WIDTH = 16.0                  # u, MIRROR of cs2_combat.h
@@ -104,18 +106,40 @@ MIN_TRACK_TICKS = 10                   # fewer tracking ticks than this: no lag 
 BOOTSTRAP_DRAWS = 200
 
 
-def _walker(hold_min, hold_max):
-    return lambda seed: WalkerActor(np.random.default_rng(seed), [L0.STATUE], hold_min, hold_max)
+class _FamilyWalker:
+    """One ``WalkerParams`` family on the CT row, in the eval.baselines actor shape: WalkerActor's
+    ``act`` over a one-family ``RandomWalker`` mix, because WalkerActor takes no mix. Each
+    ``reset()`` redraws the family's ``p_stop`` and ``duty`` inside their ranges."""
+
+    def __init__(self, rng, params: WalkerParams):
+        self.core = RandomWalker(1, rng, mix=(params, ))
+
+    def reset(self):
+        self.core.reset()
+
+    def act(self, obs, st, vis_prev, env):
+        act = np.zeros((len(obs), ACTION_DIM), dtype=np.int32)
+        act[L0.STATUE, H_MOVE] = self.core.step()[0]
+        return act, np.zeros((len(obs), AIM_DIM), dtype=np.float32)
 
 
-# name -> factory(seed) -> opponent actor for the CT row. "heldout" names the family the
-# Rung 1b training mix leaves out (long straight runs). The plan's 2..8 training family also
-# stands still on a quarter of its holds, which WalkerActor cannot do yet; this one never stops.
+def _walker(params: WalkerParams):
+    """factory(seed) -> the CT row's walker for one family. A family that never stops and always
+    presses is WalkerActor's hold walker, which oracle_tracker plays (the same draws on the same
+    seed); any other family plays through ``_FamilyWalker``."""
+    if params.p_stop == (0.0, 0.0) and params.duty == (1.0, 1.0):
+        return lambda seed: WalkerActor(np.random.default_rng(seed), [L0.STATUE], *params.hold)
+    return lambda seed: _FamilyWalker(np.random.default_rng(seed), params)
+
+
+# name -> factory(seed) -> opponent actor for the CT row: the Rung 1b training families
+# (eval.walker.TRAIN_MIX: a statue, a fast walker, a stop-and-go walker) and HELD_OUT, the long
+# straight runs training leaves out. tests/experiment/test_aim_eval.py pins the names to them.
 OPPONENTS = {
     "statue": lambda seed: IdleActor(),
-    "walker-4-16": _walker(4, 16),
-    "walker-2-8": _walker(2, 8),
-    "heldout-24-48": _walker(24, 48),
+    "walker-4-16": _walker(TRAIN_MIX[1]),
+    "walker-2-8-stop": _walker(TRAIN_MIX[2]),
+    "heldout-24-48": _walker(HELD_OUT),
 }
 MODES = (("sample", "carried"), ("mean", "carried"), ("sample", "zeroed"), ("mean", "zeroed"))
 REFERENCE_HEROES = (("oracle", False), ("obs-oracle", True))           # (name, run_check obs_only)

@@ -12,6 +12,9 @@ WHAT IS PINNED HERE
   in every |w| quintile and a positive along; OracleActor (one-tick lead) reads under 0.3. The
   recounts equal the C counters, the killing shot included (``on_step`` runs on the terminal
   tick). The lag's error bar resamples whole episodes, and the lag curve splits by |w| quintile.
+* The opponents are eval.walker's Rung 1b families (TRAIN_MIX and HELD_OUT) under names that
+  say which: the plain ones draw as WalkerActor does (walker-4-16 is oracle_tracker's walker),
+  and only the stop-and-go one stands still.
 * ``PolicyActor(mean_aim=True)`` changes only the continuous aim: on the same inputs and
   seed it returns the sampled mode's discrete actions tick after tick, and cont = mu.
 * ``LstmZeroedEvery`` zeroes before forward ``period``, ``2 * period``, ... counted across
@@ -197,6 +200,47 @@ def test_run_check_plays_the_given_hero():
     assert run_check(5, 0)["kills"] == 5
     res = run_check(5, 0, hero=IdleActor())
     assert (res["kills"], res["shots_fired"]) == (0, 0)
+
+
+def test_the_opponents_are_the_rung1b_walker_families():
+    from cs2rl.eval.walker import HELD_OUT, STATUE, TRAIN_MIX
+    from cs2rl.experiment.aim_eval import OPPONENTS
+    # Each cell's name says its family: a retuned or reordered TRAIN_MIX must rename the cell.
+    assert list(OPPONENTS) == ["statue", "walker-4-16", "walker-2-8-stop", "heldout-24-48"]
+    assert TRAIN_MIX[0] == STATUE and STATUE.p_stop == (1.0, 1.0)
+    assert (TRAIN_MIX[1].hold, TRAIN_MIX[1].p_stop, TRAIN_MIX[1].duty) == ((4, 16), (0, 0), (1, 1))
+    assert TRAIN_MIX[2].hold == (2, 8) and TRAIN_MIX[2].p_stop[0] > 0
+    assert (HELD_OUT.hold, HELD_OUT.p_stop, HELD_OUT.duty) == ((24, 48), (0, 0), (1, 1))
+
+
+def _moves(actor, ticks=600, round_len=150):
+    """The CT row's move bin per tick, a reset every ``round_len``; every other entry is 0."""
+    from cs2rl.eval.walker import H_MOVE
+    obs = np.zeros((10, 1), dtype=np.float32)
+    out = []
+    for t in range(ticks):
+        if t % round_len == 0:
+            actor.reset()
+        act, cont = actor.act(obs, None, None, None)
+        assert not act[[i for i in range(10) if i != 5]].any() and not cont.any()
+        out.append(int(act[5, H_MOVE]))
+    return np.array(out)
+
+
+def test_the_walker_families_play_as_drawn():
+    from cs2rl.eval.walker import WalkerActor
+    from cs2rl.experiment.aim_eval import OPPONENTS
+    from cs2rl.experiment.oracle_statue import STATUE
+    from cs2rl.experiment.oracle_tracker import build_walker
+    assert STATUE == 5
+    # The plain families are WalkerActor's draws: walker-4-16 is oracle_tracker's walker.
+    assert (_moves(OPPONENTS["walker-4-16"](3)) == _moves(build_walker(3))).all()
+    held = WalkerActor(np.random.default_rng(3), [5], 24, 48)
+    assert (_moves(OPPONENTS["heldout-24-48"](3)) == _moves(held)).all()
+    # The stop-and-go family stands still on about a quarter of its holds, and only it does.
+    stop = _moves(OPPONENTS["walker-2-8-stop"](3), ticks=4000)
+    assert 0.15 < (stop == 0).mean() < 0.35, (stop == 0).mean()
+    assert (_moves(OPPONENTS["walker-4-16"](3)) != 0).all()
 
 
 def test_each_mode_builds_its_hero():
