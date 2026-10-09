@@ -17,14 +17,12 @@ A spec, plan, or other binary-verdict review that is meant to be the unbiased ga
 - A prior reviewer may confirm that *its own* findings were addressed. That is follow-up verification, not the final verdict.
 - Scoped SDD fix re-reviews are different: those agents exist to mark listed findings ADDRESSED / NOT ADDRESSED, so they receive the findings list. Do not use that pattern for the independent spec/plan gate.
 
-## Spec review and quality review are separate
+## One reviewer, both verdicts
 
-Do not combine spec-compliance and code-quality into one reviewer unless the task is truly trivial (one-file mechanical change, no training-loop / C-layout / metrics-math risk). Default is two freshly spawned reviewers:
+A diff, brief or lane gets ONE freshly spawned reviewer (owner, 2026-10-09). Do not split it into a spec reviewer and a quality reviewer. Its one report gives two verdicts:
 
-- **Spec reviewer** only: does the diff implement the brief/spec, nothing more, nothing less?
-- **Quality reviewer** only: correctness of the written code, tests, naming, edge cases, maintainability — not a second spec checklist.
-
-Each gets its own prompt and writes its own report. A combined spec+quality pass is the exception, not the template.
+- **Spec:** does the diff implement the brief/spec, nothing more, nothing less?
+- **Quality:** is the written code correct: tests, naming, edge cases, maintainability?
 
 ## Dispatch appendix for implementers and reviewers
 
