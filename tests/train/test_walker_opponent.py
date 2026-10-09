@@ -155,6 +155,57 @@ def test_two_seeded_trainers_walk_identically_and_a_done_flag_matters():
     assert not torch.equal(a, no_done), "done flags must start a new episode (re-draw)"
 
 
+def test_walker_rows_store_bin_0_where_the_move_mask_forbids_the_walkers_bin():
+    """Item 3: the mask zeroing happens after walker.step(), so the legal rows keep the
+    walker's exact bins and the stream is the unmasked one."""
+    from cs2rl.policy import _MASK_HEAD_SLICES
+    from cs2rl.spec.action import ACTION_MASK_DIM
+
+    n, ticks = 40, 60
+    opp = np.arange(n) % 10 >= 5
+    lo, hi = _MASK_HEAD_SLICES[H_MOVE]
+    mask = torch.ones(n, ACTION_MASK_DIM, dtype=torch.bool)
+    parked = torch.as_tensor(opp & (np.arange(n) % 5 >= 1))            # n_active 1: only slot 5 is live
+    mask[parked, lo + 1:hi] = False                                    # dead: only the no-op is valid
+    raw, masked = _fake_trainer(2, n), _fake_trainer(2, n)
+    walked = False
+    for _ in range(ticks):
+        a, b = _fake_step(n), _fake_step(n)
+        raw.walk(a, torch.zeros(n), n)
+        masked.walk(b, torch.zeros(n), n, mask)
+        want = a.action[:, H_MOVE].clone()
+        want[parked] = 0
+        assert torch.equal(b.action[:, H_MOVE], want)
+        walked |= bool((a.action[torch.as_tensor(opp), H_MOVE][parked[opp]] != 0).any())
+    assert walked, "the raw walker must have chosen a move on a masked row, or this pins nothing"
+
+
+def test_a_scripted_mode_without_an_override_fails_loudly(monkeypatch):
+    from cs2rl.train import trainer as trainer_module
+    from tests._helpers.trainer_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=4, opponent="noop")
+    try:
+        monkeypatch.setattr(trainer_module, "SCRIPTED_OPPONENT_MODES", ("noop", "walker", "future"))
+        monkeypatch.setattr(trainer._self_play_mgr, "opponent_mode", "future")
+        with pytest.raises(AssertionError, match="'future'"):
+            trainer.evaluate()
+    finally:
+        cleanup()
+
+
+def test_the_run_log_has_no_default_role_for_an_unknown_scripted_mode(monkeypatch):
+    from cs2rl.train import loop
+    from cs2rl.train.loop import _print_opponent_setup
+
+    monkeypatch.setattr(loop, "SCRIPTED_OPPONENT_MODES", ("noop", "walker", "future"))
+
+    plan: Any = types.SimpleNamespace(opponent_mode="future", config={})
+    trainer: Any = types.SimpleNamespace(_participating_rows_np=np.ones(10, dtype=bool))
+    with pytest.raises(KeyError, match="future"):
+        _print_opponent_setup(trainer, plan, self_play_enabled=True)
+
+
 def test_the_walker_cannot_change_its_row_count():
     t = _fake_trainer(0, 20)
     t.walk(_fake_step(20), torch.zeros(20), 20)
@@ -178,8 +229,9 @@ def test_walker_opponent_rows_walk_and_do_not_participate():
         hero = torch.as_tensor(slot == 0)
         assert trainer.global_step == bs // 10
         assert not trainer.participating[opp].any() and trainer.participating[hero].all()
-        move = trainer.actions[opp][..., H_MOVE]
-        assert (move != 0).float().mean() > 0.4, "walker rows must move"
+        active = torch.as_tensor(slot == 5)            # n_active 1: the one live opponent slot
+        move = trainer.actions[active][..., H_MOVE]
+        assert (move != 0).float().mean() > 0.4, "live walker rows must move"
         other = [h for h in range(ACTION_DIM) if h != H_MOVE]
         assert not trainer.actions[opp][..., other].any()
         assert not trainer.cont_actions[opp].any()
@@ -189,5 +241,28 @@ def test_walker_opponent_rows_walk_and_do_not_participate():
         trainer.train()
         assert trainer.losses[
             "participating_rows"] == trainer.segments * trainer.config["bptt_horizon"] // 10
+    finally:
+        cleanup()
+
+
+@pytest.mark.training
+@pytest.mark.parametrize("n_active", [1, 3])
+def test_no_stored_opponent_move_bin_is_mask_illegal(n_active):
+    """Dead and parked walker rows would store bins 1..8, which compute_masks forbids."""
+    from cs2rl.policy import _MASK_HEAD_SLICES
+    from tests._helpers.trainer_harness import _build_trainer_for_test
+
+    trainer, cleanup = _build_trainer_for_test(num_envs=16,
+                                               n_active_per_team=n_active,
+                                               opponent="walker")
+    try:
+        trainer.evaluate()
+        lo, hi = _MASK_HEAD_SLICES[H_MOVE]
+        move = trainer.actions[..., H_MOVE].long()
+        legal = torch.gather(trainer.action_masks[..., lo:hi].long(), -1, move.unsqueeze(-1))
+        slot = np.arange(trainer.total_agents) % 10
+        opp = torch.as_tensor(slot >= 5)
+        assert (legal.squeeze(-1)[opp] != 0).all(), "a walker row stored a mask-illegal move bin"
+        assert (move[opp & torch.as_tensor(slot % 5 < n_active)] != 0).any()
     finally:
         cleanup()

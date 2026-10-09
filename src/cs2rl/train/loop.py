@@ -513,7 +513,10 @@ def _print_opponent_setup(trainer, plan: _RunPlan, self_play_enabled: bool):
         # Rung 1a T3: which team is scripted, how many rows train, and on what horizon —
         # the three things a short or mis-masked run would get wrong silently.
         rows = trainer._participating_rows_np
-        role = "a stationary statue" if plan.opponent_mode == "noop" else "a scripted walker mix"
+        role = {
+            "noop": "a stationary statue",
+            "walker": "a scripted walker mix"
+        }[plan.opponent_mode]
         print(f"[Train] Opponent mode '{plan.opponent_mode}': team "
               f"{trainer._self_play_mgr.opponent_team.upper()} is {role}; "
               f"{int(rows.sum()):,} of {rows.size:,} agent rows "
@@ -542,6 +545,8 @@ def _resume_full_state(trainer, resume_paths: dict, config: dict, outputs: _RunO
     checkpoint_interval epochs wide on both sides, in participating units. Rung 1a T3:
     it assumes BOTH teams participate, so under a scripted --opponent (noop, walker) it is 2× too wide —
     only ever too permissive, never a false alarm; halve it before such a run resumes.
+    KNOWN LIMIT: a resumed --opponent walker run rebuilds the walker from config["seed"] and
+    replays its draws from the start (the walker's RNG and holds are not checkpointed).
     """
     info = load_full_resume(trainer, trainer._self_play_mgr, resume_paths)
     resumed = info["resumed_from_step"]

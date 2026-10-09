@@ -44,8 +44,9 @@ import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
 from cs2rl.eval.walker import H_MOVE, TRAIN_MIX, TRAIN_WEIGHTS, RandomWalker
-from cs2rl.policy import _hybrid_sample_logits
+from cs2rl.policy import _MASK_HEAD_SLICES, _hybrid_sample_logits
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
+from cs2rl.train.config import SCRIPTED_OPPONENT_MODES
 from cs2rl.train.entropy import WS_GRACE, WS_OFF, warmstart_entropy_state
 from cs2rl.train.resume import _atomic_save_state_dict, collect_train_state
 from cs2rl.train.rewards import WelfordStd, process_step_rewards
@@ -698,7 +699,13 @@ class Cs2PuffeRL(PuffeRL):
                 if self._self_play_mgr.opponent_mode == "noop":
                     self._freeze_statue_opponents(step, o_device.shape[0])
                 elif self._self_play_mgr.opponent_mode == "walker":
-                    self._walk_scripted_opponents(step, d, o_device.shape[0])
+                    self._walk_scripted_opponents(step, d, o_device.shape[0], action_mask)
+                elif self._self_play_mgr.opponent_mode in SCRIPTED_OPPONENT_MODES:
+                    # A scripted mode without an override would let the policy play the
+                    # non-participating team: refuse instead of falling through.
+                    raise AssertionError(
+                        f"scripted opponent mode {self._self_play_mgr.opponent_mode!r} "
+                        "has no override in evaluate()")
 
             profile("eval_copy", epoch)
             with torch.no_grad():
@@ -847,7 +854,7 @@ class Cs2PuffeRL(PuffeRL):
         step.logprob_c[opp_idx] = 0
         step.value[opp_idx] = 0
 
-    def _walk_scripted_opponents(self, step, d, batch_n):
+    def _walk_scripted_opponents(self, step, d, batch_n, action_mask=None):
         """``--opponent walker``: the opponent rows of ``step`` walk; all else is the statue's.
 
         The rows get ``_freeze_statue_opponents``' overwrite (bin 0 on every head, zero
@@ -856,6 +863,11 @@ class Cs2PuffeRL(PuffeRL):
         new episode, so it draws a new family there (``reset(rows)``). One walker per
         trainer (``_build_opponent_walker``, from ``config["seed"]``) over all the
         opponent rows, so a chunk must be the whole batch.
+
+        ``action_mask`` (the chunk's bool mask, or None) keeps the stored move bin legal: where
+        the move head's mask forbids the walker's bin (dead and parked rows allow only bin 0),
+        bin 0 is stored. The zeroing happens after ``walker.step()``, so the walker's stream
+        is unchanged.
 
         PITFALL: the walker's RNG and holds are not checkpointed. A resumed run rebuilds
         it from the same seed, so it replays the walker draws from the start.
@@ -867,7 +879,12 @@ class Cs2PuffeRL(PuffeRL):
         assert walker is not None, "--opponent walker builds its walker in _init_selfplay"
         assert len(opp_idx) == walker.n_rows, (len(opp_idx), walker.n_rows)
         walker.reset(d[opp_idx].cpu().numpy() > 0)
-        step.action[opp_idx, H_MOVE] = torch.as_tensor(walker.step()).to(step.action)
+        bins = torch.as_tensor(walker.step()).to(step.action)
+        if action_mask is not None:
+            lo, hi = _MASK_HEAD_SLICES[H_MOVE]
+            legal = action_mask[opp_idx, lo:hi].gather(1, bins.long().unsqueeze(1)).squeeze(1)
+            bins = bins * legal.to(bins.dtype)
+        step.action[opp_idx, H_MOVE] = bins
 
     def _build_opponent_walker(self):
         """The run's one ``RandomWalker`` over the opponent rows, seeded from ``config["seed"]``."""
@@ -1134,8 +1151,8 @@ class Cs2PuffeRL(PuffeRL):
         marked in production while include_step_stats_in_info is off.
 
         KNOWN LIMIT: ``adv`` also sums non-participating segments, whose advantages are
-        non-zero when the infos carry step_stats or, under ``--opponent noop``, on the
-        statue rows. At the ``prio_alpha`` default 0.0 every segment weighs the same;
+        non-zero when the infos carry step_stats or, under a scripted ``--opponent``, on the
+        scripted rows. At the ``prio_alpha`` default 0.0 every segment weighs the same;
         mask them out of ``adv`` before prioritised replay (``prio_alpha > 0``) is ever
         enabled.
         """
@@ -1300,7 +1317,7 @@ class Cs2PuffeRL(PuffeRL):
         The other rows would misstate it. An n_active-parked row has one valid bin per
         discrete head (discrete entropy 0), but with aim_entropy_bonus on (the
         default) its entropy also includes the aim Gaussian's, which is negative for
-        σ below 1/sqrt(2πe) ≈ 0.24. A statue row under ``--opponent noop`` is a
+        σ below 1/sqrt(2πe) ≈ 0.24. A scripted row under ``--opponent`` noop or walker is a
         spawned agent with the env's ordinary masks. ``alpha_loss`` is built every
         minibatch because it is logged; ``_step_alpha`` skips the step in GRACE and
         when the loss is non-finite.
