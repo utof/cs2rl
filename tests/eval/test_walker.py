@@ -251,13 +251,16 @@ def test_a_mix_is_deterministic_per_seed():
 
 
 def test_duty_gates_the_press_without_one_rng_draw():
-    """Duty 0.5 presses every other tick and leaves the RNG exactly where duty 1.0 leaves it."""
-    full = RandomWalker(4, np.random.default_rng(9), mix=[WalkerParams(duty=(1.0, 1.0))])
+    """Duty 0.5 presses every other tick, and the RNG ends where the draws of a plain
+    (no mix) walker, after the mix's one family draw, leave it."""
     half = RandomWalker(4, np.random.default_rng(9), mix=[WalkerParams(duty=(0.5, 0.5))])
-    a, b = _moves(full, 40), _moves(half, 40)
+    plain_rng = np.random.default_rng(9)
+    plain_rng.choice(1, size=4, p=[1.0])               # the mix's per-reset family draw
+    plain = RandomWalker(4, plain_rng)
+    a, b = _moves(plain, 40), _moves(half, 40)
     assert (b == 0).sum(axis=1).tolist() == [20] * 4
     assert np.array_equal(b[:, 1::2], a[:, 1::2]) and not b[:, 0::2].any()
-    assert full.rng.bit_generator.state == half.rng.bit_generator.state
+    assert plain.rng.bit_generator.state == half.rng.bit_generator.state
 
 
 def test_p_stop_gives_stand_still_holds_at_about_that_rate():
