@@ -7,6 +7,8 @@ WHAT IS PINNED
   drawn is in 4..16 and both ends are drawn (an exclusive upper bound would never draw
   16), and no complete run of an unchanged bin is shorter than 4 ticks.
 * Bins: only 1..8 are drawn, and all eight are.
+* Uniformity: over about 3200 redraws, each hold 4..16 and each bin 1..8 occurs within
+  +-30% of its mean count.
 * reset() makes the next step redraw every row.
 * WalkerActor sets only the move column of its own rows; every other head, every other
   row and the aim are zero, and the shapes follow obs.
@@ -70,6 +72,28 @@ def test_default_holds_span_4_to_16_inclusive_and_no_run_is_shorter():
         change = np.flatnonzero(np.diff(m[:, r]) != 0)
         assert len(change) > 50
         assert np.diff(change).min() >= HOLD_MIN
+
+
+def test_holds_and_bins_are_drawn_uniformly():
+    """Each realised hold and bin occurs within +-30% of its mean count.
+
+    Read from the walker's own state right after each redraw (``_left + 1`` is the
+    hold just drawn, ``_move`` the bin), not from the Generator's calls, so a change
+    in how the draws are combined (e.g. the max of two holds) shows too. About 3200
+    redraws (16 rows x 2000 steps / mean hold 10): +-30% is about 5 sd for a hold
+    count and 6 sd for a bin count, and the stream is seeded.
+    """
+    w = RandomWalker(16, np.random.default_rng(3))
+    holds, bins = [], []
+    for _ in range(2000):
+        expiring = w._left <= 0
+        w.step()
+        holds.extend((w._left[expiring] + 1).tolist())
+        bins.extend(w._move[expiring].tolist())
+    assert len(holds) > 3000, len(holds)
+    for counts in (np.bincount(holds, minlength=HOLD_MAX + 1)[HOLD_MIN:HOLD_MAX + 1],
+                   np.bincount(bins, minlength=9)[1:9]):
+        assert np.abs(counts / counts.mean() - 1.0).max() <= 0.30, counts
 
 
 def test_only_bins_1_to_8_are_drawn_and_all_of_them_are():
