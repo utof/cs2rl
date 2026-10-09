@@ -578,6 +578,9 @@ class Cs2PuffeRL(PuffeRL):
         ``save_checkpoint`` reads the stored manager when writing the sidecar.
         """
         self._self_play_mgr = self_play_mgr
+        # The scripted walker of --opponent walker; None in every other mode.
+        self._opponent_walker = (self._build_opponent_walker()
+                                 if self_play_mgr.opponent_mode == "walker" else None)
         # Whether this epoch's rollout drew a past policy; every evaluate() overwrites it.
         self._selfplay_used_past = False
         self._past_lstm_h = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
@@ -851,8 +854,8 @@ class Cs2PuffeRL(PuffeRL):
         aim, logprobs and value 0), then their move head becomes the move bin of a
         ``RandomWalker`` over ``TRAIN_MIX``. A row whose done flag ``d`` is set starts a
         new episode, so it draws a new family there (``reset(rows)``). One walker per
-        trainer, built on the first call from ``config["seed"]`` and the opponent row
-        count, which must stay the same on every call (a chunk is the whole batch).
+        trainer (``_build_opponent_walker``, from ``config["seed"]``) over all the
+        opponent rows, so a chunk must be the whole batch.
 
         PITFALL: the walker's RNG and holds are not checkpointed. A resumed run rebuilds
         it from the same seed, so it replays the walker draws from the start.
@@ -860,18 +863,19 @@ class Cs2PuffeRL(PuffeRL):
         self._freeze_statue_opponents(step, batch_n)
         opp_idx = torch.where(self._self_play_mgr.get_opponent_mask(batch_n,
                                                                     self.config["device"]))[0]
-        # Created here, not in __init__: only this mode needs it, and a new attribute on
-        # every trainer would change the self/noop state fingerprint of trainer_equivalence.
-        walker = getattr(self, "_opponent_walker", None)
-        if walker is None:
-            rng = np.random.default_rng(self.config["seed"])
-            walker = self._opponent_walker = RandomWalker(len(opp_idx),
-                                                          rng,
-                                                          mix=TRAIN_MIX,
-                                                          weights=TRAIN_WEIGHTS)
+        walker = self._opponent_walker
+        assert walker is not None, "--opponent walker builds its walker in _init_selfplay"
         assert len(opp_idx) == walker.n_rows, (len(opp_idx), walker.n_rows)
         walker.reset(d[opp_idx].cpu().numpy() > 0)
         step.action[opp_idx, H_MOVE] = torch.as_tensor(walker.step()).to(step.action)
+
+    def _build_opponent_walker(self):
+        """The run's one ``RandomWalker`` over the opponent rows, seeded from ``config["seed"]``."""
+        n_opp = int(self._self_play_mgr.get_opponent_mask(self.total_agents, "cpu").sum())
+        return RandomWalker(n_opp,
+                            np.random.default_rng(self.config["seed"]),
+                            mix=TRAIN_MIX,
+                            weights=TRAIN_WEIGHTS)
 
     def _store_step(self, step, o, o_device, r, d, env_id, action_mask):
         """Write one chunk into the rollout buffers at each row's current segment slot."""

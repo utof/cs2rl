@@ -83,7 +83,7 @@ def test_the_run_log_names_the_scripted_opponent(mode, role, capsys):
     assert f"Opponent mode '{mode}': team CT is {role}; 1 of 10 agent rows participate" in out, out
 
 
-def _fake_trainer(seed):
+def _fake_trainer(seed, n_agents):
     from cs2rl.train.selfplay import SelfPlayManager
     from cs2rl.train.trainer import Cs2PuffeRL
 
@@ -91,6 +91,8 @@ def _fake_trainer(seed):
                               _self_play_mgr=SelfPlayManager(opponent_mode="walker"))
     t._freeze_statue_opponents = types.MethodType(Cs2PuffeRL._freeze_statue_opponents, t)
     t.walk = types.MethodType(Cs2PuffeRL._walk_scripted_opponents, t)
+    t.total_agents = n_agents
+    t._opponent_walker = types.MethodType(Cs2PuffeRL._build_opponent_walker, t)()
     return t
 
 
@@ -107,7 +109,7 @@ def _fake_step(n):
 def _roll(seed, ticks=80, n_envs=4, with_done=True):
     """Run the override ``ticks`` times; return the opponent rows' actions and the step."""
     n = 10 * n_envs
-    t = _fake_trainer(seed)
+    t = _fake_trainer(seed, n)
     opp = np.arange(n) % 10 >= 5
     seen = []
     for k in range(ticks):
@@ -154,7 +156,7 @@ def test_two_seeded_trainers_walk_identically_and_a_done_flag_matters():
 
 
 def test_the_walker_cannot_change_its_row_count():
-    t = _fake_trainer(0)
+    t = _fake_trainer(0, 20)
     t.walk(_fake_step(20), torch.zeros(20), 20)
     with pytest.raises(AssertionError):
         t.walk(_fake_step(30), torch.zeros(30), 30)
