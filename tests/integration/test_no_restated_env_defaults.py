@@ -293,8 +293,9 @@ def _argparse_default_offenders(tree, label, seen=None):
                 seen.add((label, long_flag))
             if (label, long_flag) in STORE_ACTION_ALLOWED and implied == FIELD_DEFAULTS[dest]:
                 continue
-            offenders.append(f"{label}:{node.lineno}  --{dest} {action} (implied default "
-                             f"{implied!r}, field default {FIELD_DEFAULTS[dest]!r})")
+            offenders.append(
+                f"{label}:{node.lineno}  {long_flag or dest} {action} (implied default "
+                f"{implied!r}, field default {FIELD_DEFAULTS[dest]!r})")
             continue
         if dest not in FIELD_DEFAULTS or "default" not in kw:
             continue
