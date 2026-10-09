@@ -99,8 +99,8 @@ class SelfPlayManager:
         self.aim_log_std_max = aim_log_std_max
         self.pin_pitch = bool(pin_pitch)
         # Rung 1a T3: "noop" makes the patched evaluate() overwrite this team's
-        # actions with the no-op bin on every head (see _patch_trainer_with_
-        # selfplay); "walker" does the same except the move head walks.
+        # actions with the no-op bin on every head (see
+        # Cs2PuffeRL.evaluate); "walker" does the same except the move head walks.
         # Validated here so a typo'd mode cannot reach the rollout
         # as a silently-inactive branch. Callers that pass "noop" or "walker" MUST also
         # have passed assert_opponent_self_play_compatible.

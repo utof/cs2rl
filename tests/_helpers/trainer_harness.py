@@ -132,7 +132,8 @@ def _build_trainer_for_test(
     opponent : str
         Rung 1a T3 (spec 2026-08-30): ``"self"`` (default, today's behaviour —
         both teams train) or ``"noop"`` (the opponent team is a stationary
-        statue: no-op action bin on every head and NON-participating rows).
+        statue: no-op action bin on every head and NON-participating rows) or ``"walker"``
+        (the same, except the move head walks a RandomWalker mix).
         Set on ``args``, so config ``opponent``, the participating-step budget,
         the participation rows and the self-play manager all come from it, through
         the same code as ``--opponent``.
