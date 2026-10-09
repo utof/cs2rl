@@ -3,7 +3,7 @@
 
     python -m cs2rl.experiment.replay CHECKPOINT.pt --vs heldout-24-48 --rounds 5
     python -m cs2rl.experiment.replay oracle --vs walker-4-16
-    rerun outputs/recordings/<the printed name>.rrd
+    then run the "view:" line it prints, from any directory
 
 WHAT
 ----
@@ -70,6 +70,7 @@ class TickTable:
     def _row(self, tick, st_prev, st, fired, hit) -> str:
         h, o = self.hero, self.opp
         e, _w, d = aim_eval.aim_geometry(st_prev, st, h, o)
+        # A mirror of aim_eval.MissRecorder's half-window (P2 would share it with aim_eval).
         half = math.degrees(math.asin(min(aim_eval.HIT_HALF_WIDTH / max(d, 1e-6), 1.0)))
         return (
             f"{tick:>4} {st['x'][h]:8.1f} {st['y'][h]:8.1f} {math.degrees(st['facing'][h]):7.1f}"
@@ -190,6 +191,9 @@ def main(argv=None) -> int:
                     type=Path,
                     help="the .rrd to write (default under outputs/recordings/)")
     args = ap.parse_args(argv)
+    if args.rounds < 1:
+        ap.error(f"--rounds {args.rounds}: record at least 1 round")
+    from cs2rl.viz.render import view_command
     out = args.out or default_path(args.hero, args.vs, args.seed)
     t0 = time.perf_counter()
     res = save(args.hero,
@@ -206,7 +210,7 @@ def main(argv=None) -> int:
     for k, ep in enumerate(res["per_episode"], start=1):
         print(_round_line(k, ep))
     print(f"saved {res['replay']} and {res['text'].name} in {time.perf_counter() - t0:.1f} s")
-    print(f"view: rerun {res['replay']}")
+    print(f"view: {view_command(res['replay'])}")
     return 0
 
 

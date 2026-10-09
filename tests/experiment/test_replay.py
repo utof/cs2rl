@@ -11,7 +11,9 @@ WHAT IS PINNED HERE
   count ``shots_hit``, tick 0 is the spawn (both spawn positions, the opponent at full hp),
   and a kill's last row is tick ``ttk`` with the opponent at 0 hp.
 * The CLI writes the .rrd (one recording per round) and the .txt, and prints the command
-  that opens it; ``default_path`` names a checkpoint by its run directory and stem.
+  that opens it (``viz.render.view_command``: absolute path, any directory); it refuses
+  ``--rounds 0`` before touching the file; ``default_path`` names a checkpoint by its run
+  directory and stem.
 * A checkpoint's rounds are the episodes of aim_eval's policy cell for the same opponent,
   seed and modes. It needs the Rung 1a checkpoint, which only the owner's checkouts have
   (outputs/ is not in git), so it skips without one.
@@ -108,13 +110,18 @@ def test_the_text_dump_agrees_with_run_check(saved):
 
 
 def test_the_cli_saves_and_prints_the_view_command(tmp_path, capsys):
+    import sys
+
     from rerun.recording import load_archive
 
     from cs2rl.experiment import replay
     out = tmp_path / "statue.rrd"
+    with pytest.raises(SystemExit):
+        replay.main(["oracle", "--vs", "statue", "--rounds", "0", "--out", str(out)])
+    assert not out.exists()
     assert replay.main(["oracle", "--vs", "statue", "--rounds", "2", "--out", str(out)]) == 0
     printed = capsys.readouterr().out
-    assert f"view: rerun {out}\n" in printed
+    assert f"view: {sys.executable} -m rerun --bind 127.0.0.1 {out.resolve()}\n" in printed
     assert len(re.findall(r"^round \d+: ", printed, re.M)) == 2
     assert out.with_suffix(".txt").read_text().startswith("# python -m cs2rl.experiment.replay ")
     assert [r.recording_id()
