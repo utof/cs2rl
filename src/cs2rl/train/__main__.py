@@ -177,6 +177,13 @@ if __name__ == "__main__":
                         help="Rung 1a: 0 masks the jump action (height parity for pinned-pitch "
                         "duels; an airborne target sits outside the 36u vertical semi-axis and "
                         "is an unobservable guaranteed miss). Default 1 = today's env.")
+    parser.add_argument("--accuracy",
+                        action="store_true",
+                        dest="accuracy",
+                        help="Turn on the movement-inaccuracy cone (EnvConfig.accuracy): every "
+                        "shot leaves on a random cone whose radius grows with the shooter's "
+                        "speed above 0.34 x the weapon's max speed (cs2_weapons.h). Off by "
+                        "default = today's exact ray.")
     parser.add_argument("--opponent",
                         choices=OPPONENT_MODES,
                         default="self",

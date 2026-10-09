@@ -252,24 +252,27 @@ FAIL_DETAIL_LIMIT = 10
 OPP_MOVING_SPEED = 1.0
 
 
-def build_env(seed: int, round_time: int = ROUND_TIME):
+def build_env(seed: int, round_time: int = ROUND_TIME, accuracy: bool | None = None):
     """The Rung 1a arena env, built for instrument use (auto_reset off).
 
     WHY the knobs are hard-coded rather than passed through: the whole point of
     the check is that it runs the env the smoke runs. A caller that wants a
     different env is asking a different question and should say so in code.
+    ``accuracy`` is that question asked in code: True turns on the movement-inaccuracy
+    cone (EnvConfig.accuracy), which the Rung 1a smoke ran without. None leaves the field at
+    its EnvConfig default.
     """
     from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
-    return make_env(config=EnvConfig(n_active_per_team=N_ACTIVE_PER_TEAM,
-                                     pin_pitch=PIN_PITCH,
-                                     crouch_enabled=CROUCH_ENABLED,
-                                     jump_enabled=JUMP_ENABLED,
-                                     round_time=round_time),
-                    map_data=make_arena_duel_map(),
-                    auto_reset=False,
-                    seed=seed)
+    config = EnvConfig(n_active_per_team=N_ACTIVE_PER_TEAM,
+                       pin_pitch=PIN_PITCH,
+                       crouch_enabled=CROUCH_ENABLED,
+                       jump_enabled=JUMP_ENABLED,
+                       round_time=round_time)
+    if accuracy is not None:
+        config = config.replace(accuracy=accuracy)
+    return make_env(config=config, map_data=make_arena_duel_map(), auto_reset=False, seed=seed)
 
 
 class ObsOracleActor:
@@ -609,7 +612,8 @@ def run_check(episodes: int = 200,
               obs_only: bool = False,
               opponent=None,
               hero=None,
-              on_step=None) -> dict:
+              on_step=None,
+              accuracy: bool | None = None) -> dict:
     """Play ``episodes`` oracle-vs-statue rounds; return the summary dict.
 
     ``obs_only`` swaps the ground-truth ``OracleActor`` for ``ObsOracleActor``
@@ -623,7 +627,9 @@ def run_check(episodes: int = 200,
     Everything else stays the same, the ``statue`` names included.
 
     ``hero`` replaces the oracle on the T row the same way (``obs_only`` is then
-    ignored), and ``on_step`` is ``_episode``'s per-step callback.
+    ignored), and ``on_step`` is ``_episode``'s per-step callback. ``accuracy`` is
+    ``build_env``'s (the movement-inaccuracy cone; None = the EnvConfig default), and the
+    result's ``accuracy`` is the value the env actually ran.
     cs2rl.experiment.aim_eval passes a ``PolicyActor``, or an ``LstmZeroedEvery`` around
     one, and its ``MissRecorder``.
 
@@ -651,7 +657,7 @@ def run_check(episodes: int = 200,
     """
     if episodes < 1:
         raise ValueError(f"episodes must be >= 1, got {episodes}")
-    env = build_env(seed, round_time)
+    env = build_env(seed, round_time, accuracy)
     try:
         ev = BaselineEvaluator(env, episodes=2, seed=seed)             # constants only, see docstring
         oracle = _build_hero_actor(ev, seed, obs_only) if hero is None else hero
@@ -661,6 +667,7 @@ def run_check(episodes: int = 200,
         observed_rz = []
         totals = dict.fromkeys(("shots_fired", "shots_with_enemy_in_los", "shots_facing_enemy",
                                 "shots_on_target", "shots_hit", "shots_stance_blocked"), 0)
+        shots_fired_fast, cone_radius_sum = 0, 0.0
         kills = 0
         failures = []
         per_episode = []
@@ -679,6 +686,8 @@ def run_check(episodes: int = 200,
             es = env._c_env.episode_stats
             for k in totals:
                 totals[k] += int(getattr(es, k))
+            shots_fired_fast += int(es.shots_fired_fast)
+            cone_radius_sum += float(es.cone_radius_sum)
             if r["ttk"] is not None:
                 kills += 1
             else:
@@ -736,6 +745,12 @@ def run_check(episodes: int = 200,
         "per_episode": per_episode,
         "opp_moving_frac": opp_moving_ticks / max(opp_alive_ticks, 1),
         "opp_net_disp_median": float(np.median(opp_net_disps)),
+                                                                                                   # The movement-inaccuracy counters (cs2_types.h StepStats): shots fired at or
+                                                                                                   # above 0.34 x max speed (counted with the cone off too) and the summed cone
+                                                                                                   # radius in rad (0 with it off). Env-wide, like the shot counters above.
+        "accuracy": bool(env.config.accuracy),
+        "shots_fired_fast": shots_fired_fast,
+        "cone_radius_sum": cone_radius_sum,
         **totals,
     }
 
@@ -899,6 +914,13 @@ def format_summary(res: dict) -> str:
         f"unmatched vis slots      {res['unmatched_vis_slots']}"
         f"{'   <-- WARNING: visibility recovery is broken, oracle targeting is suspect' if res['unmatched_vis_slots'] else ''}",
     ]
+    # Printed only with the cone on, so the default report stays the pre-cone report.
+    if res.get("accuracy"):
+        lines += [
+            f"movement-inaccuracy cone ON: shots_fired_fast {res['shots_fired_fast']}  "
+            f"({res['shots_fired_fast'] / fired:.3f} of fired)   mean cone radius "
+            f"{1e3 * res['cone_radius_sum'] / fired:.3f} mrad",
+        ]
     if res["obs_only"]:
         blind, inconsistent = res["obs_blind_ticks"], res["obs_inconsistent_slots"]
         lines += [
@@ -952,13 +974,19 @@ def main(argv=None) -> int:
                     "live C state, keeping every other decision identical. Same PASS bar: a "
                     "mode that kills on ground truth but not here is an obs-encoding bug, which "
                     "is invisible to the default run — see the module docstring.")
+    ap.add_argument("--accuracy",
+                    action="store_true",
+                    help="turn on the movement-inaccuracy cone (EnvConfig.accuracy). The Rung 1a "
+                    "smoke ran without it, so this is a different env, and the PASS bar is the "
+                    "same one.")
     args = ap.parse_args(argv)
 
     res = run_check(episodes=args.episodes,
                     seed=args.seed,
                     statue_z=args.statue_z,
                     round_time=args.round_time,
-                    obs_only=args.obs_only)
+                    obs_only=args.obs_only,
+                    accuracy=args.accuracy)
     print(format_summary(res))
     return 0 if verdict(res)[0] else 1
 

@@ -320,11 +320,25 @@ def test_cells_reproduce_in_any_order():
 
 def test_a_run_on_another_map_or_turn_speed_is_flagged():
     from cs2rl.experiment.aim_eval import env_mismatches
-    flagged = env_mismatches({"env": "cs2-dust2", "laser_range": 1500.0, "max_turn_speed": 0.5})
+    flagged = env_mismatches({
+        "env": "cs2-dust2",
+        "laser_range": 1500.0,
+        "max_turn_speed": 0.5
+    }, False)
     assert {
         "env: run cs2-dust2 vs harness cs2-arena-duel", "laser_range: run 1500.0 vs harness None",
         "max_turn_speed: run 0.5 vs harness None"
     } <= set(flagged), flagged
+
+
+def test_a_run_trained_with_the_other_cone_setting_is_flagged():
+    """A config.json without the ``accuracy`` key predates the cone, so it reads False."""
+    from cs2rl.experiment.aim_eval import env_mismatches
+    cone = [m for m in env_mismatches({}, True) if m.startswith("accuracy:")]
+    assert cone == ["accuracy: run False vs harness True"], cone
+    assert not [m for m in env_mismatches({"accuracy": True}, True) if m.startswith("accuracy:")]
+    assert [m for m in env_mismatches({"accuracy": True}, False)
+            if m.startswith("accuracy:")] == ["accuracy: run True vs harness False"]
 
 
 def _rung1a_checkpoint():

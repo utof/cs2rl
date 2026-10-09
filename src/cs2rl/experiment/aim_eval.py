@@ -308,8 +308,11 @@ def _cell(opponent, hero, aim, lstm, res, rec, horizon) -> dict:
     row = dict(opponent=opponent, hero=hero, aim=aim, lstm=lstm)
     row.update((k, res[k])
                for k in ("episodes", "kills", "kill_rate", "ttk_median", "ttk_p90", "shots_fired",
-                         "shots_hit", "shots_on_target", "opp_moving_frac", "per_episode"))
+                         "shots_hit", "shots_on_target", "opp_moving_frac", "per_episode",
+                         "accuracy", "shots_fired_fast", "cone_radius_sum"))
     row["hit_per_fired"] = res["shots_hit"] / max(res["shots_fired"], 1)
+    # The share of fires at or above 0.34 x max speed (counted with the cone off too).
+    row["fast_per_fired"] = res["shots_fired_fast"] / max(res["shots_fired"], 1)
     row.update(rec.summary(horizon))
     return row
 
@@ -319,14 +322,24 @@ def run_eval(policy,
              episodes: int = 100,
              seed: int = 0,
              opponents=None,
-             modes=MODES) -> dict:
-    """Every opponent x (reference heroes + every mode) on ``seed``; returns the JSON dict."""
+             modes=MODES,
+             accuracy: bool | None = None) -> dict:
+    """Every opponent x (reference heroes + every mode) on ``seed``; returns the JSON dict.
+
+    ``accuracy`` is oracle_statue.build_env's movement-inaccuracy cone switch for every cell
+    (None = the EnvConfig default); the result's ``accuracy`` is the value the cells ran.
+    """
     t0 = time.perf_counter()
     cells, refs = [], []
     for name, make in (OPPONENTS if opponents is None else opponents).items():
         for hero, obs_only in REFERENCE_HEROES:
             rec = MissRecorder()
-            res = L0.run_check(episodes, seed, obs_only=obs_only, opponent=make(seed), on_step=rec)
+            res = L0.run_check(episodes,
+                               seed,
+                               obs_only=obs_only,
+                               opponent=make(seed),
+                               on_step=rec,
+                               accuracy=accuracy)
             refs.append(_cell(name, hero, None, None, res, rec, bptt_horizon))
         oracle = next(r for r in refs[-len(REFERENCE_HEROES):] if r["hero"] == "oracle")
         for aim, lstm in modes:
@@ -335,7 +348,12 @@ def run_eval(policy,
             # Each cell draws from its own torch stream, so cells reproduce in any order.
             with torch.random.fork_rng(devices=[]):
                 torch.manual_seed(seed)
-                res = L0.run_check(episodes, seed, opponent=make(seed), hero=hero, on_step=rec)
+                res = L0.run_check(episodes,
+                                   seed,
+                                   opponent=make(seed),
+                                   hero=hero,
+                                   on_step=rec,
+                                   accuracy=accuracy)
             row = _cell(name, "policy", aim, lstm, res, rec, bptt_horizon)
             # #152's gap = oracle - learner (TTK: learner - oracle): > 0 when the policy is worse.
             row["gap_to_oracle"] = {
@@ -347,6 +365,7 @@ def run_eval(policy,
     return {
         "episodes": episodes,
         "seed": seed,
+        "accuracy": refs[0]["accuracy"],
         "bptt_horizon": bptt_horizon,
         "references": refs,
         "cells": cells,
@@ -370,10 +389,14 @@ def load_checkpoint(path) -> tuple:
     return policy, cfg
 
 
-def env_mismatches(cfg) -> list[str]:
+def env_mismatches(cfg, accuracy: bool) -> list[str]:
     """The config.json env keys that differ from the arena preset every cell plays: the map
     label, the agent count, the pitch, crouch and jump switches, the round length, the laser
-    range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves).
+    range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves), and
+    the movement-inaccuracy cone (``accuracy``: the setting the harness ran, so the caller
+    passes it). A config.json
+    written before the ``accuracy`` key existed trained without the cone, so a missing key
+    reads False.
 
     KNOWN LIMIT: recoil is not compared: config.json has no recoil key (no training flag sets it).
     """
@@ -387,8 +410,10 @@ def env_mismatches(cfg) -> list[str]:
         "round_time_ticks": L0.ROUND_TIME,
         "laser_range": None,
         "max_turn_speed": None,
+        "accuracy": bool(accuracy),
     }
-    return [f"{k}: run {cfg.get(k)} vs harness {v}" for k, v in preset.items() if cfg.get(k) != v]
+    run = {k: cfg.get(k, False) if k == "accuracy" else cfg.get(k) for k in preset}
+    return [f"{k}: run {run[k]} vs harness {v}" for k, v in preset.items() if run[k] != v]
 
 
 def _fmt(v, spec):
@@ -401,9 +426,12 @@ def format_table(out: dict) -> str:
     wo = max(len(r["opponent"]) for r in rows)
     lines = [
         f"aim_eval: {out['episodes']} episodes per cell, seed {out['seed']}, "
-        f"bptt_horizon {out['bptt_horizon']}; e in hit half-windows asin(16/d)",
+        f"bptt_horizon {out['bptt_horizon']}; e in hit half-windows asin(16/d); movement-"
+        f"inaccuracy cone {'ON' if out.get('accuracy') else 'off'} (fast = share of fires at "
+        f">= 0.34 x max speed)",
         f"{'opponent':<{wo}} {'hero':<10} {'aim':<6} {'lstm':<7} kills  ttk50 ttk90 hit/f "
         f" |e|50 |e|90 off   along across lag(t)  se   ticks  hit/f<=H hit/f>H gap_k  gap_ttk"
+        f"  fast"
     ]
     for r in rows:
         gap = r.get("gap_to_oracle", {})
@@ -415,7 +443,8 @@ def format_table(out: dict) -> str:
             f"{_fmt(r['along_mean'], '+6.2f')} {_fmt(r['across_mean'], '+5.2f')} "
             f"{_fmt(r['lag_ticks'], '+6.2f')} {_fmt(r['lag_ticks_se'], '5.2f')} {r['track_ticks']:>6} "
             f"{_fmt(r['hit_per_fired_early'], '8.3f')} {_fmt(r['hit_per_fired_late'], '7.3f')} "
-            f"{_fmt(gap.get('kill_rate'), '+.2f'):>6} {_fmt(gap.get('ttk_median'), '+6.1f')}")
+            f"{_fmt(gap.get('kill_rate'), '+.2f'):>6} {_fmt(gap.get('ttk_median'), '+6.1f')}"
+            f"  {r['fast_per_fired']:.3f}")
         if (r["on_target_recount"], r["hit_recount"]) != (r["shots_on_target"], r["shots_hit"]):
             lines.append(f"  <-- WARNING: recount on_target {r['on_target_recount']} hit "
                          f"{r['hit_recount']} vs C {r['shots_on_target']} {r['shots_hit']}")
@@ -431,14 +460,22 @@ def main(argv=None) -> int:
     ap.add_argument("--episodes", type=int, default=100, help="rounds per cell (default 100)")
     ap.add_argument("--seed", type=int, default=0, help="env, walker and torch seed (default 0)")
     ap.add_argument("--json", type=Path, help="write the full result (per-episode rows too) here")
+    ap.add_argument(
+        "--accuracy",
+        action="store_true",
+        help="play every cell with the movement-inaccuracy cone on (EnvConfig.accuracy)")
     args = ap.parse_args(argv)
     policy, cfg = load_checkpoint(args.checkpoint)
-    out = run_eval(policy, int(cfg["bptt_horizon"]), episodes=args.episodes, seed=args.seed)
+    out = run_eval(policy,
+                   int(cfg["bptt_horizon"]),
+                   episodes=args.episodes,
+                   seed=args.seed,
+                   accuracy=args.accuracy)
     # The aim log-sigma parameters by state_dict name, before forward()'s clamp: one
     # ``aim_log_std``, or ``aim_log_std_t`` and ``aim_log_std_ct`` with split heads.
     log_std = {k: v.tolist() for k, v in policy.state_dict().items() if "aim_log_std" in k}
     out.update(checkpoint=str(args.checkpoint),
-               env_mismatches=env_mismatches(cfg),
+               env_mismatches=env_mismatches(cfg, out["accuracy"]),
                aim_log_std=log_std)
     for m in out["env_mismatches"]:
         print(f"WARNING: the run trained a different env, {m}")
