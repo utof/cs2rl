@@ -832,17 +832,15 @@ def test_obs_designated_carrier_bit_t_side():
     round start and never reassigned, surviving drop/pickup events. This gives
     the policy a stable identity signal that obs[22] cannot.
 
-    NOTE: env_reset() does NOT call compute_observations (it only zeroes the
-    buffer). The first populated observation arrives after env.step(). We
-    therefore take one zero-action step before checking the role bit values.
+    NOTE: since #157 env_reset computes the obs; the zero-action step is kept so
+    the role bits are read from a post-step obs, as before.
     """
     env = make_env(seed=11)
     try:
         env.reset(seed=11)
         g = env._c_env.game
         rid = g.round_designated_carrier_id
-        # Take one step to populate observations (env_reset zeroes the buffer;
-        # compute_observations only runs inside env_step).
+        # Take one step so the role bits are read from a post-step obs.
         actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         obs, *_ = env.step(actions)
 
