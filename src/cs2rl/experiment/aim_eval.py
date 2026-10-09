@@ -50,9 +50,15 @@ Read off the C state after each step: positions and facing as ``process_combat``
     error comes from resampling whole episodes. Aiming at where the target was one tick ago
     reads exactly 1 (ObsOracleActor); a one-tick velocity lead reads near 0 (OracleActor: 0.08
     to 0.16 against the three walkers on 2026-10-09).
-    ``lag_by_speed`` gives the same ratio per quintile of |w|: flat means the lag is
+    ``lag_by_speed`` gives the same ratio per quintile of |w|: flat means the trailing error is
     proportional to the angular speed. Tracking starts at the round's first on-target tick:
     the opening turn is acquisition, and its errors are tens of half-windows wide.
+    KNOWN LIMIT: ``lag_ticks`` reads below a pure delay of k > 1 ticks on short-hold and
+    stop-and-go walkers (inferred cause: a turn or stop inside the k ticks shrinks the
+    trailing error). A hero facing the bearing of 3 ticks ago read 2.70 on walker-2-8-stop,
+    2.89 on walker-4-16 and 2.98 on heldout-24-48 (100 rounds, 2026-10-09), and its
+    walker-2-8-stop curve was not flat. Compare lag within one opponent; a flat
+    ``lag_by_speed`` reads as stated only on long holds.
     WHY a median ratio, not a least-squares slope: the slope is carried by the few ticks with
     the largest |w|. For the Rung 1a checkpoint against walker-4-16 (sampled aim, 100 rounds)
     it read 1.65 while every |w| quintile's median ratio read 2.9 to 3.3.
@@ -71,6 +77,10 @@ PITFALLS
   (cs2_combat.h), so two cells on one seed share their first few spawns and then diverge (2 to
   9 shared with the oracle's cell on 2026-10-09). Compare cells as samples.
 * ``HIT_HALF_WIDTH`` mirrors cs2_combat.h; tests/experiment/test_aim_eval.py pins it.
+* KNOWN LIMIT: ``run_check`` reads the env-wide shot counters (cs2_combat.h counts every
+  participating agent's shots), so an opponent that shoots would mix its shots into
+  ``shots_fired`` and ``shots_hit`` and set off the recount WARNING (read in the code, not
+  run). No opponent here shoots; the duel (L2) needs per-agent counters.
 * This script never writes to ``outputs/`` and never touches training state.
 """
 from __future__ import annotations
