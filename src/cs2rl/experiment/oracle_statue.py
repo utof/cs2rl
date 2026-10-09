@@ -127,9 +127,11 @@ PITFALLS
 * Because it sees the statue on tick 1, the hero also fires on tick 1. On a
   spawn row whose opening yaw error is wider than max_turn_speed (56.3 deg
   against 45 in the arena) that shot leaves before the turn lands and misses:
-  the actors' fire rule does not wait for the aim. One wasted shot plus its
-  cooldown per wide-spawn round is why, at #157, 200 rounds went from 671 to
-  695 shots and p90 TTK from 11 to 13 while median TTK fell from 11 to 10.
+  the actors' fire rule does not wait for the aim. Measured at #157 over 200
+  rounds: 18 of the 24 extra shots (671 -> 695) are those openers, one per
+  wide-spawn round; the other 6 are extra hits, cause unmeasured. The wide
+  rounds alone set p90 TTK 13 (10 without them), while median TTK fell from
+  11 to 10.
 * Importing ``eval.baselines`` pulls in torch (``PolicyActor`` needs it). Nothing
   here uses it, but the import cost is real; that is the price of reusing the
   evaluator's actors instead of writing a second oracle that can drift from it.

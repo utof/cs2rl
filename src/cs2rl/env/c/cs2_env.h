@@ -215,10 +215,11 @@ static void env_reset(Dust2Env* env) {
 
     /* #157: the reset obs describes the fresh spawn state, so an agent's first
      * action of a round is taken on real information. It used to stay zeroed,
-     * which cost every actor (scripted or trained) one blind tick per round.
-     * Same call env_step makes last, on a vis matrix and alive counts built
-     * the same way. compute_observations writes env->observations only, and
-     * build_vis_matrix is pure, so no state the next step reads changes.
+     * which cost every actor that reads the obs one blind tick per round.
+     * The same compute_observations call env_step makes after combat, on a vis
+     * matrix and alive counts built the same way. compute_observations writes
+     * env->observations only, and build_vis_matrix is pure, so no state the
+     * next step reads changes.
      * PITFALL: do NOT add update_enemy_memory here. It writes enemy_mem_idx /
      * enemy_mem_tick, which env_step reads, so it would change dynamics, not
      * just this obs. It is also not needed: at reset nobody is moving or has
