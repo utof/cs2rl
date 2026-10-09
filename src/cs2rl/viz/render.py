@@ -62,6 +62,7 @@ from pathlib import Path
 import numpy as np
 import rerun as rr
 import rerun.blueprint as rrb
+import shapely
 
 from cs2rl.env.nav import TICK_RATE
 from cs2rl.eval.baselines import EYE_CROUCH, EYE_STAND
@@ -200,39 +201,30 @@ def room_walls(map_data) -> list[tuple[float, float, float, float]]:
 
     The training sim's line of sight (cs2_combat.h line_of_sight_2d) is blocked by dead space
     (no room) and by a crossing between two rooms that are not adjacent, at any height. So
-    each room edge is split at the other rooms' corners along it, and a piece is a wall when
-    the point just past its middle lies in no room, or in a room ``map_data.adjacency`` does
-    not join to this one. The arena's 24 cells are all adjacent, so only its outline is wall.
+    the walls are the boundary of the union of the room boxes (shapely), plus the shared edge
+    of every touching pair ``map_data.adjacency`` does not join, each drawn once. The arena's
+    24 cells are all adjacent, so only its outline is wall.
 
     WHY not the faces cs2_solids.h bakes (``binding.bake_solids``, what the raylib demo
     draws): they need a live env, and they mark the catwalk face over the bombsite as a 64 u
     lip, where training sight is blocked at any height. Merged per line, the two layouts are
     equal on the arena and on simple_map (tests/viz/test_replay.py).
 
-    KNOWN LIMIT: a wall is drawn once from each side it bounds (two coincident quads where
-    two non-adjacent rooms meet); rooms that overlap rather than touch are not split there.
+    KNOWN LIMIT: two rooms that overlap rather than touch merge in the union, so no wall is
+    drawn between them even when they are not adjacent.
     """
-    b = np.asarray(map_data.area_bounds, dtype=float)
+    boxes = [shapely.box(*r) for r in np.asarray(map_data.area_bounds, dtype=float)]
     adj = np.asarray(map_data.adjacency, dtype=bool)
-
-    def room_at(px, py):
-        hit = np.flatnonzero((b[:, 0] < px) & (px < b[:, 2]) & (b[:, 1] < py) & (py < b[:, 3]))
-        return int(hit[0]) if len(hit) else None
-
+    lines = [shapely.union_all(boxes).boundary]
+    for i, j in itertools.combinations(range(len(boxes)), 2):
+        if not adj[i, j]:
+            shared = boxes[i].intersection(boxes[j])
+            if shared.geom_type in ("LineString", "MultiLineString"):  # not a corner point
+                lines.append(shared)
     walls = []
-    eps = 0.5
-    for i, (x0, y0, x1, y1) in enumerate(b):
-        # (fixed coordinate, along-axis start, end, outward normal sign, edge runs along x?)
-        for fixed, lo, hi, out, along_x in ((y0, x0, x1, -1, True), (y1, x0, x1, 1, True),
-                                            (x0, y0, y1, -1, False), (x1, y0, y1, 1, False)):
-            axis = b[:, [0, 2]] if along_x else b[:, [1, 3]]
-            cuts = sorted({lo, hi, *(c for c in axis.ravel() if lo < c < hi)})
-            for a, c in itertools.pairwise(cuts):
-                mid = (a + c) / 2
-                px, py = (mid, fixed + out * eps) if along_x else (fixed + out * eps, mid)
-                j = room_at(px, py)
-                if j is None or not adj[i, j]:
-                    walls.append((a, fixed, c, fixed) if along_x else (fixed, a, fixed, c))
+    for line in lines:
+        for part in getattr(line, "geoms", [line]):
+            walls += [(ax, ay, bx, by) for (ax, ay), (bx, by) in itertools.pairwise(part.coords)]
     return walls
 
 
