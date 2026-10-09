@@ -491,8 +491,13 @@ def _hold_statue_above_ground(env, ground_z: float, offset: float) -> None:
     a.is_airborne = 1
 
 
-def _episode(env, ev, oracle, statue, statue_z, round_time):
+def _episode(env, ev, oracle, statue, statue_z, round_time, on_step=None):
     """One round. Returns a dict: ttk, rz samples, unmatched slots, spawn geometry.
+
+    ``on_step``, if given, is called after every step as ``on_step(tick, st_prev, st)``:
+    the snapshot the actors saw this tick (the reset state on tick 1) and the one after
+    the step, whose positions and facing are the ones ``process_combat`` used. It runs
+    on the terminal tick too, before the loop breaks.
 
     ``ttk`` is the tick index on which the statue's ``alive`` flag flipped to 0,
     counting from 1 (``g->tick`` after the k-th step is exactly k), or None if it
@@ -563,9 +568,11 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
         act[hero_rows], cont[hero_rows] = a_hero[hero_rows], c_hero[hero_rows]
 
         obs, _rew, term, trunc, _info = env.step(act, cont)
-        st = ev.reader.read().snapshot()
+        st_prev, st = st, ev.reader.read().snapshot()
         vis_prev, unmatched = vis_from_obs(obs, st, ev.map_diag)
         unmatched_total += int(unmatched)
+        if on_step is not None:
+            on_step(tick, st_prev, st)
 
         if st["alive"][HERO] and st["alive"][STATUE]:
             # Both standing, so rz reduces to the plain z difference: this is
@@ -600,7 +607,9 @@ def run_check(episodes: int = 200,
               statue_z: float = 0.0,
               round_time: int = ROUND_TIME,
               obs_only: bool = False,
-              opponent=None) -> dict:
+              opponent=None,
+              hero=None,
+              on_step=None) -> dict:
     """Play ``episodes`` oracle-vs-statue rounds; return the summary dict.
 
     ``obs_only`` swaps the ground-truth ``OracleActor`` for ``ObsOracleActor``
@@ -612,6 +621,10 @@ def run_check(episodes: int = 200,
     ``reset()`` and ``act(obs, st, vis_prev, env)``; only its CT rows reach the
     step). cs2rl.experiment.oracle_tracker passes an ``eval.walker.WalkerActor``.
     Everything else stays the same, the ``statue`` names included.
+
+    ``hero`` replaces the oracle on the T row the same way (``obs_only`` is then
+    ignored), and ``on_step`` is ``_episode``'s per-step callback.
+    cs2rl.experiment.aim_eval passes a ``PolicyActor`` and its recorder.
 
     ``per_episode`` holds one row per episode: its index, ``ttk``, the episode's
     ``shots_fired`` / ``shots_hit``, the spawn geometry and the opponent's motion
@@ -640,7 +653,7 @@ def run_check(episodes: int = 200,
     env = build_env(seed, round_time)
     try:
         ev = BaselineEvaluator(env, episodes=2, seed=seed)             # constants only, see docstring
-        oracle = _build_hero_actor(ev, seed, obs_only)
+        oracle = _build_hero_actor(ev, seed, obs_only) if hero is None else hero
         statue = IdleActor() if opponent is None else opponent
 
         ttks, rz_min, rz_max, unmatched = [], None, None, 0
@@ -652,7 +665,7 @@ def run_check(episodes: int = 200,
         per_episode = []
         opp_alive_ticks, opp_moving_ticks, opp_net_disps = 0, 0, []
         for ep in range(episodes):
-            r = _episode(env, ev, oracle, statue, statue_z, round_time)
+            r = _episode(env, ev, oracle, statue, statue_z, round_time, on_step)
             unmatched += r["unmatched"]
             opp_alive_ticks += r["opp_alive_ticks"]
             opp_moving_ticks += r["opp_moving_ticks"]
