@@ -66,7 +66,8 @@ import numpy as np
 from cs2rl.spec.action import ACTION_DIM, ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, AIM_DIM
 
 H_MOVE = ACTION_HEAD_NAMES.index("move")
-# Bins 1..8 are the eight directions; 0 is "no move" and is never drawn.
+# Bins 1..8 are the eight directions; 0 is "no move": never drawn from MOVE_BINS (a mix's
+# p_stop hold or duty gate yields it).
 MOVE_BINS = np.arange(1, ACTION_HEAD_SIZES[H_MOVE], dtype=np.int32)
 HOLD_MIN = 4
 HOLD_MAX = 16
@@ -77,7 +78,8 @@ class WalkerParams:
     """One walker family: ``hold`` ticks per direction (inclusive range, drawn per hold),
     ``p_stop`` = probability that a new hold presses nothing (bin 0), ``duty`` = fraction
     of ticks the direction is pressed. ``p_stop`` and ``duty`` are (lo, hi) ranges drawn
-    once per episode per row; a degenerate range (lo == hi) draws nothing."""
+    once per episode per row. A reset draws the ``p_stop`` (``duty``) uniform for all its rows
+    when any of them has a non-degenerate range, and nothing when none does."""
     hold: tuple[int, int] = (HOLD_MIN, HOLD_MAX)
     p_stop: tuple[float, float] = (0.0, 0.0)
     duty: tuple[float, float] = (1.0, 1.0)
@@ -109,6 +111,9 @@ class RandomWalker:
     With ``mix`` (a sequence of ``WalkerParams``; ``weights`` default uniform) every
     row's family, ``p_stop`` and ``duty`` are drawn at construction and again at each
     ``reset(rows)``; without it ``hold_min``/``hold_max`` apply to every row for ever.
+    ``weights`` are validated by numpy's ``Generator.choice(p=...)`` (wrong length, sum != 1,
+    negative: ValueError). KNOWN LIMIT: a walker with 0 rows never draws a family, so a bad
+    ``weights`` raises only once it has a row.
     """
 
     def __init__(self,
@@ -133,9 +138,6 @@ class RandomWalker:
             return
         self.weights = np.full(len(self.mix), 1.0 / len(self.mix)) if weights is None else \
             np.asarray(weights, dtype=np.float64)
-        if self.weights.shape != (len(self.mix), ) or abs(self.weights.sum() - 1.0) > 1e-9:
-            raise ValueError(f"weights must be {len(self.mix)} numbers summing to 1, "
-                             f"got {self.weights}")
         # Columns: hold lo, hi; p_stop lo, hi; duty lo, hi. reset() overwrites a row's
         # p_stop and duty "lo" columns with the drawn value.
         self._fam = np.array([[*f.hold, *f.p_stop, *f.duty] for f in self.mix], dtype=np.float64)
@@ -157,7 +159,8 @@ class RandomWalker:
         if not len(idx):
             return
         fam = self._fam[self.rng.choice(len(self.mix), size=len(idx), p=self.weights)]
-        for col in (2, 4):             # p_stop, then duty: draw only a non-degenerate range
+        for col in (2,
+                    4):                # p_stop, then duty: one uniform per reset row if any row is non-degenerate
             lo, hi = fam[:, col], fam[:, col + 1]
             if (lo != hi).any():
                 fam[:, col] = lo + (hi - lo) * self.rng.random(len(idx))

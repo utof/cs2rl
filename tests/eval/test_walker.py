@@ -197,8 +197,10 @@ def test_params_refuse_nonsense():
             bad()
     with pytest.raises(ValueError):
         RandomWalker(2, np.random.default_rng(0), mix=TRAIN_MIX, weights=(0.5, 0.5))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError):    # numpy's Generator.choice(p=...) refuses these
         RandomWalker(2, np.random.default_rng(0), mix=TRAIN_MIX, weights=(0.5, 0.5, 0.5))
+    with pytest.raises(ValueError):
+        RandomWalker(2, np.random.default_rng(0), mix=TRAIN_MIX, weights=(1.5, -0.5, 0.0))
 
 
 def test_a_statue_family_never_moves_and_a_held_out_family_always_does():
@@ -234,6 +236,26 @@ def test_reset_rows_redraws_only_those_rows_and_none_when_empty():
     assert (w._left[[1, 4]] == 0).all()
     w.reset(np.arange(6) < 2)          # a bool mask names rows too
     assert (w._left[:2] == 0).all() and np.array_equal(w._left[[2, 3, 5]], left[[2, 3, 5]])
+
+
+def test_reset_rows_draws_a_new_family_for_exactly_those_rows():
+    """The per-episode re-draw: a fresh draw is another family with probability
+    1 - sum(w^2) = 0.64 under TRAIN_MIX; kept rows never change."""
+    n = 4000
+    w = RandomWalker(n, np.random.default_rng(11), mix=TRAIN_MIX, weights=TRAIN_WEIGHTS)
+    before = w._row.copy()
+    w.reset(np.arange(n) < n // 2)
+    changed = (w._row != before).any(axis=1)
+    assert not changed[n // 2:].any()
+    assert abs(changed[:n // 2].mean() - (1 - sum(x * x for x in TRAIN_WEIGHTS))) < 0.05
+
+
+def test_reset_rows_restarts_the_duty_credit_of_those_rows_only():
+    w = RandomWalker(3, np.random.default_rng(0), mix=[WalkerParams(duty=(0.5, 0.5))])
+    w.step()
+    assert w._credit.tolist() == [0.5, 0.5, 0.5]
+    w.reset(np.array([0]))
+    assert w._credit.tolist() == [0.0, 0.5, 0.5]
 
 
 def test_a_mix_is_deterministic_per_seed():
