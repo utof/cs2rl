@@ -11,7 +11,7 @@ WHAT IS PINNED HERE
 * End to end on the walker: ObsOracleActor (aims where the target was) reads 1 tick of lag
   in every |w| quintile and a positive along; OracleActor (one-tick lead) reads under 0.3. The
   recounts equal the C counters, the killing shot included (``on_step`` runs on the terminal
-  tick). The lag's error bar resamples whole episodes.
+  tick). The lag's error bar resamples whole episodes, and the lag curve splits by |w| quintile.
 * ``PolicyActor(mean_aim=True)`` changes only the continuous aim: on the same inputs and
   seed it returns the sampled mode's discrete actions tick after tick, and cont = mu.
 * ``LstmZeroedEvery`` zeroes before forward ``period``, ``2 * period``, ... counted across
@@ -126,6 +126,13 @@ def test_the_lag_error_bar_resamples_whole_episodes():
     ratio = np.array([1.0] * 100 + [3.0])
     episode = np.array([0] * 100 + [1])
     assert _episode_bootstrap_se(ratio, episode) > 0.5
+
+
+def test_the_lag_curve_splits_by_angular_speed_quintile():
+    from cs2rl.experiment.aim_eval import _by_speed_quintile
+    # A lag that grows with |w|: each quintile holds two ticks and reads its own median.
+    speed = np.arange(1.0, 11.0)
+    assert _by_speed_quintile(speed, speed) == [[k + 0.5, k + 0.5, 2] for k in (1, 3, 5, 7, 9)]
 
 
 def test_mean_aim_changes_only_the_continuous_aim():
