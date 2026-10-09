@@ -125,6 +125,9 @@ real reset obs, so it sees round-start carrier changes the all-zero obs hid
         58ab098b00c67b6bb56e78bb7381f2b07df339888acaf412671a05af3dd0101b
     --steps 5000 --aim-mode bomb --n-active 3
         6b412b0ecf80d64f0a65cb2ec64e0fc713d5d32e9f3d933b065abab325acb5d5
+  All six predate the movement-inaccuracy cone and reproduce with it off (EnvConfig.accuracy
+  False, the default until 2026-10-09). With it on, the default since, the two random rows
+  reproduce and the track and bomb rows do not (measured, lane D).
 
 Usage:
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py [--steps 200] [--n-active 5]
