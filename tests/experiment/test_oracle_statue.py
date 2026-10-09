@@ -361,6 +361,7 @@ def test_a_sign_flipped_z_delta_fails_the_obs_only_exit_code(monkeypatch):
     re-checked against is the guard-blind-to-its-scope class, so this one is new.
     """
     from cs2rl.experiment import oracle_statue as mod
+    argv = ["--episodes", "2", "--seed", "0", "--statue-z", str(CROUCH_HEIGHT_OFFSET), "--obs-only"]
     monkeypatch.setattr(mod, "OBS_Z_SCALE", -mod.OBS_Z_SCALE)
     res = mod.run_check(episodes=2, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
@@ -369,6 +370,7 @@ def test_a_sign_flipped_z_delta_fails_the_obs_only_exit_code(monkeypatch):
     assert res["obs_rz_min"] == pytest.approx(-expect_rz, abs=0.05), res
     passed, checks = mod.verdict(res)
     assert not passed and [n for n, ok, _ in checks if not ok] == ["|obs_rz - C rz| <= 0.5"], checks
+    assert mod.main(argv) == 1
 
 
 def test_a_zeroed_reset_obs_fails_the_obs_only_exit_code(monkeypatch):
