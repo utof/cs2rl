@@ -2,7 +2,7 @@
 
 Before working on this repository:
 
-- Read `/home/vboxuser/.claude/projects/-media-vboxuser-G-samsung1-0utoffiles-code-cs2rl/memory/MEMORY.md`, then `progress.md` (the live pointer). Do not create dated session-state files.
+- Read `/home/vboxuser/.claude/projects/-media-vboxuser-G-samsung-0utoffiles-code-cs2rl/memory/MEMORY.md`, then `progress.md` (the live pointer). Do not create dated session-state files.
 - Also read the repository-root `CLAUDE.md` and follow its project-specific workflow rules.
 - For the live RL-overhaul status and working roadmap, read GitHub tracker `#82` after the memory. Treat the latest dated update as provisional: newer experiment evidence and explicit user decisions supersede it, and no later gate starts automatically.
 - Reconcile both with the live repository and the user's newest explicit instructions; newer instructions take precedence over stale state.
