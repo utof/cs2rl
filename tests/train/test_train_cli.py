@@ -51,6 +51,7 @@ def test_train_help_shows_current_cli():
             "--pin-pitch",                             # R0-E.2 (Task 9)
             "--crouch-enabled",
             "--jump-enabled",                          # Rung 1a T2b (stance parity)
+            "--accuracy",                              # the movement-inaccuracy cone
             "--opponent",                              # Rung 1a T3 (statue opponent)
             "--aim-entropy-bonus",                     # R0-E.3/4 (Task 10)
             "--aim-log-std-max",
@@ -147,6 +148,7 @@ def test_env_knob_cli_defaults(tmp_path):
         assert cfg[key] is None, key
     for key in ("crouch_enabled", "jump_enabled"):
         assert cfg[key] == 1 and type(cfg[key]) is int, key
+    assert cfg["accuracy"] is False, "an unflagged run must not turn the cone on"
 
 
 @pytest.mark.slow
@@ -176,6 +178,20 @@ def test_env_knob_cli_overrides_round_trip(tmp_path, flag, key, field, value, ex
     actual = getattr(env_cfg, field)
     assert actual == expected, field
     assert type(actual) is type(expected), field
+
+
+@pytest.mark.slow
+def test_accuracy_flag_round_trips(tmp_path):
+    """--accuracy is a bare switch: config.json records True, and the production
+    resolver turns that key back into EnvConfig.accuracy. A wrong dest= would leave
+    the key at the parser's False and the env without the cone."""
+    from types import SimpleNamespace
+
+    from cs2rl.train.config import env_config_from_args
+
+    cfg = _dump_config(tmp_path, "--accuracy")
+    assert cfg["accuracy"] is True
+    assert env_config_from_args(SimpleNamespace(**cfg)).accuracy is True
 
 
 @pytest.mark.slow
