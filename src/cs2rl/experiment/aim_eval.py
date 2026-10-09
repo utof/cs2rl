@@ -388,9 +388,12 @@ def main(argv=None) -> int:
     args = ap.parse_args(argv)
     policy, cfg = load_checkpoint(args.checkpoint)
     out = run_eval(policy, int(cfg["bptt_horizon"]), episodes=args.episodes, seed=args.seed)
+    # The aim log-sigma parameters by state_dict name, before forward()'s clamp: one
+    # ``aim_log_std``, or ``aim_log_std_t`` and ``aim_log_std_ct`` with split heads.
+    log_std = {k: v.tolist() for k, v in policy.state_dict().items() if "aim_log_std" in k}
     out.update(checkpoint=str(args.checkpoint),
                env_mismatches=env_mismatches(cfg),
-               aim_log_std=getattr(policy, "aim_log_std", torch.zeros(0)).detach().tolist())
+               aim_log_std=log_std)
     for m in out["env_mismatches"]:
         print(f"WARNING: the run trained a different env, {m}")
     print(format_table(out))
