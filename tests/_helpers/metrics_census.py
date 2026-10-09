@@ -140,9 +140,10 @@ EMITTER_SITES = (
 # otherwise gets redone from scratch by every reviewer — three of the six
 # pre-#204 entries look exactly like emitters to a grep (`metrics[...]`,
 # `summary = {...}`, `stats = {...}` with the same bare key names cs2_env uses)
-# and are not. The last two are experiment and BC-demo code that #204 moved into
-# src/cs2rl/, which puts it inside this sweep: each writes into a container that
-# shares a NAME with an island container (`stats`, `out`), and neither is a row.
+# and are not. The last three are experiment and BC-demo code in src/cs2rl/ (#204 moved
+# the first two there; aim_eval was written there), which puts them inside this sweep: each
+# writes into a container that shares a NAME with an island container (`stats`, `out`), and
+# none is a row.
 #
 # The list cannot rot into a blanket exemption: an entry that matches no hit fails
 # too, so deleting an emitter-shaped site here is as loud as adding one.
@@ -194,6 +195,11 @@ NON_ISLAND_WRITES = (
         "dict tag_summary builds from a FINISHED run's metrics.jsonl. It reads rows and never "
         "writes one — not a trainer row. Hit only because `out` is also an island container "
         "name."),
+    NonIslandWrite(
+        "experiment/aim_eval.py", "MissRecorder.summary",
+        "An OFFLINE eval report: one cell's miss summary, which aim_eval prints and writes "
+        "to the --json file its caller names, from scripted rounds it plays itself. It never "
+        "reaches a training row. Hit only because `out` is also an island container name."),
 )
 
 # Non-literal dicts merged into an island container that resolve, one hop back, to
@@ -1171,7 +1177,7 @@ def metrics_write_sites(src=None):
         predicate, so the gap only exists for a container that is never declared.
       * anything outside ``src/``. Scripts and notebooks are out of scope by spec.
         Experiment and BC-demo code that #204 moved INTO ``src/cs2rl/``
-        (``experiment/``, ``bc_demos.py``, ``deploy/``) is in scope, and its two
+        (``experiment/``, ``bc_demos.py``, ``deploy/``) is in scope, and its
         metrics-shaped writes are declared in NON_ISLAND_WRITES.
       * a key that reaches a row without a write shape at all, e.g. PufferLib's
         own `mean_and_log` literals (covered instead by PUFFERLIB_OWNED and a
