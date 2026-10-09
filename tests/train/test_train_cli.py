@@ -445,7 +445,7 @@ def test_opponent_flag_declared_with_both_modes():
     assert "choices=OPPONENT_MODES" in body and 'default="self"' in body, body
     assert 'dest="opponent"' in body, body
     config_src = (REPO_ROOT / "src" / "cs2rl" / "train" / "config.py").read_text()
-    assert 'OPPONENT_MODES = ("self", "noop")' in config_src
+    assert 'OPPONENT_MODES = ("self", "noop", "walker")' in config_src
 
 
 @pytest.mark.slow

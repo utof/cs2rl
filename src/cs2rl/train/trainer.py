@@ -43,6 +43,7 @@ import pufferlib
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
+from cs2rl.eval.walker import H_MOVE, TRAIN_MIX, TRAIN_WEIGHTS, RandomWalker
 from cs2rl.policy import _hybrid_sample_logits
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.train.entropy import WS_GRACE, WS_OFF, warmstart_entropy_state
@@ -635,7 +636,8 @@ class Cs2PuffeRL(PuffeRL):
         Per chunk of agent rows the vector env returns: count participating steps,
         ``_sample_actions`` (policy forward and hybrid sample), ``_process_rewards``,
         the opponent overrides (``_play_past_opponent`` when this epoch drew a past
-        policy, then ``_freeze_statue_opponents`` under ``--opponent noop``),
+        policy, then ``_freeze_statue_opponents`` under ``--opponent noop`` or
+        ``_walk_scripted_opponents`` under ``--opponent walker``),
         ``_store_step``, ``_collect_infos``, and send the (discrete, continuous)
         action pair to ``HybridAimVecEnv``.
 
@@ -692,6 +694,8 @@ class Cs2PuffeRL(PuffeRL):
                     self._play_past_opponent(step, past_policy, o_device, d, env_id, action_mask)
                 if self._self_play_mgr.opponent_mode == "noop":
                     self._freeze_statue_opponents(step, o_device.shape[0])
+                elif self._self_play_mgr.opponent_mode == "walker":
+                    self._walk_scripted_opponents(step, d, o_device.shape[0])
 
             profile("eval_copy", epoch)
             with torch.no_grad():
@@ -839,6 +843,35 @@ class Cs2PuffeRL(PuffeRL):
         step.logprob_d[opp_idx] = 0
         step.logprob_c[opp_idx] = 0
         step.value[opp_idx] = 0
+
+    def _walk_scripted_opponents(self, step, d, batch_n):
+        """``--opponent walker``: the opponent rows of ``step`` walk; all else is the statue's.
+
+        The rows get ``_freeze_statue_opponents``' overwrite (bin 0 on every head, zero
+        aim, logprobs and value 0), then their move head becomes the move bin of a
+        ``RandomWalker`` over ``TRAIN_MIX``. A row whose done flag ``d`` is set starts a
+        new episode, so it draws a new family there (``reset(rows)``). One walker per
+        trainer, built on the first call from ``config["seed"]`` and the opponent row
+        count, which must stay the same on every call (a chunk is the whole batch).
+
+        PITFALL: the walker's RNG and holds are not checkpointed. A resumed run rebuilds
+        it from the same seed, so it replays the walker draws from the start.
+        """
+        self._freeze_statue_opponents(step, batch_n)
+        opp_idx = torch.where(self._self_play_mgr.get_opponent_mask(batch_n,
+                                                                    self.config["device"]))[0]
+        # Created here, not in __init__: only this mode needs it, and a new attribute on
+        # every trainer would change the self/noop state fingerprint of trainer_equivalence.
+        walker = getattr(self, "_opponent_walker", None)
+        if walker is None:
+            rng = np.random.default_rng(self.config["seed"])
+            walker = self._opponent_walker = RandomWalker(len(opp_idx),
+                                                          rng,
+                                                          mix=TRAIN_MIX,
+                                                          weights=TRAIN_WEIGHTS)
+        assert len(opp_idx) == walker.n_rows, (len(opp_idx), walker.n_rows)
+        walker.reset(d[opp_idx].cpu().numpy() > 0)
+        step.action[opp_idx, H_MOVE] = torch.as_tensor(walker.step()).to(step.action)
 
     def _store_step(self, step, o, o_device, r, d, env_id, action_mask):
         """Write one chunk into the rollout buffers at each row's current segment slot."""
