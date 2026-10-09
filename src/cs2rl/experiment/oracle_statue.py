@@ -510,7 +510,8 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
     ``opp_net_disp``) is read off the C state after every step on which the
     opponent is still alive: ticks it was alive, ticks its planar speed exceeded
     ``OPP_MOVING_SPEED``, and the 2D distance from its spawn to its last live
-    position. All 0 for the statue; oracle_tracker's verdict reads them.
+    position. The last two are 0 for the statue; oracle_tracker's verdict
+    reads them.
 
     The spawn geometry (``spawn_dist``, ``yaw_err`` and both xy pairs, all read
     at reset before the first step) is what the FAIL report prints. WHY it is

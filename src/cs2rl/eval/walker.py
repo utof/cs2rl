@@ -20,8 +20,9 @@ cs2rl.eval.baselines actors, for the scripted-bot harnesses
 
 WHY
 ---
-It is the moving target of #152 layer L1 (the oracle against something that moves) and
-the scripted opponent for training against one. The hold is load-bearing: measured on
+It is the moving target of #152 layer L1 (the oracle against something that moves),
+built so a trainer can also use it as a scripted opponent: vectorised over any number of
+rows, and import-light. The hold is load-bearing: measured on
 2026-10-09 (the #152 L1 investigation), the Aug-31 Rung 1a checkpoint killed a walker
 that redraws its direction every tick in 99/100 rounds, about as often as a statue
 (100/100), and a hold-4..16 walker in 81/100. A per-tick redraw jitters in place.

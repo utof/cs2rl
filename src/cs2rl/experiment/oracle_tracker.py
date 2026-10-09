@@ -64,7 +64,8 @@ PITFALLS
 * ``run_check``'s summary names stay "statue" (``statue_xy``, ``STATUE``): they name
   the CT row, which the walker now drives.
 * The motion is read from the C state after each step, so the reset tick is not in
-  it, and a kill ends the episode's sample: an episode contributes TTK - 1 ticks.
+  it, and a kill ends the episode's sample: an episode whose kill lands on tick TTK
+  contributes TTK - 1 ticks.
 * This script never writes to ``outputs/`` and never touches training state.
 """
 from __future__ import annotations
@@ -155,7 +156,7 @@ def format_report(res: dict) -> str:
     lines.append("")
     lines.append(
         "PASS — the oracle tracks and kills a walking target (lead NOT certified)" if passed else
-        "FAIL — the oracle does not kill a walking target, or the target did not walk")
+        "FAIL — see the [XX] checks: no kill, no walk, or (--obs-only) an obs-encoding check")
     return "\n".join(lines)
 
 
@@ -168,7 +169,7 @@ def main(argv=None) -> int:
     ap.add_argument("--obs-only",
                     action="store_true",
                     help="aim from the hero's observation vector instead of the C state "
-                    "(oracle_statue's ObsOracleActor); same verdict")
+                    "(oracle_statue's ObsOracleActor); the verdict adds L0's obs-encoding checks")
     args = ap.parse_args(argv)
     res = run_tracker(episodes=args.episodes, seed=args.seed, obs_only=args.obs_only)
     print(format_report(res))

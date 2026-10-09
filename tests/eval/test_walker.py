@@ -125,8 +125,8 @@ def test_in_the_arena_the_walker_row_moves_never_turns_and_never_fires(seed):
             act, cont = walker.act(obs, None, None, env)
             obs, *_ = env.step(act, cont)
             moving += math.hypot(ag[STATUE].vx, ag[STATUE].vy) > 1.0
-        # Seeds 0-7 gave 36 to 40 moving ticks of 40 (2026-10-09). The floor is half:
-        # the walker is blind, so a hold can press it into geometry and stall it.
+        # The floor is half the ticks, not all: the walker is blind, so a hold can
+        # press it into geometry and stall it.
         assert moving >= 20, moving
         assert ag[STATUE].facing == facing0
         assert env._c_env.episode_stats.shots_fired == 0
