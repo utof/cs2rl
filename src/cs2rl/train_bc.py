@@ -100,9 +100,9 @@ PITFALLS (each one cost time; do not "simplify" them away)
   recorded obs against a live eval-rollout obs.
 * `Cs2Env.reset(seed=)` **ignores** its seed (the C RNG is seeded at init) —
   per-episode determinism needs a fresh `make_env(seed=...)`.
-* `env.reset()` does not fill `env.observations` (compute_observations runs
-  inside step) — a priming zero-action step is required before the first obs
-  read, exactly as in demo generation.
+* `env.reset()` fills `env.observations` (#157), but before the carrier pokes,
+  so a priming zero-action step is required before the first obs read, exactly
+  as in demo generation.
 """
 import os
 
@@ -828,7 +828,7 @@ def rollout_episode(policy,
     Mirrors bc_demos.generate_episode exactly EXCEPT that the policy, not
     ScriptedBomber, drives: fresh seeded env on the simple map, the carrier
     pokes (bomb + knife + designated-carrier role bit), a priming zero-action
-    step so env.observations is real (reset() only zeroes the buffer), then
+    step so env.observations carries the pokes (the reset obs predates them), then
     per-tick greedy actions for the carrier row with the other 9 agents held
     at all-zero actions — the same frozen-idle world the demos recorded.
 
@@ -854,7 +854,7 @@ def rollout_episode(policy,
         setup_bomb_carrier(env, carrier_idx)
         disc = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
         cont = np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32)
-        env.step(disc, cont)           # priming step: populates env.observations
+        env.step(disc, cont)           # priming step: lands the pokes in env.observations
 
         state = {} if carry_state else None
         planted, ticks, first_obs = False, 0, None

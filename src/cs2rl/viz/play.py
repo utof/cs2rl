@@ -137,7 +137,7 @@ def main(argv=None):
     # frame earlier and type-checked.
     env = make_env(config=EnvConfig(recoil=True), seed=args.seed, auto_reset=False, map_data=md)
     obs, _ = env.reset(seed=args.seed)
-    # First select sees zero obs (env_reset does not compute_observations). Same as record.
+    # First select sees the spawn-state obs: env_reset computes it (#157).
 
     act_buf = np.zeros((10, 7), dtype=np.int32)
     cont_buf = np.zeros((10, 2), dtype=np.float32)

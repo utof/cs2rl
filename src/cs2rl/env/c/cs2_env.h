@@ -213,10 +213,39 @@ static void env_reset(Dust2Env* env) {
      * field comment). compute_observations reads this for obs[OBS_GLOBAL_BASE + 13]. */
     g->round_designated_carrier_id = bomb_carrier;
 
+    /* #157: the reset obs describes the fresh spawn state, so an agent's first
+     * action of a round is taken on real information. It used to stay zeroed,
+     * which cost every actor that reads the obs one blind tick per round.
+     * The same compute_observations call env_step makes after combat, on a vis
+     * matrix and alive counts built the same way. compute_observations writes
+     * env->observations only, and build_vis_matrix is pure, so no state the
+     * next step reads changes.
+     * PITFALL: do NOT add update_enemy_memory here. It writes enemy_mem_idx /
+     * enemy_mem_tick, which env_step reads, so it would change dynamics, not
+     * just this obs. It is also not needed: at reset nobody is moving or has
+     * fired (nothing to hear), and a visible enemy is written from vis10
+     * directly, so init_agent's INVALID_AREA_IDX memory already gives the
+     * obs a memory update would. */
+    {
+        int8_t vis10[N_AGENTS][N_AGENTS];
+        int    t_alive  = 0;
+        int    ct_alive = 0;
+        build_vis_matrix(g, sd, vis10);
+        for (int i = 0; i < N_AGENTS; i++) {
+            if (!g->agents[i].alive)
+                continue;
+            if (g->agents[i].team == 0)
+                t_alive++;
+            else
+                ct_alive++;
+        }
+        compute_observations(env, t_alive, ct_alive, vis10);
+    }
+
     /* F8: masks must describe the fresh spawn state, not the previous round's
-     * terminal state (or all-zeros on first reset). Observations stay zeroed
-     * at reset (pre-existing contract); masks can't, because the sampler
-     * would divide by an all-invalid head. */
+     * terminal state (or all-zeros on first reset). Same reason as the obs
+     * above, plus one of its own: the sampler would divide by an all-invalid
+     * head. */
     compute_masks(env);
 }
 

@@ -1,7 +1,7 @@
 # src/cs2rl/experiment/
 
 Experiment tooling: the gates and analyses that read a run's files after it has finished,
-and one scripted-bot check. Each module with a `main()` is a command line, run by module name
+and two scripted-bot checks. Each module with a `main()` is a command line, run by module name
 from the repository root.
 
 ## What is here
@@ -12,6 +12,7 @@ from the repository root.
 | `smoke_read` | one Rung 1a run directory | the pre-flight assertions and one verdict, exit 0 PASS, 1 FAIL, 2 SMOKE INVALID |
 | `analyze_tplant` | one or more runs' `metrics.jsonl` | the bomb-plant timing drift report |
 | `oracle_statue` | nothing: it drives the Rung 1a env with two scripted actors | kill rate and one PASS/FAIL line |
+| `oracle_tracker` | nothing: `oracle_statue`'s harness with a random walker as the opponent (#152 L1) | one row per episode, the totals and one PASS/FAIL line |
 
 ```bash
 uv run python -m cs2rl.experiment.gate outputs/checkpoints/rung1

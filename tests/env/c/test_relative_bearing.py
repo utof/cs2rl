@@ -47,7 +47,8 @@ def test_enemy_bearing_is_facing_relative(simple_map, facing):
 
 def test_memory_fallback_is_rotated(simple_map):
     """n_active=2 so killing ONE CT does not end the round (at n=1 the round would
-    reset and the obs row would be all-zeros — a vacuous pass). Expected values are
+    end and auto-reset, so the obs row would be the next round's reset obs, not the
+    memory path under test). Expected values are
     computed independently from centroid_xy and inv_x/y_range, never read back."""
     env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=2), seed=1)
     try:

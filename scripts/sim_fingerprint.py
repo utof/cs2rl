@@ -26,8 +26,8 @@ anything the bomb lifecycle reads or writes:
       --steps 5000: it is the only mode that reaches defuse and detonation.
       Each terminal tick also hashes the outcome fields of info[0]
       (OUTCOME_KEYS), because auto_reset replaces that tick's observation
-      with the zeroed reset buffer, so a change seen only at round end would
-      otherwise be invisible. stderr adds a `bomb:` line of transition
+      with the next round's reset obs, so a change seen only at round end
+      would otherwise be invisible. stderr adds a `bomb:` line of transition
       counts (BombCounters), read from observations, terminal info and
       step_stats.bomb_planted (StepStats, which #164 does not change).
       KNOWN LIMIT: terminal-tick observations and masks are not hashed
@@ -107,6 +107,24 @@ at 9efe642. #164's canonical bomb state reproduces both:
         bd4f5f9d7ddac7321c644e633a4c572758a4ddf5f54604c969164b352c473a21
   At --steps 700 track mode reaches drop, pickup and plant but never defuse or
   detonation, and random mode reaches none of them.
+
+POST-#157 FINGERPRINTS (seed 7, rng-seed 123). #157 made env_reset compute the
+obs, and the reset obs is the first thing hashed, so every run below has a new
+hash (the parent 9617338 still reproduced both bomb-mode values above). A
+per-tick parent-vs-#157 compare on random/track/bomb found masks, rewards,
+terminals, GameState and every post-step obs bit-identical; only the reset obs
+(tick 0 and each auto-reset tick) differs. The stderr activity counters are
+unchanged, except one: BombCounters now takes a round's first `prev` from the
+real reset obs, so it sees round-start carrier changes the all-zero obs hid
+(`--n-active 3`: same_tick_pickup=2, was 0, both on a round's first tick).
+    --steps 200                  79f739495e1fb657688cb4274441c590386e319937d5c40aabb6c81f35e65f93
+    --steps 700                  b66e9b650594855b87222984504f8aae417a8bf80e9ed4c34f7a4c6588f95e6f
+    --steps 200 --aim-mode track 7a8f92545e083f8c9142561c5ea211ec87027c17bb7368c273e04d27fb4693ee
+    --steps 700 --aim-mode track b7adbbe2a2c9e81ef86624e3699c38d832e7f66220b5980e7e2579bd26f8c8f5
+    --steps 5000 --aim-mode bomb
+        58ab098b00c67b6bb56e78bb7381f2b07df339888acaf412671a05af3dd0101b
+    --steps 5000 --aim-mode bomb --n-active 3
+        6b412b0ecf80d64f0a65cb2ec64e0fc713d5d32e9f3d933b065abab325acb5d5
 
 Usage:
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py [--steps 200] [--n-active 5]
@@ -323,7 +341,7 @@ class BombCounters:
     sides of a bomb-representation change (#164 ran it against 9efe642).
     Counts are edges between consecutive non-terminal observations, so an
     event that starts and ends inside one tick is missed, and a terminal
-    tick is counted from info[0] instead (its observation is the zeroed reset buffer).
+    tick is counted from info[0] instead (its observation is the next round's reset obs).
     """
 
     def __init__(self, obs):
