@@ -17,8 +17,8 @@ arena harness (``run_check``: the Rung 1a env, jump off) against every opponent 
 Per opponent it also runs oracle_statue's two scripted heroes on the same seed:
 ``OracleActor`` (ground truth, one-tick lead) for the RL gap, and ``ObsOracleActor`` (aims
 where the obs says the target was, no lead) as the one-tick-lag reference. It prints one row
-per cell and writes every number, per-episode rows included, to ``--json``. Exit status is
-always 0: this is an instrument, not a gate.
+per cell and writes every number, per-episode rows included, to ``--json``. Exit status is 0
+whenever the run completes: it has no verdict.
 
     env PYTHONPATH=<checkout>/src UV_NO_SYNC=1 CUDA_VISIBLE_DEVICES= .venv/bin/python \\
         -m cs2rl.experiment.aim_eval outputs/checkpoints/rung1a/s0/rung1a-s0.pt --json out.json

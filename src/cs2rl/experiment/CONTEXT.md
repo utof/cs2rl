@@ -14,7 +14,7 @@ repository root.
 | `analyze_tplant` | one or more runs' `metrics.jsonl` | the bomb-plant timing drift report |
 | `oracle_statue` | nothing: it drives the Rung 1a env with two scripted actors | kill rate and one PASS/FAIL line |
 | `oracle_tracker` | nothing: `oracle_statue`'s harness with a random walker as the opponent (#152 L1) | one row per episode, the totals and one PASS/FAIL line |
-| `aim_eval` | one policy checkpoint and its run's `config.json`, played in `oracle_statue`'s harness against a statue and three walkers | one row per opponent, aim mode and LSTM mode: kills, TTK, hit/fired, the aim error split along and across the target's motion, the lag in ticks, and the gap to the scripted oracle; no verdict, exit 0 |
+| `aim_eval` | one policy checkpoint and its run's `config.json`, played in `oracle_statue`'s harness against a statue and three walkers | one row per opponent, aim mode and LSTM mode, plus the oracle and obs-oracle reference rows per opponent: kills, TTK, hit/fired, the aim error split along and across the target's motion, the lag in ticks, and on the policy rows the gap to the scripted oracle; no verdict, exit 0 when the run completes |
 
 ```bash
 uv run python -m cs2rl.experiment.gate outputs/checkpoints/rung1

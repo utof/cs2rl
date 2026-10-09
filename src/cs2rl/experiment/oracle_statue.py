@@ -624,7 +624,8 @@ def run_check(episodes: int = 200,
 
     ``hero`` replaces the oracle on the T row the same way (``obs_only`` is then
     ignored), and ``on_step`` is ``_episode``'s per-step callback.
-    cs2rl.experiment.aim_eval passes a ``PolicyActor`` and its recorder.
+    cs2rl.experiment.aim_eval passes a ``PolicyActor``, or an ``LstmZeroedEvery`` around
+    one, and its ``MissRecorder``.
 
     ``per_episode`` holds one row per episode: its index, ``ttk``, the episode's
     ``shots_fired`` / ``shots_hit``, the spawn geometry and the opponent's motion
