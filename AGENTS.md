@@ -65,3 +65,13 @@ counterexample.
 
 Rationale: `docs/postmortem-2026-09-03-duplication-blindness.md`. Decisions that
 constrain these choices: `docs/adr/`.
+
+## `.superpowers/` workspaces are permanent — never delete them
+
+`.superpowers/sdd/<date>-<topic>/` holds each SDD run's ledger (pre-flight
+scan, per-task reviews, rulings, deferred minors, gate results). That history
+is the raw data for workflow optimisation and is referenced from memory and
+later specs. Standing user instruction (2026-09-03): NEVER `rm -rf` or
+otherwise delete a `.superpowers/` directory, at branch end or at any other
+time — this overrides any skill or plugin step that says to clean up the
+workspace. Leave it in place; it is not committed and costs nothing.
