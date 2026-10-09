@@ -45,12 +45,17 @@ Read off the C state after each step: positions and facing as ``process_combat``
     the motion has no direction and a sample has no along/across.
   * per fire: |e_yaw| median and p90, the share fired outside the window, along and across
     means, and hit/fired for fires up to and after episode tick ``bptt_horizon`` (C4);
-  * per tick: ``lag_ticks``, the least-squares slope of along (rad) on |w| (rad/tick), whose
-    unit is ticks. Aiming at where the target was one tick ago reads 1 (ObsOracleActor); a
-    one-tick velocity lead reads about 0 (OracleActor). The fit starts at the round's first
-    on-target tick: the opening turn is acquisition, not tracking, and its errors are tens of
-    half-windows wide in a random direction (with them, the ObsOracleActor reference read
-    0.07 +- 0.36 instead of 1 against the hold-4..16 walker, on the pre-#157 env).
+  * per tick: ``lag_ticks``, the median over tracking ticks of along / |w| (rad over rad/tick),
+    i.e. how many ticks of the line of sight's motion the crosshair trails by; its standard
+    error comes from resampling whole episodes. Aiming at where the target was one tick ago
+    reads exactly 1 (ObsOracleActor); a one-tick velocity lead reads near 0 (OracleActor: 0.08
+    and 0.125 against the walkers on 2026-10-09).
+    ``lag_by_speed`` gives the same ratio per quintile of |w|: flat means the lag is
+    proportional to the angular speed. Tracking starts at the round's first on-target tick:
+    the opening turn is acquisition, and its errors are tens of half-windows wide.
+    WHY a median ratio, not a least-squares slope: the slope is carried by the few ticks with
+    the largest |w|. For the Rung 1a checkpoint against walker-4-16 (sampled aim, 100 rounds)
+    it read 1.65 while every |w| quintile's median ratio read 2.9 to 3.3.
 
 TRIPWIRES in every cell: ``on_target_recount`` and ``hit_recount`` (|e_yaw| < 1 at a fire,
 and a fire on which the opponent lost hp) must equal the C counters ``shots_on_target`` and
@@ -62,8 +67,9 @@ PITFALLS
 * Every tick of the arena has 2D line of sight, so nothing here is gated on visibility.
   KNOWN LIMIT: on a map with occlusion, gate on the pre-step visibility (the obs reads a target
   killed this tick as unseen, which would drop every killing shot).
-* Spawns are not paired across cells: the C RNG also rolls hit locations, so two cells on
-  one seed draw the same first spawn and then diverge. Compare cells as samples.
+* Spawns are not paired across cells: the env's one RNG also rolls hit locations
+  (cs2_combat.h), so two cells on one seed share their first few spawns and then diverge (2 to
+  9 shared with the oracle's cell on 2026-10-09). Compare cells as samples.
 * ``HIT_HALF_WIDTH`` mirrors cs2_combat.h; tests/experiment/test_aim_eval.py pins it.
 * This script never writes to ``outputs/`` and never touches training state.
 """
@@ -94,6 +100,8 @@ HIT_HALF_WIDTH = 16.0                  # u, MIRROR of cs2_combat.h
 
 # rad/tick. A walker crossing at 1 u/tick at the arena's longest 360 u spawn moves 2.8e-3.
 MIN_ANGULAR_SPEED = 1e-3
+MIN_TRACK_TICKS = 10                   # fewer tracking ticks than this: no lag reading
+BOOTSTRAP_DRAWS = 200
 
 
 def _walker(hold_min, hold_max):
@@ -179,11 +187,13 @@ class MissRecorder:
     def __init__(self, hero: int = L0.HERO, opp: int = L0.STATUE):
         self.hero, self.opp = hero, opp
         self.fires = []                # (episode tick, |e_yaw|, along, across, hit), e in half-windows
-        self.track = []                # (|w| rad/tick, along rad), from acquisition, with a direction
+        self.track = []                # (episode, |w| rad/tick, along rad): from acquisition, moving
+        self.episode = -1
         self.acquired = False          # this round's crosshair has been on target
 
     def __call__(self, tick, st_prev, st):
         h, o = self.hero, self.opp
+        self.episode += tick == 1
         if not (st_prev["alive"][h] and st_prev["alive"][o]):
             return
         e, w, d = aim_geometry(st_prev, st, h, o)
@@ -191,7 +201,7 @@ class MissRecorder:
         half = math.asin(min(HIT_HALF_WIDTH / max(d, 1e-6), 1.0))
         self.acquired = (self.acquired and tick > 1) or abs(e[0]) < half
         if split is not None and self.acquired:
-            self.track.append((math.hypot(w[0], w[1]), split[0]))
+            self.track.append((self.episode, math.hypot(w[0], w[1]), split[0]))
         if st["fired_this_tick"][h]:
             along, across = (math.nan, math.nan) if split is None else split
             self.fires.append((tick, abs(e[0]) / half, along / half, across / half,
@@ -205,7 +215,7 @@ class MissRecorder:
         def rate(sel):
             return float(hit[sel].mean()) if sel.any() else None
 
-        out: dict[str, float | int | None] = {
+        out: dict[str, float | int | list | None] = {
             "fires": len(f),
             "abs_err_median": float(np.median(abs_e)) if len(f) else None,
             "abs_err_p90": float(np.percentile(abs_e, 90)) if len(f) else None,
@@ -221,13 +231,42 @@ class MissRecorder:
             "track_ticks": len(self.track),
             "lag_ticks": None,
             "lag_ticks_se": None,
+            "lag_by_speed": None,
         }
-        if len(self.track) >= 10:
-            x, y = np.array(self.track).T
-            if np.ptp(x) > 0:
-                (slope, _), cov = np.polyfit(x, y, 1, cov=True)
-                out["lag_ticks"], out["lag_ticks_se"] = float(slope), float(math.sqrt(cov[0, 0]))
+        if len(self.track) >= MIN_TRACK_TICKS:
+            episode, speed, along_rad = np.array(self.track).T
+            ratio = along_rad / speed
+            out["lag_ticks"] = float(np.median(ratio))
+            out["lag_ticks_se"] = _episode_bootstrap_se(ratio, episode)
+            out["lag_by_speed"] = _by_speed_quintile(speed, ratio)
         return out
+
+
+def _episode_bootstrap_se(values, episode) -> float:
+    """The spread of ``median(values)`` over resamples of whole episodes.
+
+    WHY episodes, not ticks: consecutive ticks of a round are strongly correlated, so a
+    per-tick standard error understates the uncertainty. Seeded, so a cell reproduces.
+    """
+    groups = [values[episode == e] for e in np.unique(episode)]
+    rng = np.random.default_rng(0)
+    medians = [
+        np.median(np.concatenate([groups[i] for i in rng.integers(0, len(groups), len(groups))]))
+        for _ in range(BOOTSTRAP_DRAWS)
+    ]
+    return float(np.std(medians))
+
+
+def _by_speed_quintile(speed, ratio) -> list:
+    """``[|w| median, along/|w| median, ticks]`` per quintile of |w|: the lag curve (research
+    C3). A flat curve is a lag proportional to the target's angular speed."""
+    edges = np.quantile(speed, np.linspace(0.0, 1.0, 6))
+    idx = np.clip(np.searchsorted(edges, speed, side="right") - 1, 0, 4)
+    return [[
+        float(np.median(speed[idx == k])),
+        float(np.median(ratio[idx == k])),
+        int((idx == k).sum())
+    ] for k in range(5) if (idx == k).any()]
 
 
 def _cell(opponent, hero, aim, lstm, res, rec, horizon) -> dict:

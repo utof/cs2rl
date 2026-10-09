@@ -6,11 +6,12 @@ WHAT IS PINNED HERE
 * The decomposition's sign on hand-built geometry with a known answer: a crosshair that
   trails the target reads along > 0 whichever way the target moves, one that leads it reads
   along < 0, and a vertical error against horizontal motion is all across.
-* The recorder: errors in half-window units, the hit flag from the opponent's hp, and the lag
-  fit starting at the round's first on-target tick.
+* The recorder: errors in half-window units, the hit flag from the opponent's hp, and the lag's
+  tracking ticks starting at the round's first on-target tick.
 * End to end on the walker: ObsOracleActor (aims where the target was) reads 1 tick of lag
-  and a positive along; OracleActor (one-tick lead) reads about 0. The recounts equal the C
-  counters, the killing shot included (``on_step`` runs on the terminal tick).
+  in every |w| quintile and a positive along; OracleActor (one-tick lead) reads under 0.3. The
+  recounts equal the C counters, the killing shot included (``on_step`` runs on the terminal
+  tick). The lag's error bar resamples whole episodes.
 * ``PolicyActor(mean_aim=True)`` changes only the continuous aim: on the same inputs and
   seed it returns the sampled mode's discrete actions tick after tick, and cont = mu.
 * ``LstmZeroedEvery`` zeroes before forward ``period``, ``2 * period``, ... counted across
@@ -83,7 +84,7 @@ def test_a_vertical_error_against_horizontal_motion_is_across():
 def test_the_recorder_scales_by_the_half_window_and_fits_from_acquisition():
     from cs2rl.experiment.aim_eval import MissRecorder
     rec = MissRecorder(0, 1)
-    # Tick 1: the opening turn, 0.5 rad off; recorded as a fire, kept out of the lag fit.
+    # Tick 1: the opening turn, 0.5 rad off; recorded as a fire, kept out of the lag ticks.
     rec(1, _state((300.0, 0.0), 0.5), _state((300.0, 5.0), 0.5, fired=1))
     # Ticks 2..12: the crosshair stays where the target was a tick ago (1 tick of lag).
     for k in range(2, 13):
@@ -111,9 +112,20 @@ def test_lag_reads_one_tick_without_lead_and_zero_with_it():
         assert (s["fires"], s["on_target_recount"], s["hit_recount"]) == \
             (res["shots_fired"], res["shots_on_target"], res["shots_hit"]), hero
         out[hero] = s
-    assert out["obs-oracle"]["lag_ticks"] == pytest.approx(1.0, abs=0.05), out["obs-oracle"]
+    assert out["obs-oracle"]["lag_ticks"] == pytest.approx(1.0, abs=0.01), out["obs-oracle"]
+    assert [r for _, r, _ in out["obs-oracle"]["lag_by_speed"]] == pytest.approx([1.0] * 5,
+                                                                                 abs=0.01)
     assert out["obs-oracle"]["along_mean"] > 0.2
-    assert abs(out["oracle"]["lag_ticks"]) < 0.15, out["oracle"]
+    assert abs(out["oracle"]["lag_ticks"]) < 0.3, out["oracle"]
+
+
+def test_the_lag_error_bar_resamples_whole_episodes():
+    from cs2rl.experiment.aim_eval import _episode_bootstrap_se
+    # One long round tracking at 1 tick of lag, one single-tick round at 3. Resampling ticks
+    # would almost never move the median off 1; resampling rounds moves it a quarter of the time.
+    ratio = np.array([1.0] * 100 + [3.0])
+    episode = np.array([0] * 100 + [1])
+    assert _episode_bootstrap_se(ratio, episode) > 0.5
 
 
 def test_mean_aim_changes_only_the_continuous_aim():
