@@ -8,6 +8,9 @@ WHAT IS PINNED HERE
   along < 0, and a vertical error against horizontal motion is all across.
 * The recorder: errors in half-window units, the hit flag from the opponent's hp, and the lag's
   tracking ticks starting at the round's first on-target tick.
+* The summary on hand-set fires: hit/fired up to and after tick ``bptt_horizon``, the
+  off-window share, the |e| quantiles and the along/across means; and in every played cell the
+  gap to the oracle row of the same opponent, found by name, with the policy-worse sign.
 * End to end on the walker: ObsOracleActor (aims where the target was) reads 1 tick of lag
   in every |w| quintile and a positive along; OracleActor (one-tick lead) reads under 0.3. The
   recounts equal the C counters, the killing shot included (``on_step`` runs on the terminal
@@ -98,6 +101,18 @@ def test_the_recorder_scales_by_the_half_window_and_tracks_from_acquisition():
     assert s["fires"] == 2 and s["hit_recount"] == 1
     half = math.asin(16.0 / math.hypot(300.0, 5.0))
     assert rec.fires[0][1] == pytest.approx((0.5 - math.atan2(5.0, 300.0)) / half)
+
+
+def test_the_summary_splits_fires_at_the_horizon_and_by_the_window():
+    from cs2rl.experiment.aim_eval import MissRecorder
+    rec = MissRecorder(0, 1)
+    # (episode tick, |e_yaw|, along, across, hit) in half-windows; tick 64 is still early at 64.
+    rec.fires = [(10, 0.5, 0.5, 0.0, True), (64, 2.0, 2.0, 0.0, False), (65, 0.2, -0.2, 0.0, True)]
+    s = rec.summary(64)
+    assert (s["hit_per_fired_early"], s["hit_per_fired_late"], s["late_fires"]) == (0.5, 1.0, 1)
+    assert s["off_window_frac"] == pytest.approx(1 / 3) and s["on_target_recount"] == 2
+    assert (s["abs_err_median"], s["abs_err_p90"]) == pytest.approx((0.5, 1.7))
+    assert s["along_mean"] == pytest.approx(2.3 / 3) and s["across_mean"] == 0.0
 
 
 def test_lag_reads_one_tick_without_lead_and_zero_with_it():
@@ -280,6 +295,20 @@ def test_cells_reproduce_in_any_order():
     def cells(m, caller_seed):
         torch.manual_seed(caller_seed)                 # the caller's stream must not matter either
         out = aim_eval.run_eval(policy, 64, episodes=2, seed=3, opponents=walker, modes=m)
+
+        # Every gap is nonzero, else a flipped sign reads the same. KNOWN LIMIT: on these 2
+        # rounds the oracle and obs-oracle rows read the same, so a run_eval that took the
+        # obs-oracle row as its oracle would pass this check too.
+        for c in out["cells"]:
+            oracle = next(r for r in out["references"]
+                          if (r["opponent"], r["hero"]) == (c["opponent"], "oracle"))
+            gap = c["gap_to_oracle"]
+            assert all(v != 0 for v in gap.values()), gap
+            assert gap == {
+                "kill_rate": oracle["kill_rate"] - c["kill_rate"],
+                "ttk_median": c["ttk_median"] - oracle["ttk_median"],
+                "hit_per_fired": oracle["hit_per_fired"] - c["hit_per_fired"],
+            }
         return {(c["aim"], c["lstm"]): c["per_episode"] for c in out["cells"]}
 
     assert cells(modes, 1) == cells(modes[::-1], 2)

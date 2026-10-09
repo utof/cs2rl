@@ -318,7 +318,7 @@ def run_eval(policy,
             rec = MissRecorder()
             res = L0.run_check(episodes, seed, obs_only=obs_only, opponent=make(seed), on_step=rec)
             refs.append(_cell(name, hero, None, None, res, rec, bptt_horizon))
-        oracle = refs[-len(REFERENCE_HEROES)]
+        oracle = next(r for r in refs[-len(REFERENCE_HEROES):] if r["hero"] == "oracle")
         for aim, lstm in modes:
             hero = build_policy_hero(policy, aim, lstm, bptt_horizon)
             rec = MissRecorder()
@@ -327,6 +327,7 @@ def run_eval(policy,
                 torch.manual_seed(seed)
                 res = L0.run_check(episodes, seed, opponent=make(seed), hero=hero, on_step=rec)
             row = _cell(name, "policy", aim, lstm, res, rec, bptt_horizon)
+            # #152's gap = oracle - learner (TTK: learner - oracle): > 0 when the policy is worse.
             row["gap_to_oracle"] = {
                 "kill_rate": oracle["kill_rate"] - row["kill_rate"],
                 "ttk_median": row["ttk_median"] - oracle["ttk_median"],
