@@ -239,11 +239,17 @@ class PolicyActor:
     pass masks — sampling an invalid bin (e.g. shoot while on cooldown) is
     a no-op in C but shifts the discrete distribution away from what
     training actually saw.
+
+    ``mean_aim=True`` plays the Gaussian's mean as the continuous aim (cont = mu)
+    and changes nothing else. The sampler still draws the Gaussian, so the torch
+    RNG stream and every discrete head are the ones the sampled mode returns on the
+    same inputs (tests/experiment/test_aim_eval.py pins it). select_policy_actions_native's
+    "greedy" mode is not this: it also takes the argmax of every discrete head.
     """
 
     name = "policy"
 
-    def __init__(self, policy, device):
+    def __init__(self, policy, device, mean_aim=False):
         # Post-vendoring edit (Task 13): takes a LIVE policy module — the
         # training loop hands its own `policy` in; to evaluate a checkpoint, load it
         # with cs2rl.policy.load_policy_from_checkpoint first. The import below is
@@ -257,6 +263,7 @@ class PolicyActor:
         self.device = device
         self.policy = policy
         self.mts = float(self.policy.max_turn_speed.item())
+        self.mean_aim = bool(mean_aim)
         self.state = None
         self.done = np.zeros(N_AGENTS, dtype=np.float32)
 
@@ -275,6 +282,9 @@ class PolicyActor:
             act_t, cont_t, *_ = self._sample((logits, mu, log_std, value),
                                              max_turn_speed=self.mts,
                                              mask=mask_t)
+            if self.mean_aim:
+                # mu is tanh(.) * max_turn_speed (Dust2Policy), already inside the clamp.
+                cont_t = mu
         return (act_t.cpu().numpy().astype(np.int32), cont_t.cpu().numpy().astype(np.float32))
 
     def mark_done(self, terms, truncs):
