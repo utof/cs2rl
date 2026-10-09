@@ -404,8 +404,9 @@ class OracleActor:
     One-tick velocity lead: the aim command is applied AFTER movement in
     env_step, so the target has already moved by the time process_combat
     runs. Positions are extrapolated by v·dt (dt = 1/16 s). Without it, a
-    target crossing at 220 u/s moves ~14 u per tick, which is essentially
-    the entire 16 u hit window.
+    target crossing at 220 u/s moves ~14 u per tick, most of the 16 u hit
+    half-width: an unled shot still connects, with little margin. Against the
+    #152 L1 walker (p90 speed 220 u/s) switching the lead off lost no hit.
 
     Movement is coupled to aim by the sim (process_movement rotates the
     facing-local bin by a->facing), so "walk to the waypoint" necessarily

@@ -244,6 +244,11 @@ OBS_BEARING_MIN_DIST = 1.0
 FAILURE_GEOMETRY_KEYS = ("hero_xy", "statue_xy", "spawn_dist", "yaw_err")
 FAIL_DETAIL_LIMIT = 10
 
+# The opponent counts as moving on a tick when its C-state planar speed exceeds
+# this (u/s). The statue reads exactly 0; a walking agent reads tens to hundreds.
+# Read by cs2rl.experiment.oracle_tracker's walker-motion checks.
+OPP_MOVING_SPEED = 1.0
+
 
 def build_env(seed: int, round_time: int = ROUND_TIME):
     """The Rung 1a arena env, built for instrument use (auto_reset off).
@@ -295,9 +300,12 @@ class ObsOracleActor:
     PITFALLS
       * One-tick velocity lead is GONE. ``OracleActor`` extrapolates the target
         by v·dt because the aim command lands after movement; obs carries no
-        enemy velocity, so this actor aims where the enemy WAS. Harmless here
-        (the target is a statue) and a real handicap against anything that
-        moves — do not reuse it as a moving-target oracle.
+        enemy velocity, so this actor aims where the enemy WAS. Harmless against
+        the statue, and against the #152 L1 walker too: oracle_tracker measured
+        the same TTK and shot count per episode in both hero modes (2026-10-09),
+        because one tick of the walker's motion stays inside the hit half-width.
+        A real handicap against a target fast enough to leave it: do not use
+        this actor as the oracle for one.
       * ``obs[b + EN_DZ]`` is visibility-gated in C: 0 means "invisible", not
         "same height". Only the ``can_see`` branch below reads it.
       * Enemy stance is NOT in the obs, so the target's torso offset is assumed
@@ -498,6 +506,12 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
         reset state is the only one whose rz differs from the held value: the
         statue is still on the ground there.
 
+    The opponent's motion (``opp_alive_ticks``, ``opp_moving_ticks``,
+    ``opp_net_disp``) is read off the C state after every step on which the
+    opponent is still alive: ticks it was alive, ticks its planar speed exceeded
+    ``OPP_MOVING_SPEED``, and the 2D distance from its spawn to its last live
+    position. All 0 for the statue; oracle_tracker's verdict reads them.
+
     The spawn geometry (``spawn_dist``, ``yaw_err`` and both xy pairs, all read
     at reset before the first step) is what the FAIL report prints. WHY it is
     captured on every episode rather than re-derived for the failures: the C RNG
@@ -526,6 +540,8 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
     rz_samples = []
     observed_rz_samples = []
     hero_rows = slice(0, TEAM_SIZE)
+    opp_spawn_xy = opp_last_xy = geometry["statue_xy"]
+    opp_alive_ticks = opp_moving_ticks = 0
 
     # round_time + 1 for the same reason BaselineEvaluator uses it: the timeout
     # terminal lands ON the last tick, and a loop that falls through without a
@@ -552,6 +568,11 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
             # Both standing, so rz reduces to the plain z difference: this is
             # exactly the `tgt_rz` cs2_combat.h computed on this tick.
             rz_samples.append(float(st["z"][STATUE] - st["z"][HERO]))
+        if st["alive"][STATUE]:
+            opp_alive_ticks += 1
+            opp_moving_ticks += bool(
+                math.hypot(st["vx"][STATUE], st["vy"][STATUE]) > OPP_MOVING_SPEED)
+            opp_last_xy = (float(st["x"][STATUE]), float(st["y"][STATUE]))
         if ttk is None and not st["alive"][STATUE]:
             ttk = tick
         if term.any() or trunc.any():
@@ -564,6 +585,9 @@ def _episode(env, ev, oracle, statue, statue_z, round_time):
         "rz_samples": rz_samples,
         "observed_rz_samples": observed_rz_samples,
         "unmatched": unmatched_total,
+        "opp_alive_ticks": opp_alive_ticks,
+        "opp_moving_ticks": opp_moving_ticks,
+        "opp_net_disp": math.dist(opp_spawn_xy, opp_last_xy),
         **geometry
     }
 
@@ -572,13 +596,24 @@ def run_check(episodes: int = 200,
               seed: int = 0,
               statue_z: float = 0.0,
               round_time: int = ROUND_TIME,
-              obs_only: bool = False) -> dict:
+              obs_only: bool = False,
+              opponent=None) -> dict:
     """Play ``episodes`` oracle-vs-statue rounds; return the summary dict.
 
     ``obs_only`` swaps the ground-truth ``OracleActor`` for ``ObsOracleActor``
     (see ``_build_hero_actor`` and that class's docstring) and is the ONLY thing
     that differs between the two modes: same env, same seed, same statue, same
     loop, same thresholds.
+
+    ``opponent`` replaces the statue's ``IdleActor`` on the CT row (any actor with
+    ``reset()`` and ``act(obs, st, vis_prev, env)``; only its CT rows reach the
+    step). cs2rl.experiment.oracle_tracker passes an ``eval.walker.WalkerActor``.
+    Everything else stays the same, the ``statue`` names included.
+
+    ``per_episode`` holds one row per episode: its index, ``ttk``, the episode's
+    ``shots_fired`` / ``shots_hit``, the spawn geometry and the opponent's motion
+    (``_episode``). ``opp_moving_frac`` and ``opp_net_disp_median`` aggregate the
+    motion over the run.
 
     ``obs_blind_ticks`` / ``obs_inconsistent_slots`` come back as None (not 0)
     in ground-truth mode: that actor never reads an obs slot, so it cannot make
@@ -603,7 +638,7 @@ def run_check(episodes: int = 200,
     try:
         ev = BaselineEvaluator(env, episodes=2, seed=seed)             # constants only, see docstring
         oracle = _build_hero_actor(ev, seed, obs_only)
-        statue = IdleActor()
+        statue = IdleActor() if opponent is None else opponent
 
         ttks, rz_min, rz_max, unmatched = [], None, None, 0
         observed_rz = []
@@ -611,9 +646,14 @@ def run_check(episodes: int = 200,
                                 "shots_on_target", "shots_hit", "shots_stance_blocked"), 0)
         kills = 0
         failures = []
+        per_episode = []
+        opp_alive_ticks, opp_moving_ticks, opp_net_disps = 0, 0, []
         for ep in range(episodes):
             r = _episode(env, ev, oracle, statue, statue_z, round_time)
             unmatched += r["unmatched"]
+            opp_alive_ticks += r["opp_alive_ticks"]
+            opp_moving_ticks += r["opp_moving_ticks"]
+            opp_net_disps.append(r["opp_net_disp"])
             observed_rz += r["observed_rz_samples"]
             if r["rz_samples"]:
                 ep_lo, ep_hi = min(r["rz_samples"]), max(r["rz_samples"])
@@ -627,6 +667,20 @@ def run_check(episodes: int = 200,
             else:
                 failures.append({"episode": ep, **{k: r[k] for k in FAILURE_GEOMETRY_KEYS}})
             ttks.append(r["ttk"])
+            per_episode.append({
+                "episode": ep,
+                "ttk": r["ttk"],
+                "shots_fired": int(es.shots_fired),
+                "shots_hit": int(es.shots_hit),
+                **{
+                    k: r[k]
+                    for k in FAILURE_GEOMETRY_KEYS
+                },
+                **{
+                    k: r[k]
+                    for k in ("opp_alive_ticks", "opp_moving_ticks", "opp_net_disp")
+                },
+            })
     finally:
         env.close()
 
@@ -662,6 +716,9 @@ def run_check(episodes: int = 200,
         "obs_rz_min": obs_actor.rz_min if obs_actor is not None else None,
         "obs_rz_max": obs_actor.rz_max if obs_actor is not None else None,
         "failures": failures,
+        "per_episode": per_episode,
+        "opp_moving_frac": opp_moving_ticks / max(opp_alive_ticks, 1),
+        "opp_net_disp_median": float(np.median(opp_net_disps)),
         **totals,
     }
 
