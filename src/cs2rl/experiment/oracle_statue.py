@@ -975,10 +975,12 @@ def main(argv=None) -> int:
                     "mode that kills on ground truth but not here is an obs-encoding bug, which "
                     "is invisible to the default run — see the module docstring.")
     ap.add_argument("--accuracy",
-                    action="store_true",
-                    help="turn on the movement-inaccuracy cone (EnvConfig.accuracy). The Rung 1a "
-                    "smoke ran without it, so this is a different env, and the PASS bar is the "
-                    "same one.")
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="the movement-inaccuracy cone (EnvConfig.accuracy): 1 on, 0 off. "
+                    "Default: EnvConfig.accuracy. The Rung 1a smoke ran without it, so a run "
+                    "with it is a different env, and the PASS bar is the same one.")
     args = ap.parse_args(argv)
 
     res = run_check(episodes=args.episodes,
@@ -986,7 +988,7 @@ def main(argv=None) -> int:
                     statue_z=args.statue_z,
                     round_time=args.round_time,
                     obs_only=args.obs_only,
-                    accuracy=args.accuracy)
+                    accuracy=None if args.accuracy is None else bool(args.accuracy))
     print(format_summary(res))
     return 0 if verdict(res)[0] else 1
 

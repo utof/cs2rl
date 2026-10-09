@@ -13,7 +13,8 @@ WHAT IS PINNED, and the knock-out each one catches:
     the cone geometry (law 0, r = R u). Law 1 (r = R sqrt(u)) gives about 0.17 there against
     law 0's 0.39 (lane D, D-Q2), dozens of standard errors apart;
   * the plumbing below the CLI (the resolver, config.json's key, the Modal mirror, resume).
-    The CLI flag itself is tests/train/test_train_cli.py::test_accuracy_flag_round_trips.
+    The CLI flag itself is tests/train/test_train_cli.py::test_env_knob_cli_overrides_round_trip
+    (its accuracy-off and accuracy-on rows) and test_env_knob_cli_defaults.
 
 SETUP: the arena duel map, one agent a side (rows 0 and 5), rifle drawn. The shooter is placed
 so that AFTER this tick's ground friction it moves along -x at the wanted speed and is `dist`
@@ -219,8 +220,8 @@ def test_the_resolver_config_json_and_modal_carry_the_switch():
     assert env_config_from_args(SimpleNamespace(accuracy=True)).accuracy is True
     assert env_config_from_args(SimpleNamespace()).accuracy is EnvConfig().accuracy
     assert EnvConfig(accuracy=True).to_config_dict()["accuracy"] is True
-    assert request.LIVE_TRAIN_OPTION_ARITY["--accuracy"] == 0
-    assert request.validate_train_args(["--timesteps", "1000", "--accuracy"]) == 1000
+    assert request.LIVE_TRAIN_OPTION_ARITY["--accuracy"] == 1
+    assert request.validate_train_args(["--timesteps", "1000", "--accuracy", "0"]) == 1000
 
 
 def test_a_run_from_before_the_key_cannot_resume(tmp_path):

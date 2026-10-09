@@ -42,7 +42,7 @@ if __name__ == "__main__":
 
     # The env's own defaults, read from the dataclass that declares them, so the
     # CLI cannot drift from the env (spec 2026-09-03 R11). Bound once here rather
-    # than per-flag: three flags below read it, and a second EnvConfig() would be
+    # than per-flag: four flags below read it, and a second EnvConfig() would be
     # a second place to look when a default changes.
     _ENV_DEFAULTS = EnvConfig()
 
@@ -178,12 +178,14 @@ if __name__ == "__main__":
                         "duels; an airborne target sits outside the 36u vertical semi-axis and "
                         "is an unobservable guaranteed miss). Default 1 = today's env.")
     parser.add_argument("--accuracy",
-                        action="store_true",
+                        type=int,
+                        choices=(0, 1),
+                        default=int(_ENV_DEFAULTS.accuracy),
                         dest="accuracy",
-                        help="Turn on the movement-inaccuracy cone (EnvConfig.accuracy): every "
+                        help="The movement-inaccuracy cone (EnvConfig.accuracy): 1 = every "
                         "shot leaves on a random cone whose radius grows with the shooter's "
-                        "speed above 0.34 x the weapon's max speed (cs2_weapons.h). Off by "
-                        "default = today's exact ray.")
+                        "speed above 0.34 x the weapon's max speed (cs2_weapons.h); 0 = the "
+                        "exact aimed ray. Default: EnvConfig.accuracy.")
     parser.add_argument("--opponent",
                         choices=OPPONENT_MODES,
                         default="self",

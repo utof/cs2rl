@@ -141,14 +141,18 @@ def test_env_knob_cli_defaults(tmp_path):
     """An unflagged run keeps env-selected numeric knobs and enabled stance actions.
 
     A parser default of zero would silently mask stance actions; a concrete
-    numeric knob default would replace the env's choice in every run.
+    numeric knob default would replace the env's choice in every run. The cone
+    follows EnvConfig's default: a parser literal (a store_true's False) would
+    keep an unflagged run off whatever the env declares.
     """
+    from cs2rl.env.config import EnvConfig
+
     cfg = _dump_config(tmp_path)
     for key in ("round_time_ticks", "laser_range", "max_turn_speed"):
         assert cfg[key] is None, key
     for key in ("crouch_enabled", "jump_enabled"):
         assert cfg[key] == 1 and type(cfg[key]) is int, key
-    assert cfg["accuracy"] is False, "an unflagged run must not turn the cone on"
+    assert cfg["accuracy"] is EnvConfig().accuracy, "the CLI default drifted from EnvConfig's"
 
 
 @pytest.mark.slow
@@ -158,8 +162,13 @@ def test_env_knob_cli_defaults(tmp_path):
     ("--max-turn-speed", "max_turn_speed", "max_turn_speed", "0.375", 0.375),
     ("--crouch-enabled", "crouch_enabled", "crouch_enabled", "0", 0),
     ("--jump-enabled", "jump_enabled", "jump_enabled", "0", 0),
+    ("--accuracy", "accuracy", "accuracy", "0", False),
+    ("--accuracy", "accuracy", "accuracy", "1", True),
 ],
-                         ids=["round-time", "laser-range", "max-turn-speed", "crouch", "jump"])
+                         ids=[
+                             "round-time", "laser-range", "max-turn-speed", "crouch", "jump",
+                             "accuracy-off", "accuracy-on"
+                         ])
 def test_env_knob_cli_overrides_round_trip(tmp_path, flag, key, field, value, expected):
     """A missing flag, wrong dest or coercion cannot hide behind resolver defaults.
 
@@ -178,20 +187,6 @@ def test_env_knob_cli_overrides_round_trip(tmp_path, flag, key, field, value, ex
     actual = getattr(env_cfg, field)
     assert actual == expected, field
     assert type(actual) is type(expected), field
-
-
-@pytest.mark.slow
-def test_accuracy_flag_round_trips(tmp_path):
-    """--accuracy is a bare switch: config.json records True, and the production
-    resolver turns that key back into EnvConfig.accuracy. A wrong dest= would leave
-    the key at the parser's False and the env without the cone."""
-    from types import SimpleNamespace
-
-    from cs2rl.train.config import env_config_from_args
-
-    cfg = _dump_config(tmp_path, "--accuracy")
-    assert cfg["accuracy"] is True
-    assert env_config_from_args(SimpleNamespace(**cfg)).accuracy is True
 
 
 @pytest.mark.slow

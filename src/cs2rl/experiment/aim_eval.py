@@ -460,17 +460,19 @@ def main(argv=None) -> int:
     ap.add_argument("--episodes", type=int, default=100, help="rounds per cell (default 100)")
     ap.add_argument("--seed", type=int, default=0, help="env, walker and torch seed (default 0)")
     ap.add_argument("--json", type=Path, help="write the full result (per-episode rows too) here")
-    ap.add_argument(
-        "--accuracy",
-        action="store_true",
-        help="play every cell with the movement-inaccuracy cone on (EnvConfig.accuracy)")
+    ap.add_argument("--accuracy",
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="play every cell with the movement-inaccuracy cone (EnvConfig.accuracy) "
+                    "on (1) or off (0). Default: EnvConfig.accuracy.")
     args = ap.parse_args(argv)
     policy, cfg = load_checkpoint(args.checkpoint)
     out = run_eval(policy,
                    int(cfg["bptt_horizon"]),
                    episodes=args.episodes,
                    seed=args.seed,
-                   accuracy=args.accuracy)
+                   accuracy=None if args.accuracy is None else bool(args.accuracy))
     # The aim log-sigma parameters by state_dict name, before forward()'s clamp: one
     # ``aim_log_std``, or ``aim_log_std_t`` and ``aim_log_std_ct`` with split heads.
     log_std = {k: v.tolist() for k, v in policy.state_dict().items() if "aim_log_std" in k}
