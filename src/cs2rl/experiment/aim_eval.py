@@ -186,8 +186,8 @@ class MissRecorder:
 
     def __init__(self, hero: int = L0.HERO, opp: int = L0.STATUE):
         self.hero, self.opp = hero, opp
-        self.fires = []                # (episode tick, |e_yaw|, along, across, hit), e in half-windows
-        self.track = []                # (episode, |w| rad/tick, along rad): from acquisition, moving
+        self.fires = []                # (episode tick, |e_yaw|, along, across, hit), half-windows
+        self.track = []                # (episode, |w| rad/tick, along rad) once acquired, moving
         self.episode = -1
         self.acquired = False          # this round's crosshair has been on target
 
