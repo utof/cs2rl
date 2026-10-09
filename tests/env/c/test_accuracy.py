@@ -9,6 +9,8 @@ WHAT IS PINNED, and the knock-out each one catches:
   * the units: the rifle row is the averaged AK-47/M4A4 research row, and C's per-shot radius
     is 0.001 x the mrad sum (rad), standing and at full speed;
   * the 0.34 x move_speed threshold, from both sides, and the crouch term;
+  * the tilt at a non-zero pitch: the exact rotation (the `up` axis carries the pitch terms),
+    with the cone's next two draws set to a known (u, t);
   * the statistics: the full-speed hit rate at 360 u matches an independent numpy integral of
     the cone geometry (law 0, r = R u). Law 1 (r = R sqrt(u)) gives about 0.17 there against
     law 0's 0.39 (lane D, D-Q2), dozens of standard errors apart;
@@ -31,7 +33,7 @@ import pytest
 
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
-from cs2rl.env.map import make_arena_duel_map
+from cs2rl.env.map import make_arena_duel_map, make_simple_map
 from tests._helpers.scenario import place_agent, ready_to_fire, set_clip, weapon_defs, zero_actions
 
 DT = 1.0 / 16.0
@@ -235,3 +237,115 @@ def test_a_run_from_before_the_key_cannot_resume(tmp_path):
     (tmp_path / "config.json").write_text(json.dumps({"seed": 1}))
     with pytest.raises(SystemExit, match="accuracy"):
         check_resume_config(tmp_path, {"seed": 1, "accuracy": False})
+
+
+# The pitched-tilt scene, make_simple_map: the shooter ends the step at area 5's centroid
+# (floor 0), the target stands on area 6 (floor 64), and the two see each other
+# (test_pitch.py's elevated-target pair). Eye and torso are both 48 u above the floor
+# (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND, cs2_combat.h).
+PITCH_SHOOTER_XY, PITCH_TARGET_XY, EYE_TORSO_Z = (575.0, 352.0), (960.0, 304.0), 48.0
+
+
+def _cone_state(u_min, t_frac, tol):
+    """A state for env->accuracy_rng whose next two draws (accuracy_unit, u first) give
+    u >= u_min and t / (2 pi) within tol of t_frac, found by walking states 1, 2, ..."""
+    for state in range(1, 10_000_000):
+        x1 = _xorshift32(state)
+        x2 = _xorshift32(x1)
+        u, f = (x1 >> 8) / 2**24, (x2 >> 8) / 2**24
+        if u >= u_min and abs(f - t_frac) < tol:
+            return state, u, 2.0 * math.pi * f
+    raise AssertionError("no state gives that (u, t)")
+
+
+def _tilted(yaw, pitch, r, t, pitch_terms=True):
+    """accuracy_cone_ray in float64. pitch_terms=False is the knock-out's up = (0, 0, 1)."""
+    cy, sy, cp, sp = math.cos(yaw), math.sin(yaw), math.cos(pitch), math.sin(pitch)
+    d = np.array([cp * cy, cp * sy, sp])
+    right = np.array([sy, -cy, 0.0])
+    up = np.array([-sp * cy, -sp * sy, cp]) if pitch_terms else np.array([0.0, 0.0, 1.0])
+    return math.cos(r) * d + math.sin(r) * (math.cos(t) * right + math.sin(t) * up)
+
+
+def _gate(eye, torso, d):
+    """cs2_combat.h's hit gate for the ray d (unit or not) at a standing target: <= 1 hits."""
+    rv = torso - eye
+    p = rv - (rv @ d) * d
+    return (p[0]**2 + p[1]**2) / HALF_W**2 + p[2]**2 / HALF_H**2
+
+
+def _pitched_shot(env, state, yaw, pitch, speed):
+    """One full-speed rifle shot at (yaw, pitch) with env->accuracy_rng set to `state`; returns
+    the StepStats and the eye and target-torso positions read after the step."""
+    g = env._c_env.game
+    a, tg = g.agents[0], g.agents[5]
+    place_agent(env, 5, *PITCH_TARGET_XY)
+    tg.hp = 1000
+    place_agent(env, 0, PITCH_SHOOTER_XY[0] + speed * DT, PITCH_SHOOTER_XY[1])
+    a.vx, a.vy = -_pre_speed(speed), 0.0
+    a.facing = yaw
+    set_clip(env, 0, weapon_defs()[0]["mag_size"])
+    ready_to_fire(env, 0)
+    env._c_env.accuracy_rng = state
+    acts, cont = zero_actions()
+    acts[0, 1] = 1
+    cont[0, 1] = pitch                 # pitch is absolute per step (test_pitch.py, v1c)
+    env.step(acts, cont)
+    ss = env._c_env.step_stats
+    assert ss.shots_fired == 1
+    assert math.hypot(a.vx, a.vy) == pytest.approx(speed, abs=1e-3), "the shot speed moved"
+    eye = np.array([a.x, a.y, a.z + EYE_TORSO_Z])
+    return ss, eye, np.array([tg.x, tg.y, tg.z + EYE_TORSO_Z])
+
+
+def test_a_pitched_shot_tilts_by_the_exact_rotation():
+    """At pitch ~0.33 the cone's ray is the exact rotation, so its `up` axis carries the pitch.
+
+    The cone's next two draws are set to u ~ 1 and t ~ 3 pi / 2 (a tilt straight down by
+    r ~ R). Shot A aims so that the PREDICTED tilted ray passes through the elevated target's
+    torso: it hits. Shot B aims straight at the torso with the same draws: the tilt takes it
+    r below, a miss, so the cone is live here. A tilt built with up = (0, 0, 1) is the same
+    ray at pitch 0, which every other test uses; here its ray misses shot A's target (its gate
+    value is asserted below from cs2_combat.h's own gate).
+    """
+    speed = weapon_defs()[0]["move_speed"]
+    R = _rifle_R(speed)
+    state, u, t = _cone_state(0.99, 0.75, 0.005)
+    r = R * u                                                          # law 0
+    env = make_env(config=EnvConfig(n_active_per_team=1,
+                                    pin_pitch=0,
+                                    crouch_enabled=1,
+                                    jump_enabled=0,
+                                    round_time=1_000_000,
+                                    accuracy=True),
+                   map_data=make_simple_map(),
+                   auto_reset=False,
+                   seed=0)
+    try:
+        env.reset()
+        eye0 = np.array([*PITCH_SHOOTER_XY, EYE_TORSO_Z])
+        torso0 = np.array([*PITCH_TARGET_XY, 64.0 + EYE_TORSO_Z])
+        aim = (torso0 - eye0) / np.linalg.norm(torso0 - eye0)
+                                                                       # Shot A's (yaw, pitch): solve _tilted(yaw, pitch, r, t) = aim by fixed-point steps.
+        yaw, pitch = math.atan2(aim[1], aim[0]), math.asin(aim[2])
+        for _ in range(100):
+            d = _tilted(yaw, pitch, r, t)
+            yaw += math.atan2(aim[1], aim[0]) - math.atan2(d[1], d[0])
+            pitch += math.asin(aim[2]) - math.asin(d[2])
+        assert np.allclose(_tilted(yaw, pitch, r, t), aim, atol=1e-9)
+        assert pitch > 0.3
+
+        ss, eye, torso = _pitched_shot(env, state, yaw, pitch, speed)
+        assert ss.cone_radius_sum == pytest.approx(R, rel=1e-6)
+        assert np.allclose(eye, eye0, atol=1e-3) and np.allclose(torso, torso0, atol=1e-3)
+        assert _gate(eye, torso, _tilted(yaw, pitch, r, t)) < 0.01
+        ko = _gate(eye, torso, _tilted(yaw, pitch, r, t, pitch_terms=False))
+        assert ko > 2.0, f"the no-pitch-terms ray must miss this target clearly, gate {ko}"
+        assert ss.shots_hit == 1, "the predicted tilted ray missed: the tilt is not the rotation"
+
+        yaw_b, pitch_b = math.atan2(aim[1], aim[0]), math.asin(aim[2])
+        ss, eye, torso = _pitched_shot(env, state, yaw_b, pitch_b, speed)
+        assert _gate(eye, torso, _tilted(yaw_b, pitch_b, r, t)) > 2.0
+        assert ss.shots_hit == 0, "the aimed ray hit: the cone did not tilt the shot"
+    finally:
+        env.close()
