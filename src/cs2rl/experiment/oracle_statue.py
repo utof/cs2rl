@@ -4,7 +4,7 @@
 WHAT
 ----
 Drives the EXACT Rung 1a environment (ARENA_DUEL_V1, ``n_active_per_team=1``,
-``round_time=160``, ``pin_pitch=1``, ``crouch_enabled=0``) with two scripted
+``round_time=160``, ``pin_pitch=1``, ``crouch_enabled=0``, ``jump_enabled=0``) with two scripted
 actors and no learning anywhere in the loop:
 
   * hero   — agent 0 (T): ``eval.baselines.OracleActor``. Per tick it reads the
@@ -172,6 +172,13 @@ ROUND_TIME = 160
 N_ACTIVE_PER_TEAM = 1
 PIN_PITCH = 1
 CROUCH_ENABLED = 0
+# The smoke ran with jump off (its config.json: "jump_enabled": 0). EnvConfig's
+# default is 1, and this preset used to inherit it: harmless for the scripted
+# actors (none of them jumps), but not for a POLICY evaluated through this
+# harness. The Aug-31 Rung 1a checkpoint killed the statue in 83/100 rounds
+# here with jump on, 100/100 with it off (measured at 9617338, before #157; the
+# airborne-shot problem is gh #150).
+JUMP_ENABLED = 0
 
 # At n_active_per_team=1 env_reset parks every slot with (i % TEAM_SIZE) >= 1,
 # so exactly two agents spawn: row 0 (T) and row TEAM_SIZE (CT).
@@ -251,6 +258,7 @@ def build_env(seed: int, round_time: int = ROUND_TIME):
     return make_env(config=EnvConfig(n_active_per_team=N_ACTIVE_PER_TEAM,
                                      pin_pitch=PIN_PITCH,
                                      crouch_enabled=CROUCH_ENABLED,
+                                     jump_enabled=JUMP_ENABLED,
                                      round_time=round_time),
                     map_data=make_arena_duel_map(),
                     auto_reset=False,
@@ -796,7 +804,7 @@ def format_summary(res: dict) -> str:
     facing = res["shots_facing_enemy"]
     hit_over_facing = "n/a" if facing == 0 else f"{res['shots_hit'] / facing:.3f}"
     lines = [
-        "── oracle vs statue — arena-duel, n_active=1, pin_pitch=1, crouch=0 ──",
+        "── oracle vs statue — arena-duel, n_active=1, pin_pitch=1, crouch=0, jump=0 ──",
         f"episodes                 {res['episodes']}  (seed {res['seed']}, "
         f"round_time {res['round_time']})",
         f"statue z offset          {res['statue_z']:+.1f} u requested; "
