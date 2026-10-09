@@ -389,14 +389,21 @@ def load_checkpoint(path) -> tuple:
     return policy, cfg
 
 
+def trained_accuracy(cfg) -> bool:
+    """The movement-inaccuracy cone setting a run trained with, from its config.json.
+
+    A config.json written before the ``accuracy`` key existed trained without the cone, so a
+    missing key reads False whatever EnvConfig's default is now.
+    """
+    return bool(cfg.get("accuracy", False))
+
+
 def env_mismatches(cfg, accuracy: bool) -> list[str]:
     """The config.json env keys that differ from the arena preset every cell plays: the map
     label, the agent count, the pitch, crouch and jump switches, the round length, the laser
     range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves), and
     the movement-inaccuracy cone (``accuracy``: the setting the harness ran, so the caller
-    passes it). A config.json
-    written before the ``accuracy`` key existed trained without the cone, so a missing key
-    reads False.
+    passes it; the run's side is ``trained_accuracy``, so a missing key reads False).
 
     KNOWN LIMIT: recoil is not compared: config.json has no recoil key (no training flag sets it).
     """
@@ -412,7 +419,7 @@ def env_mismatches(cfg, accuracy: bool) -> list[str]:
         "max_turn_speed": None,
         "accuracy": bool(accuracy),
     }
-    run = {k: cfg.get(k, False) if k == "accuracy" else cfg.get(k) for k in preset}
+    run = {k: trained_accuracy(cfg) if k == "accuracy" else cfg.get(k) for k in preset}
     return [f"{k}: run {run[k]} vs harness {v}" for k, v in preset.items() if run[k] != v]
 
 
@@ -424,11 +431,12 @@ def format_table(out: dict) -> str:
     """One row per reference hero and per policy cell."""
     rows = out["references"] + out["cells"]
     wo = max(len(r["opponent"]) for r in rows)
+    source = f", from {out['accuracy_source']}" if out.get("accuracy_source") else ""
     lines = [
         f"aim_eval: {out['episodes']} episodes per cell, seed {out['seed']}, "
         f"bptt_horizon {out['bptt_horizon']}; e in hit half-windows asin(16/d); movement-"
-        f"inaccuracy cone {'ON' if out.get('accuracy') else 'off'} (fast = share of fires at "
-        f">= 0.34 x max speed)",
+        f"inaccuracy cone {'ON' if out.get('accuracy') else 'off'}{source} (fast = share of "
+        f"fires at >= 0.34 x max speed)",
         f"{'opponent':<{wo}} {'hero':<10} {'aim':<6} {'lstm':<7} kills  ttk50 ttk90 hit/f "
         f" |e|50 |e|90 off   along across lag(t)  se   ticks  hit/f<=H hit/f>H gap_k  gap_ttk"
         f"  fast"
@@ -465,14 +473,22 @@ def main(argv=None) -> int:
                     choices=(0, 1),
                     default=None,
                     help="play every cell with the movement-inaccuracy cone (EnvConfig.accuracy) "
-                    "on (1) or off (0). Default: EnvConfig.accuracy.")
+                    "on (1) or off (0). Default: the evaluated run's own config.json setting (a "
+                    "run without the key trained without the cone), so a re-read measures the "
+                    "policy in the env it trained in. A value that differs from the run's "
+                    "prints the env-mismatch warning.")
     args = ap.parse_args(argv)
     policy, cfg = load_checkpoint(args.checkpoint)
+    if args.accuracy is None:
+        accuracy, source = trained_accuracy(cfg), "the run's config.json"
+    else:
+        accuracy, source = bool(args.accuracy), "--accuracy"
     out = run_eval(policy,
                    int(cfg["bptt_horizon"]),
                    episodes=args.episodes,
                    seed=args.seed,
-                   accuracy=None if args.accuracy is None else bool(args.accuracy))
+                   accuracy=accuracy)
+    out["accuracy_source"] = source
     # The aim log-sigma parameters by state_dict name, before forward()'s clamp: one
     # ``aim_log_std``, or ``aim_log_std_t`` and ``aim_log_std_ct`` with split heads.
     log_std = {k: v.tolist() for k, v in policy.state_dict().items() if "aim_log_std" in k}

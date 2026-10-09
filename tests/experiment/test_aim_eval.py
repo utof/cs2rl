@@ -23,6 +23,9 @@ WHAT IS PINNED HERE
 * ``LstmZeroedEvery`` zeroes before forward ``period``, ``2 * period``, ... counted across
   rounds, as ``Cs2PuffeRL.evaluate`` zeroes at every rollout start.
 * ``env_mismatches`` flags a run trained on another map, laser range or turn speed.
+* The movement-inaccuracy switch reaches C in every reference and policy cell, on and off.
+  The CLI plays the cone the run trained with (its config.json key; a missing key = off)
+  unless ``--accuracy`` says otherwise, names the source, and warns on a difference.
 * The CLI on the Rung 1a checkpoint, 5 episodes per cell. It needs the checkpoint, which only
   the owner's checkouts have (outputs/ is not in git), so it skips without one.
 """
@@ -281,18 +284,25 @@ def test_each_mode_builds_its_hero():
         build_policy_hero(Policy(), "argmax", "carried", 64)
 
 
-def test_cells_reproduce_in_any_order():
+def _random_policy():
+    """An untrained policy for the arena preset, seeded."""
     import torch
 
-    from cs2rl.experiment import aim_eval
     from cs2rl.experiment.oracle_statue import build_env
     from cs2rl.policy import build_policy
     env = build_env(0)
     try:
         torch.manual_seed(0)
-        policy = build_policy(env, "cpu", aim_log_std_max=-2.9957, pin_pitch=True)
+        return build_policy(env, "cpu", aim_log_std_max=-2.9957, pin_pitch=True)
     finally:
         env.close()
+
+
+def test_cells_reproduce_in_any_order():
+    import torch
+
+    from cs2rl.experiment import aim_eval
+    policy = _random_policy()
     walker = {"walker-4-16": aim_eval.OPPONENTS["walker-4-16"]}
     modes = (("sample", "carried"), ("mean", "zeroed"))
 
@@ -341,6 +351,70 @@ def test_a_run_trained_with_the_other_cone_setting_is_flagged():
             if m.startswith("accuracy:")] == ["accuracy: run True vs harness False"]
 
 
+def test_the_cone_switch_reaches_every_cell():
+    from cs2rl.experiment import aim_eval
+    policy = _random_policy()
+    walker = {"walker-4-16": aim_eval.OPPONENTS["walker-4-16"]}
+    for accuracy in (True, False):
+        out = aim_eval.run_eval(policy,
+                                64,
+                                episodes=1,
+                                seed=0,
+                                opponents=walker,
+                                modes=(("sample", "carried"), ),
+                                accuracy=accuracy)
+        assert out["accuracy"] is accuracy
+        for r in out["references"] + out["cells"]:
+            assert r["accuracy"] is accuracy and r["shots_fired"] > 0, (accuracy, r["hero"])
+            assert (r["cone_radius_sum"] > 0) is accuracy, (accuracy, r["hero"])
+
+
+@pytest.mark.parametrize("trained,argv,want,source", [
+    ({
+        "accuracy": True
+    }, [], True, "the run's config.json"),
+    ({
+        "accuracy": False
+    }, [], False, "the run's config.json"),
+    ({}, [], False, "the run's config.json"),
+    ({
+        "accuracy": False
+    }, ["--accuracy", "1"], True, "--accuracy"),
+    ({
+        "accuracy": True
+    }, ["--accuracy", "0"], False, "--accuracy"),
+],
+                         ids=["key-on", "key-off", "key-missing", "flag-on", "flag-off"])
+def test_the_cli_plays_the_cone_the_run_trained_with(monkeypatch, capsys, trained, argv, want,
+                                                     source):
+    from cs2rl.experiment import aim_eval
+    seen = {}
+
+    class _Policy:
+
+        def state_dict(self):
+            return {}
+
+    def fake_run_eval(policy, bptt_horizon, **kw):
+        seen.update(kw)
+        return {"accuracy": kw["accuracy"]}
+
+    def fake_format_table(out):
+        seen["out"] = out
+        return ""
+
+    monkeypatch.setattr(aim_eval, "load_checkpoint", lambda path: (_Policy(), {
+        "bptt_horizon": 64,
+        **trained
+    }))
+    monkeypatch.setattr(aim_eval, "run_eval", fake_run_eval)
+    monkeypatch.setattr(aim_eval, "format_table", fake_format_table)
+    assert aim_eval.main(["ckpt.pt", *argv]) == 0
+    assert seen["accuracy"] is want and seen["out"]["accuracy_source"] == source
+    warned = [ln for ln in capsys.readouterr().out.splitlines() if "accuracy: run" in ln]
+    assert len(warned) == (want != aim_eval.trained_accuracy(trained)), warned
+
+
 def _rung1a_checkpoint():
     """This checkout's Rung 1a checkpoint, else the main checkout's (a worktree has no outputs/)."""
     common = subprocess.run(
@@ -370,4 +444,6 @@ def test_the_cli_plays_every_cell_on_the_rung1a_checkpoint(tmp_path, capsys):
         assert r["episodes"] == 5 and len(r["per_episode"]) == 5
         assert (r["on_target_recount"], r["hit_recount"]) == (r["shots_on_target"],
                                                               r["shots_hit"]), r
-    assert "WARNING" not in capsys.readouterr().out
+    printed = capsys.readouterr().out
+    assert "WARNING" not in printed
+    assert "inaccuracy cone off, from the run's config.json" in printed, printed

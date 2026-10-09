@@ -90,11 +90,23 @@ def build_walker(seed: int) -> WalkerActor:
     return WalkerActor(np.random.default_rng(seed), [L0.STATUE])
 
 
-def run_tracker(episodes: int = 200, seed: int = 0, obs_only: bool = False, opponent=None) -> dict:
-    """``oracle_statue.run_check`` against the walker (or ``opponent``, for knock-outs)."""
+def run_tracker(episodes: int = 200,
+                seed: int = 0,
+                obs_only: bool = False,
+                opponent=None,
+                accuracy: bool | None = None) -> dict:
+    """``oracle_statue.run_check`` against the walker (or ``opponent``, for knock-outs).
+
+    ``accuracy`` is run_check's movement-inaccuracy cone switch (None = the EnvConfig
+    default), so a pinned capture can say off explicitly.
+    """
     if opponent is None:
         opponent = build_walker(seed)
-    return L0.run_check(episodes=episodes, seed=seed, obs_only=obs_only, opponent=opponent)
+    return L0.run_check(episodes=episodes,
+                        seed=seed,
+                        obs_only=obs_only,
+                        opponent=opponent,
+                        accuracy=accuracy)
 
 
 def verdict(res: dict) -> tuple[bool, list[tuple[str, bool, str]]]:
@@ -172,8 +184,17 @@ def main(argv=None) -> int:
                     action="store_true",
                     help="aim from the hero's observation vector instead of the C state "
                     "(oracle_statue's ObsOracleActor); the verdict adds L0's obs-encoding checks")
+    ap.add_argument("--accuracy",
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="the movement-inaccuracy cone (EnvConfig.accuracy): 1 on, 0 off. "
+                    "Default: EnvConfig.accuracy.")
     args = ap.parse_args(argv)
-    res = run_tracker(episodes=args.episodes, seed=args.seed, obs_only=args.obs_only)
+    res = run_tracker(episodes=args.episodes,
+                      seed=args.seed,
+                      obs_only=args.obs_only,
+                      accuracy=None if args.accuracy is None else bool(args.accuracy))
     print(format_report(res))
     return 0 if verdict(res)[0] else 1
 

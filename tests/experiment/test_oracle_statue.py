@@ -22,6 +22,9 @@ WHAT IS PINNED HERE
   since #157), and against a statue the ground-truth lead is zero.
 * The FAIL report's diagnostics: censored TTK printed as "n/a (no kills)"
   rather than "None", and the failing episodes' spawn geometry.
+* The movement-inaccuracy switch reaches C: ``run_check(accuracy=True)`` shoots on a
+  cone, ``accuracy=False`` on none, and ``--accuracy`` (unset, 1, 0) reaches run_check
+  as None, True, False.
 
 WHY the thresholds here are looser than the script's (0.8 vs 0.90 kill rate):
 this is the fast regression tripwire at N=20, not the gate. The gate is
@@ -473,3 +476,30 @@ def test_failure_detail_is_capped_but_the_spread_is_always_reported():
     assert any(f"max {200.0 + n - 1:.1f}" in ln for ln in lines), lines
     # No failures at all (a FAIL on median TTK alone) prints nothing.
     assert _failure_lines({"episodes": 4, "failures": []}) == []
+
+
+def test_run_check_reports_the_cone_it_ran():
+    """Both settings are explicit, so this reads the same whatever EnvConfig.accuracy's default is."""
+    from cs2rl.experiment.oracle_statue import run_check
+    on = run_check(episodes=2, seed=0, accuracy=True)
+    assert on["accuracy"] is True and on["shots_fired"] > 0 and on["cone_radius_sum"] > 0, on
+    off = run_check(episodes=2, seed=0, accuracy=False)
+    assert off["accuracy"] is False and off["shots_fired"] > 0, off
+    assert off["cone_radius_sum"] == 0.0, off
+
+
+@pytest.mark.parametrize("argv,want", [([], None), (["--accuracy", "1"], True),
+                                       (["--accuracy", "0"], False)])
+def test_the_cli_hands_its_cone_switch_to_run_check(monkeypatch, argv, want):
+    from cs2rl.experiment import oracle_statue as L0
+    seen = {}
+
+    def fake_run_check(**kw):
+        seen.update(kw)
+        return {}
+
+    monkeypatch.setattr(L0, "run_check", fake_run_check)
+    monkeypatch.setattr(L0, "format_summary", lambda res: "")
+    monkeypatch.setattr(L0, "verdict", lambda res: (True, []))
+    assert L0.main(argv) == 0
+    assert seen["accuracy"] is want

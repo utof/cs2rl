@@ -18,6 +18,8 @@ WHAT IS PINNED HERE
   and that paragraph has to be rewritten.
 * The per-episode table logs seed, episode and spawn, and a rerun reproduces it.
 * ``main``'s exit code follows the verdict.
+* ``--accuracy`` (unset, 1, 0) reaches oracle_statue.run_check through run_tracker as
+  None, True, False, so a pinned capture can say off.
 """
 import numpy as np
 import pytest
@@ -113,3 +115,21 @@ def test_main_exit_code_follows_the_verdict(capsys, monkeypatch):
     assert oracle_tracker.main(["--episodes", "20", "--obs-only"]) == 1
     out = capsys.readouterr().out
     assert "OBS-ONLY hero" in out and out.rstrip().splitlines()[-1].startswith("FAIL")
+
+
+@pytest.mark.parametrize("argv,want", [([], None), (["--accuracy", "1"], True),
+                                       (["--accuracy", "0"], False)])
+def test_the_cli_hands_its_cone_switch_to_run_check(monkeypatch, argv, want):
+    from cs2rl.experiment import oracle_statue as L0
+    from cs2rl.experiment import oracle_tracker
+    seen = {}
+
+    def fake_run_check(**kw):
+        seen.update(kw)
+        return {}
+
+    monkeypatch.setattr(L0, "run_check", fake_run_check)
+    monkeypatch.setattr(oracle_tracker, "format_report", lambda res: "")
+    monkeypatch.setattr(oracle_tracker, "verdict", lambda res: (True, []))
+    assert oracle_tracker.main(argv) == 0
+    assert seen["accuracy"] is want
