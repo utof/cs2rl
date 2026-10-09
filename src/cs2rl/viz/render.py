@@ -23,7 +23,8 @@ The round is named in the viewer by its deaths, e.g. "round 3: CT5 died t14".
 
 VIEWING (rerun 0.30.2, the viewer the pinned rerun-sdk ships as the ``rerun`` command;
 controls read from its source at tag 0.30.2: crates/viewer/re_ui/src/command.rs,
-re_view_spatial/src/ui_3d.rs and eye.rs, re_view/src/controls.rs; Ctrl is Cmd on a Mac)
+re_view_spatial/src/ui_3d.rs and eye.rs, re_view/src/controls.rs; on a Mac Ctrl is Cmd, and
+Ctrl, not Alt, slows the camera)
   * tabs: a free camera (first-person eye kind: WASD / QE fly, left-drag turns, Shift
     10x faster, Alt 10x slower), "follow <hero>" (an orbit camera tracking the hero), and
     "<name> eyes" per side, whose camera takes the pose of that agent's ``pov`` pinhole.
@@ -51,13 +52,22 @@ PITFALLS
   (KNOWN LIMIT).
 * Rerun stores positions and the eye quaternion as float32. The C positions are float32
   too, so they are exact; the aim direction is within float32 rounding.
-* The file is written round by round: a crash mid-round loses only that round.
+* The file is opened at the first round's end, then written round by round: a crash
+  mid-round loses only that round, and a run that fails before any round ends leaves an
+  existing file at the path untouched.
+* A round's name and blueprint are written when it ends, so while a long round is still
+  loading the viewer shows it under a timestamp name (KNOWN LIMIT).
+* Each round's blueprint send leaves 2 rerun threads alive until exit (KNOWN LIMIT): 5 rounds
+  do not matter, a run of thousands would.
 """
 from __future__ import annotations
 
 import itertools
 import math
+import shlex
+import sys
 from pathlib import Path
+from typing import IO
 
 import numpy as np
 import rerun as rr
@@ -84,6 +94,19 @@ DEAD_COLOR = (90, 90, 90)
 def agent_name(row: int, team: int) -> str:
     """``T0`` / ``CT5``: the team and the agent row, which the harnesses index by."""
     return f"{'T' if team == 0 else 'CT'}{row}"
+
+
+def view_command(path) -> str:
+    """The shell command that opens ``path`` in the viewer, from any directory, with no venv.
+
+    This interpreter's ``-m rerun`` and the absolute path: a bare ``rerun`` is not on PATH
+    outside an activated venv, and a relative path names the saving checkout's file (an
+    agent's worktree), not the owner's. ``--bind 127.0.0.1`` keeps the viewer's SDK port
+    local; its default is 0.0.0.0.
+    """
+    return shlex.join(
+        [sys.executable, "-m", "rerun", "--bind", "127.0.0.1",
+         str(Path(path).resolve())])
 
 
 def _eye_quat(yaw: float, pitch: float) -> list[float]:
@@ -327,7 +350,7 @@ class ReplayRecorder:
     The call shape is ``oracle_statue.run_check``'s ``on_step``: ``tick`` counts from 1 in
     each round, ``st_prev`` is the snapshot the actors saw (the reset state on tick 1) and
     ``st`` the one after the step. Tick 1 starts a new round and records ``st_prev`` as tick
-    0. ``close()`` writes the last round; nothing reaches the file before a round ends.
+    0. ``close()`` writes the last round; the file is not even opened before a round ends.
 
     The rows drawn are those alive in the round's tick-0 state: the two duelists in the
     arena (``n_active_per_team=1`` parks the rest), all ten on simple_map and dust2.
@@ -335,6 +358,11 @@ class ReplayRecorder:
     ``hero`` / ``opp`` choose the follow and eyes tabs; by default the first T and the first
     CT row alive at the first round's start. ``rewards``, optional per call, is the step's
     per-row reward array; once given it is plotted for the round.
+
+    KNOWN LIMIT: rounds are keyed on the caller's tick 1, not on the env's round reset. That
+    fits run_check and --record (auto_reset=False); a caller on auto_reset envs (a training
+    auto-save) must restart its tick at 1 each episode. Such a caller also needs no thread
+    growth over N rounds first (the blueprint threads, module PITFALLS).
     """
 
     def __init__(self, path, map_data, hero: int | None = None, opp: int | None = None):
@@ -346,7 +374,8 @@ class ReplayRecorder:
         self._has_sites = bool(np.any(map_data.bombsite_by_idx))
         self.hero, self.opp = hero, opp
         self.rounds = 0
-        self._fh = open(self.path, "wb")
+        self._fh: IO[bytes] | None = None              # opened at the first round's end
+        self._closed = False
         self._rec: rr.RecordingStream | None = None    # the round being logged
         self._stream: rr.BinaryStream | None = None
         self._deaths: list[str] = []
@@ -368,10 +397,12 @@ class ReplayRecorder:
 
     def close(self):
         """Write the round in progress and close the file. Safe to call twice."""
-        if self._fh.closed:
+        if self._closed:
             return
         self._end_round()
-        self._fh.close()
+        if self._fh is not None:
+            self._fh.close()
+        self._closed = True
 
     def __enter__(self):
         return self
@@ -410,10 +441,17 @@ class ReplayRecorder:
             blueprint(self.names, self.hero, self.opp, self.map_data, rewards=self._rewards))
         rec.flush()
         data = stream.read(flush=True)                 # None: nothing buffered
+        if self._fh is None:
+            self._fh = open(self.path, "wb")
         if data:
             self._fh.write(data)
         self._fh.flush()
         self._rec = self._stream = None
+
+        # Free the dropped round stream's 2 threads, which neither gc nor disconnect() frees.
+        # A private binding: rr.init calls it "to avoid memory leaks".
+        del rec, stream
+        rr.bindings.flush_and_cleanup_orphaned_recordings()
 
     def _log_state(self, rec, tick, st_prev, st):
         rec.set_time(TIMELINE, sequence=tick)
@@ -423,7 +461,8 @@ class ReplayRecorder:
             pos = [float(st["x"][r]), float(st["y"][r]), float(st["z"][r])]
             crouch = bool(st["is_crouching"][r])
             height = BODY_HEIGHT_CROUCH if crouch else BODY_HEIGHT_STAND
-            carrier = self._has_sites and int(st.get("bomb_carrier", -1)) == r
+            # Indexed before the map check: a snapshot that lost the key fails on every map.
+            carrier = int(st["bomb_carrier"]) == r and self._has_sites
             label = f"{name} {'[B] ' if carrier else ''}{int(st['hp'][r]) if alive else 'dead'}"
             rec.log(
                 f"agents/{name}", rr.Transform3D(translation=pos),
@@ -455,7 +494,7 @@ class ReplayRecorder:
             elif st["hp"][r] < st_prev["hp"][r]:
                 rec.log("events",
                         rr.TextLog(f"{name} hp {int(st_prev['hp'][r])} -> {int(st['hp'][r])}"))
-        if st.get("bomb_planted"):
+        if st["bomb_planted"]:
             rec.log("bomb", rr.Points3D([list(st["bomb_pos"])],
                                         colors=[[255, 200, 0]],
                                         radii=[24.0]))

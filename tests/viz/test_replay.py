@@ -4,18 +4,23 @@ WHAT IS PINNED HERE
 -------------------
 * The eye quaternion turns the FLU eye frame's +x onto cs2_combat.h's combat ray
   (cos p cos y, cos p sin y, sin p) and keeps +y level (no roll), so the aim stick, the
-  tracer and the eyes camera all look where the sim shoots.
+  tracer and the eyes camera all look where the sim shoots. The call site is pinned too: a
+  hero with non-zero facing and pitch logs the eye quaternion of (facing, pitch), an FLU
+  pinhole, and an aim stick and a tracer along the eye's +x.
 * ``room_walls``: the arena (24 adjacent cells) is walled by its outline only; on the
   arena and on simple_map its walls, merged per line, are the faces cs2_solids.h bakes from
   the same rooms (``binding.bake_solids``, what the raylib demo draws).
 * ``ReplayRecorder``: one recording per round, ids ``<stem>-round-<k>``, named by its
-  deaths; a round reaches the file when the next one starts (a crash loses one round);
+  deaths; a round reaches the file when the next one starts (a crash loses one round), and
+  the file does not exist before the first round ends;
   each agent row alive at the round's start gets its entity tree; rewards are drawn only
   for a round that passed them; a call before any tick 1 is refused.
 
-The file is read back with ``rerun.recording.load_archive`` (ids and entity paths). The
-per-tick VALUES need rerun's datafusion reader, absent from the project venv; they were
-measured once against the harness (lane F report, F-Q2), not pinned here.
+The file is read back with ``rerun.recording.load_archive`` (ids and entity paths); the
+values are pinned where the recorder hands them to ``rec.log``. Per-tick values are readable
+headless with ``rerun rrd print -vvv FILE`` (the venv's rerun CLI); the Python dataframe
+reader needs the datafusion extra. They were compared once against the harness (lane F
+report, F-Q2).
 """
 import math
 
@@ -101,7 +106,7 @@ def test_room_walls_trace_the_faces_the_sim_bakes(which, n_faces):
     assert _merged(room_walls(md)) == baked
 
 
-def _snap(hp5=100, fired0=0, alive5=1, x5=300.0):
+def _snap(hp5=100, fired0=0, alive5=1, x5=300.0, facing0=0.0, pitch0=0.0):
     """Ten rows, T0 and CT5 alive (the arena's duelists), the keys the recorder reads."""
     st = {
         "x": np.zeros(10, np.float32),
@@ -122,6 +127,7 @@ def _snap(hp5=100, fired0=0, alive5=1, x5=300.0):
     st["hp"][0], st["hp"][5] = 100, hp5
     st["alive"][0], st["alive"][5] = 1, alive5
     st["fired_this_tick"][0] = fired0
+    st["facing"][0], st["pitch"][0] = facing0, pitch0
     return st
 
 
@@ -144,12 +150,12 @@ def test_each_round_is_one_recording_named_by_its_deaths(tmp_path, monkeypatch):
     path = tmp_path / "duel.rrd"
     rec = render.ReplayRecorder(path, make_arena_duel_map())
     _round(rec, [_snap(), _snap(fired0=1, hp5=50), _snap(fired0=1, hp5=0, alive5=0)])
-    assert rec.rounds == 0 and path.stat().st_size == 0                # nothing before a round ends
+    assert rec.rounds == 0 and not path.exists()       # nothing before a round ends
     _round(rec, [_snap(), _snap(x5=310.0)], rewards=np.arange(10, dtype=np.float32))
     assert rec.rounds == 1
     assert [r.recording_id() for r in load_archive(path).all_recordings()] == ["duel-round-1"]
     rec.close()
-    rec.close()                                                        # safe twice
+    rec.close()                                        # safe twice
     recs = load_archive(path).all_recordings()
     assert [r.recording_id() for r in recs] == ["duel-round-1", "duel-round-2"]
     assert {r.application_id() for r in recs} == {render.APP_ID}
@@ -171,4 +177,39 @@ def test_a_round_starts_at_tick_1(tmp_path):
     with pytest.raises(ValueError, match="a round starts at tick 1"):
         rec(2, _snap(), _snap())
     rec.close()
-    assert rec.rounds == 0 and path.stat().st_size == 0
+    assert rec.rounds == 0 and not path.exists()
+
+
+def test_the_eye_camera_aim_and_tracer_follow_facing_and_pitch(tmp_path, monkeypatch):
+    """The call site, not only _eye_quat: what the recorder hands ``rec.log`` for a hero
+    with non-zero (and unequal) facing and pitch, so a swapped or negated argument shows."""
+    from cs2rl.env.map import make_arena_duel_map
+    from cs2rl.viz import render
+    logged = {}
+    log = render.rr.RecordingStream.log
+
+    def capture(self, entity, *archetypes, **kw):
+        logged.setdefault(entity, []).extend(archetypes)
+        return log(self, entity, *archetypes, **kw)
+
+    monkeypatch.setattr(render.rr.RecordingStream, "log", capture)
+    facing, pitch = 0.7, -0.3
+    states = [_snap(facing0=facing, pitch0=pitch), _snap(fired0=1, facing0=facing, pitch0=pitch)]
+    rec = render.ReplayRecorder(tmp_path / "eye.rrd", make_arena_duel_map())
+    _round(rec, states)
+    rec.close()
+
+    def values(archetype, field):
+        return getattr(archetype, field).as_arrow_array().to_pylist()
+
+    want = render._eye_quat(float(np.float32(facing)), float(np.float32(pitch))) # as stored
+    quats = [values(a, "quaternion")[0] for a in logged["agents/T0/eye"]]
+    assert len(quats) == 2 and all(np.allclose(q, want, atol=1e-6) for q in quats), (quats, want)
+    flu = render.rr.components.ViewCoordinatesBatch(render.rr.ViewCoordinates.FLU)
+    (pov, ) = logged["agents/T0/eye/pov"]
+    assert values(pov, "camera_xyz") == flu.as_arrow_array().to_pylist()
+    tracers = [a for a in logged["agents/T0/eye/shot"] if isinstance(a, render.rr.LineStrips3D)]
+    for strip in list(logged["agents/T0/eye/aim"]) + tracers:
+        (start, end), = values(strip, "strips")
+        assert start == [0.0, 0.0, 0.0] and end[0] > 0 and end[1:] == [0.0, 0.0], (start, end)
+    assert len(tracers) == 1                                                     # the tick it fired

@@ -32,7 +32,7 @@ def record_episode(
 ):
     from cs2rl.env.c.cs2_env import make_env as make_c_env
     from cs2rl.eval.baselines import StateReader
-    from cs2rl.viz.render import ReplayRecorder
+    from cs2rl.viz.render import ReplayRecorder, view_command
 
     save_path = Path(save_path)
     print(f"[Record] Recording one episode -> {save_path}")
@@ -81,4 +81,4 @@ def record_episode(
                     np.logical_or(terms, truncs).astype(np.float32))
 
     print(f"[Record] Episode complete ({step_count} ticks). Saved to {save_path}")
-    print(f"[Record] View with: rerun {save_path}")
+    print(f"[Record] view: {view_command(save_path)}")

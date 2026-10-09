@@ -22,6 +22,9 @@ dependencies = [
                                                        # resolve to 4.0 and break loudly at a random moment. Upgrade is a
                                                        # deliberate migration (see #85 playbook), not a version bump.
     "pufferlib==3.0.0",
+                                                       # KNOWN LIMIT: cs2rl.viz.render needs more than this floor
+                                                       # (send_recording_name arrived in 0.23, the blueprint eye
+                                                       # controls in 0.27); uv.lock pins 0.30.2, the version run.
     "rerun-sdk>=0.21.0",
     "shapely>=2.0.4",
 ]
