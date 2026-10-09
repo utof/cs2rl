@@ -81,7 +81,7 @@ def test_a_vertical_error_against_horizontal_motion_is_across():
     assert decompose(e, (0.0, 0.0)) is None
 
 
-def test_the_recorder_scales_by_the_half_window_and_fits_from_acquisition():
+def test_the_recorder_scales_by_the_half_window_and_tracks_from_acquisition():
     from cs2rl.experiment.aim_eval import MissRecorder
     rec = MissRecorder(0, 1)
     # Tick 1: the opening turn, 0.5 rad off; recorded as a fire, kept out of the lag ticks.
