@@ -376,7 +376,7 @@ class Dust2Policy(nn.Module):
           tick), so on the first minibatch every row the current policy
           sampled has an importance ratio of 1 up to float rounding. Rows
           it did not sample store other logprobs (a past-policy opponent's,
-          or 0 for an `--opponent noop` statue), so their ratios need not be 1.
+          or 0 for a scripted `--opponent` noop/walker team), so their ratios need not be 1.
 
         WHY zero initial state is CORRECT here (not an approximation):
           evaluate() zeroes trainer.lstm_h/c at its start, and with

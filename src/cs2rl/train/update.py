@@ -51,9 +51,9 @@ if TYPE_CHECKING:                      # annotations only; never at runtime
 def masked_mean(x, w):
     """Mean of x over rows where w == 1. w broadcasts to x; w.sum() == 0 ⇒ 0.
 
-    Rung 0 §2.2: non-participating rows (parked agents, and the statue team
-    under ``--opponent noop``) must not enter any trainer statistic. At
-    n_active=1 they are four of every five rows (nine of ten under noop), and
+    Rung 0 §2.2: non-participating rows (parked agents, and the scripted team
+    under ``--opponent`` noop or walker) must not enter any trainer statistic. At
+    n_active=1 they are four of every five rows (nine of ten under a scripted opponent), and
     their entropy and reward are not 0 in general. Masked mean =
     (x·w).sum() / max(w.sum(), 1).
     """

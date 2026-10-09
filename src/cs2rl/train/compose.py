@@ -203,7 +203,7 @@ def _participating_rows(args, vecenv, opponent_mode: str) -> np.ndarray:
     """The static participation vector, checked against the env that was built.
 
     Under --opponent self it selects slots 0..n-1 of both teams, the slots the C env
-    spawns; under noop the hero team's only. The vector comes from args and the envs
+    spawns; under noop or walker the hero team's only. The vector comes from args and the envs
     from the env factory, so the assert stops a disagreement that would otherwise
     train on the wrong rows without an error.
     """

@@ -23,7 +23,20 @@ from typing import cast
 import numpy as np
 import pytest
 
-from cs2rl.eval.walker import H_MOVE, HOLD_MAX, HOLD_MIN, MOVE_BINS, RandomWalker, WalkerActor
+from cs2rl.eval.walker import (
+    H_MOVE,
+    HELD_OUT,
+    HOLD_MAX,
+    HOLD_MIN,
+    MOVE_BINS,
+    TRAIN_MIX,
+    TRAIN_WEIGHTS,
+    RandomWalker,
+    WalkerActor,
+    WalkerParams,
+)
+from cs2rl.eval.walker import (
+    STATUE as STATUE_FAMILY, )
 from cs2rl.spec.action import ACTION_DIM, AIM_DIM
 
 
@@ -157,6 +170,125 @@ def test_in_the_arena_the_walker_row_moves_never_turns_and_never_fires(seed):
         assert ag[HERO].alive and ag[STATUE].alive
     finally:
         env.close()
+
+
+def _moves(w, steps):
+    """The (n_rows, steps) move bins of ``steps`` consecutive ticks."""
+    return np.array([w.step() for _ in range(steps)]).T
+
+
+def test_without_a_mix_the_stream_is_the_one_from_before_the_mix_existed():
+    """Literals drawn from the pre-mix RandomWalker (seed 7, 3 rows, 24 ticks): the
+    default path must make exactly the same draws, so the L1 numbers do not move."""
+    default = [[8] * 15 + [3] * 9, [6] * 11 + [7] * 6 + [8] * 4 + [4] * 3,
+               [6] * 14 + [1] * 7 + [7] * 3]
+    assert _moves(RandomWalker(3, np.random.default_rng(7)), 24).tolist() == default
+    short = [[8, 8, 8, 8, 8, 1, 1, 1, 4, 4, 1, 1, 1, 1, 1, 8, 8, 8, 5, 5, 5, 5, 5, 3],
+             [6, 6, 6, 6, 7, 7, 8, 8, 7, 7, 7, 7, 7, 3, 3, 3, 3, 5, 5, 5, 5, 6, 6, 6],
+             [6, 6, 6, 6, 6, 3, 3, 3, 3, 3, 4, 4, 4, 3, 3, 3, 4, 4, 4, 4, 7, 7, 7, 7]]
+    assert _moves(RandomWalker(3, np.random.default_rng(7), 2, 5), 24).tolist() == short
+
+
+def test_params_refuse_nonsense():
+    for bad in (lambda: WalkerParams(hold=(0, 4)), lambda: WalkerParams(hold=(5, 4)),
+                lambda: WalkerParams(p_stop=(0.5, 0.2)), lambda: WalkerParams(p_stop=(0.0, 1.5)),
+                lambda: WalkerParams(duty=(0.0, 1.0)), lambda: WalkerParams(duty=(0.5, 1.2))):
+        with pytest.raises(ValueError):
+            bad()
+    with pytest.raises(ValueError):
+        RandomWalker(2, np.random.default_rng(0), mix=TRAIN_MIX, weights=(0.5, 0.5))
+    with pytest.raises(ValueError):    # numpy's Generator.choice(p=...) refuses these
+        RandomWalker(2, np.random.default_rng(0), mix=TRAIN_MIX, weights=(0.5, 0.5, 0.5))
+    with pytest.raises(ValueError):
+        RandomWalker(2, np.random.default_rng(0), mix=TRAIN_MIX, weights=(1.5, -0.5, 0.0))
+
+
+def test_a_statue_family_never_moves_and_a_held_out_family_always_does():
+    for fam, moves in ((STATUE_FAMILY, False), (HELD_OUT, True)):
+        bins = _moves(RandomWalker(8, np.random.default_rng(1), mix=[fam]), 200)
+        assert bool((bins != 0).all()) is moves and bool((bins == 0).all()) is not moves
+    # HELD_OUT holds are 24..48 ticks: no run is shorter, and runs of 24+ exist.
+    bins = _moves(RandomWalker(1, np.random.default_rng(2), mix=[HELD_OUT]), 600)[0]
+    runs = np.diff(np.flatnonzero(np.diff(bins) != 0))
+    assert runs.size and runs.min() >= 24 and runs.max() <= 48 + 48, runs
+
+
+def test_a_mix_draws_each_family_with_its_weight_and_a_row_keeps_it_for_the_episode():
+    n = 4000
+    w = RandomWalker(n, np.random.default_rng(3), mix=TRAIN_MIX, weights=TRAIN_WEIGHTS)
+    fam_hold_hi = w._row[:, 1]
+    for hi, weight in zip((1, 16, 8), TRAIN_WEIGHTS, strict=True):
+        assert abs((fam_hold_hi == hi).mean() - weight) < 0.03, (hi, weight)
+    before = w._row.copy()
+    _moves(w, 50)
+    assert np.array_equal(w._row, before), "the episode's parameters change only at reset"
+
+
+def test_reset_rows_redraws_only_those_rows_and_none_when_empty():
+    w = RandomWalker(6, np.random.default_rng(4), mix=TRAIN_MIX, weights=TRAIN_WEIGHTS)
+    _moves(w, 3)
+    rows, left = w._row.copy(), w._left.copy()
+    w.reset(np.zeros(6, dtype=bool))
+    assert np.array_equal(w._left, left), "an empty mask must reset nothing"
+    w.reset(np.array([1, 4]))
+    kept = [0, 2, 3, 5]
+    assert np.array_equal(w._left[kept], left[kept]) and np.array_equal(w._row[kept], rows[kept])
+    assert (w._left[[1, 4]] == 0).all()
+    w.reset(np.arange(6) < 2)          # a bool mask names rows too
+    assert (w._left[:2] == 0).all() and np.array_equal(w._left[[2, 3, 5]], left[[2, 3, 5]])
+
+
+def test_reset_rows_draws_a_new_family_for_exactly_those_rows():
+    """The per-episode re-draw: a fresh draw is another family with probability
+    1 - sum(w^2) = 0.64 under TRAIN_MIX; kept rows never change."""
+    n = 4000
+    w = RandomWalker(n, np.random.default_rng(11), mix=TRAIN_MIX, weights=TRAIN_WEIGHTS)
+    before = w._row.copy()
+    w.reset(np.arange(n) < n // 2)
+    changed = (w._row != before).any(axis=1)
+    assert not changed[n // 2:].any()
+    assert abs(changed[:n // 2].mean() - (1 - sum(x * x for x in TRAIN_WEIGHTS))) < 0.05
+
+
+def test_reset_rows_restarts_the_duty_credit_of_those_rows_only():
+    w = RandomWalker(3, np.random.default_rng(0), mix=[WalkerParams(duty=(0.5, 0.5))])
+    w.step()
+    assert w._credit.tolist() == [0.5, 0.5, 0.5]
+    w.reset(np.array([0]))
+    assert w._credit.tolist() == [0.0, 0.5, 0.5]
+
+
+def test_a_mix_is_deterministic_per_seed():
+
+    def run(seed):
+        w = RandomWalker(5, np.random.default_rng(seed), mix=TRAIN_MIX, weights=TRAIN_WEIGHTS)
+        out = []
+        for t in range(60):
+            if t % 20 == 0:
+                w.reset(np.array([t % 5]))
+            out.append(w.step())
+        return np.array(out)
+
+    assert np.array_equal(run(5), run(5)) and not np.array_equal(run(5), run(6))
+
+
+def test_duty_gates_the_press_without_one_rng_draw():
+    """Duty 0.5 presses every other tick, and the RNG ends where the draws of a plain
+    (no mix) walker, after the mix's one family draw, leave it."""
+    half = RandomWalker(4, np.random.default_rng(9), mix=[WalkerParams(duty=(0.5, 0.5))])
+    plain_rng = np.random.default_rng(9)
+    plain_rng.choice(1, size=4, p=[1.0])               # the mix's per-reset family draw
+    plain = RandomWalker(4, plain_rng)
+    a, b = _moves(plain, 40), _moves(half, 40)
+    assert (b == 0).sum(axis=1).tolist() == [20] * 4
+    assert np.array_equal(b[:, 1::2], a[:, 1::2]) and not b[:, 0::2].any()
+    assert plain.rng.bit_generator.state == half.rng.bit_generator.state
+
+
+def test_p_stop_gives_stand_still_holds_at_about_that_rate():
+    fam = WalkerParams(hold=(1, 1), p_stop=(0.25, 0.25))
+    w = RandomWalker(2000, np.random.default_rng(10), mix=[fam])
+    assert abs((_moves(w, 1) == 0).mean() - 0.25) < 0.03
 
 
 def test_the_module_imports_without_anything_heavy():

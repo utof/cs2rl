@@ -429,12 +429,12 @@ def test_opponent_noop_without_no_self_play_is_refused_at_startup(tmp_path):
 def test_opponent_flag_declared_with_both_modes():
     """Source-scan pin for the opponent choices and default (the parser is built inline under
     `if __name__ == "__main__"` and cannot be imported): the flag must offer
-    both modes and default to the historical one.
+    every mode and default to the historical one.
 
     TWO FILES since the post-rung1a refactor (2026-08-31): the parser (and so
     the `choices=OPPONENT_MODES` reference) stays in src/cs2rl/train/__main__.py, while the
     OPPONENT_MODES tuple itself lives in src/cs2rl/train/config.py. Both halves are
-    pinned — a `choices=` naming a vocabulary that no longer holds both modes
+    pinned — a `choices=` naming a vocabulary that no longer holds every mode
     is exactly the silent narrowing this test exists to catch."""
     import re
 
@@ -445,7 +445,7 @@ def test_opponent_flag_declared_with_both_modes():
     assert "choices=OPPONENT_MODES" in body and 'default="self"' in body, body
     assert 'dest="opponent"' in body, body
     config_src = (REPO_ROOT / "src" / "cs2rl" / "train" / "config.py").read_text()
-    assert 'OPPONENT_MODES = ("self", "noop")' in config_src
+    assert 'OPPONENT_MODES = ("self", "noop", "walker")' in config_src
 
 
 @pytest.mark.slow

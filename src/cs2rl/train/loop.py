@@ -23,6 +23,7 @@ from cs2rl.policy import state_dict_is_split, state_dict_is_trunk_split
 from cs2rl.spec.paths import CHECKPOINTS_DIR
 from cs2rl.train.compose import PolicyInit, _close_on_exit, build_trainer
 from cs2rl.train.config import (
+    SCRIPTED_OPPONENT_MODES,
     TEAM_SIZE,
     assert_opponent_self_play_compatible,
     build_train_config,
@@ -499,21 +500,25 @@ def _configure_run_trainer(trainer, run_id: str, config: dict):
 def _print_opponent_setup(trainer, plan: _RunPlan, self_play_enabled: bool):
     """The run log's statement of who plays whom (T4's pre-flight reads the noop line)."""
     if not self_play_enabled:
-        # Mode-aware: "both teams use the current policy" is FALSE under --opponent
-        # noop, and the run log must not print two contradictory claims.
-        if plan.opponent_mode == "noop":
+        # Mode-aware: "both teams use the current policy" is FALSE under a scripted
+        # --opponent, and the run log must not print two contradictory claims.
+        if plan.opponent_mode in SCRIPTED_OPPONENT_MODES:
             print("[Train] Self-play mixing disabled (--no-self-play): the hero team "
-                  "uses the current policy every epoch; the opponent team is a statue "
-                  "(--opponent noop), not the current policy.")
+                  "uses the current policy every epoch; the opponent team is scripted "
+                  f"(--opponent {plan.opponent_mode}), not the current policy.")
         else:
             print("[Train] Self-play mixing disabled (--no-self-play): "
                   "both teams use the current policy every epoch.")
-    if plan.opponent_mode == "noop":
-        # Rung 1a T3: which team is frozen, how many rows train, and on what horizon —
+    if plan.opponent_mode in SCRIPTED_OPPONENT_MODES:
+        # Rung 1a T3: which team is scripted, how many rows train, and on what horizon —
         # the three things a short or mis-masked run would get wrong silently.
         rows = trainer._participating_rows_np
-        print(f"[Train] Opponent mode 'noop': team "
-              f"{trainer._self_play_mgr.opponent_team.upper()} is a stationary statue; "
+        role = {
+            "noop": "a stationary statue",
+            "walker": "a scripted walker mix"
+        }[plan.opponent_mode]
+        print(f"[Train] Opponent mode '{plan.opponent_mode}': team "
+              f"{trainer._self_play_mgr.opponent_team.upper()} is {role}; "
               f"{int(rows.sum()):,} of {rows.size:,} agent rows "
               f"participate (raw horizon {plan.config['total_timesteps']:,} rows = "
               f"{plan.config['participating_timesteps']:,} hero steps).")
@@ -538,8 +543,10 @@ def _resume_full_state(trainer, resume_paths: dict, config: dict, outputs: _RunO
 
     Returns the resumed global step. The bound (check_resume_metrics_bound) is
     checkpoint_interval epochs wide on both sides, in participating units. Rung 1a T3:
-    it assumes BOTH teams participate, so under --opponent noop it is 2× too wide —
-    only ever too permissive, never a false alarm; halve it before a noop run resumes.
+    it assumes BOTH teams participate, so under a scripted --opponent (noop, walker) it is 2× too wide —
+    only ever too permissive, never a false alarm; halve it before such a run resumes.
+    KNOWN LIMIT: a resumed --opponent walker run rebuilds the walker from config["seed"] and
+    replays its draws from the start (the walker's RNG and holds are not checkpointed).
     """
     info = load_full_resume(trainer, trainer._self_play_mgr, resume_paths)
     resumed = info["resumed_from_step"]
