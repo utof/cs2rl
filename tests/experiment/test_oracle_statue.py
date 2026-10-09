@@ -352,6 +352,25 @@ def test_a_mutated_z_normaliser_fails_the_obs_only_exit_code(monkeypatch):
     assert mod.main(argv) == 1
 
 
+def test_a_sign_flipped_z_delta_fails_the_obs_only_exit_code(monkeypatch):
+    """Sibling of the halved normaliser: the z-delta decoded with the wrong sign.
+
+    WHY a second mutation: #157 re-scoped the rz cross-check (it now compares the
+    obs against the C rz of the states the obs came from, the grounded reset state
+    included). A re-scoped check that only still catches the one mutation it was
+    re-checked against is the guard-blind-to-its-scope class, so this one is new.
+    """
+    from cs2rl.experiment import oracle_statue as mod
+    monkeypatch.setattr(mod, "OBS_Z_SCALE", -mod.OBS_Z_SCALE)
+    res = mod.run_check(episodes=2, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
+    expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
+    assert res["kill_rate"] == 1.0 and res["obs_inconsistent_slots"] == 0, res
+    assert res["observed_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
+    assert res["obs_rz_min"] == pytest.approx(-expect_rz, abs=0.05), res
+    passed, checks = mod.verdict(res)
+    assert not passed and [n for n, ok, _ in checks if not ok] == ["|obs_rz - C rz| <= 0.5"], checks
+
+
 def test_a_zeroed_reset_obs_fails_the_obs_only_exit_code(monkeypatch):
     """End-to-end teeth for the #157 bound: a reset obs that is all zero again.
 
