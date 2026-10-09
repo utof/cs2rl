@@ -110,13 +110,19 @@ def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
 #            action head, zero aim delta, and its rows are excluded from
 #            participation (no global_step, no gradient, no loss term) and from
 #            the --timesteps budget.
-OPPONENT_MODES = ("self", "noop")
+#   "walker" — the same, except the opponent team's move head walks: each row plays a
+#            scripted walker (cs2rl.eval.walker.TRAIN_MIX) re-drawn every episode.
+#            Every other head is bin 0 and the aim delta is zero.
+OPPONENT_MODES = ("self", "noop", "walker")
+# The modes whose opponent team is scripted: self-play is refused and its rows do not
+# participate (nothing trains on them, nothing counts toward --timesteps).
+SCRIPTED_OPPONENT_MODES = ("noop", "walker")
 
 
 def resolve_opponent_mode(args) -> str:
     """Read ``--opponent`` off an args object, with the legacy-args fallback.
 
-    WHAT: returns "self" or "noop"; raises ValueError on anything else. The
+    WHAT: returns one of ``OPPONENT_MODES``; raises ValueError on anything else. The
     getattr default keeps harness / ``--dump-config`` / older SimpleNamespace
     callers (which predate the flag) on the historical self-play behaviour —
     same contract as env_config_from_args' flag knobs, which read every one of
@@ -136,7 +142,7 @@ def resolve_opponent_mode(args) -> str:
 
 
 def assert_opponent_self_play_compatible(opponent: str, self_play_enabled: bool) -> None:
-    """Startup guard: ``--opponent noop`` requires ``--no-self-play``.
+    """Startup guard: a scripted ``--opponent`` (noop, walker) requires ``--no-self-play``.
 
     WHY (spec 2026-08-30 §2 T3, "team constancy"): the statue is whichever team
     SelfPlayManager.opponent_team names. That starts at "ct" but self-play
@@ -152,8 +158,8 @@ def assert_opponent_self_play_compatible(opponent: str, self_play_enabled: bool)
     validate_aim_log_std_max) and again at the top of train() for programmatic
     callers. Raising ValueError matches validate_aim_log_std_max's precedent.
     """
-    if opponent == "noop" and self_play_enabled:
-        raise ValueError("--opponent noop requires --no-self-play. The statue team is "
+    if opponent in SCRIPTED_OPPONENT_MODES and self_play_enabled:
+        raise ValueError(f"--opponent {opponent} requires --no-self-play. The scripted team is "
                          "SelfPlayManager.opponent_team, which self-play flips every "
                          "phase_length epochs (and mixes past policies into), while the "
                          "participating-rows vector is built once for the initial hero "
@@ -173,8 +179,8 @@ def build_participating_rows(num_envs: int,
 
       - ``opponent_mode="self"``: slots 0..n_active-1 of BOTH teams. Bit-identical
         to the pre-T3 expression ``(i % TEAM_SIZE) < n_active``.
-      - ``opponent_mode="noop"``: those slots of the HERO team only. The statue
-        team neither learns nor is counted.
+      - ``opponent_mode`` "noop" or "walker": those slots of the HERO team only. The
+        scripted team neither learns nor is counted.
 
     WHY a shared helper: this vector used to be built by two copies of the same
     expression (one in train(), one in the test harness), and it sits UPSTREAM of
@@ -189,9 +195,9 @@ def build_participating_rows(num_envs: int,
       args; its caller keeps an explicit driver-env agreement assert beside the
       call, and Cs2PuffeRL._init_hybrid_aim re-checks the length.
     - ``hero_team`` must stay the complement of SelfPlayManager.opponent_team
-      (use SelfPlayManager.initial_hero_team()). Under "noop" that team is
+      (use SelfPlayManager.initial_hero_team()). Under a scripted opponent that team is
       constant for the whole run because the mode forbids self-play; a
-      disagreement would mask the statue's rows IN and the learner's rows OUT
+      disagreement would mask the scripted team's rows IN and the learner's rows OUT
       while every metric still looked plausible.
     """
     if opponent_mode not in OPPONENT_MODES:
@@ -207,7 +213,7 @@ def build_participating_rows(num_envs: int,
     assert agents_per_env == 2 * TEAM_SIZE, (agents_per_env, TEAM_SIZE)
     slot = np.arange(num_envs * agents_per_env) % agents_per_env
     rows = (slot % TEAM_SIZE) < n_active
-    if opponent_mode == "noop":
+    if opponent_mode in SCRIPTED_OPPONENT_MODES:
         rows &= (slot < TEAM_SIZE) if hero_team == "t" else (slot >= TEAM_SIZE)
     return rows
 
@@ -317,7 +323,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     n_active = env_cfg.n_active_per_team
     assert 1 <= n_active <= TEAM_SIZE, n_active
     opponent = resolve_opponent_mode(args)
-    _part_per_env = n_active * (1 if opponent == "noop" else 2)
+    _part_per_env = n_active * (1 if opponent in SCRIPTED_OPPONENT_MODES else 2)
     raw_timesteps = args.timesteps * (TEAM_SIZE * 2) // _part_per_env
     # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
     # bonus (argparse choices); the test harness passes a bool — accept both so
@@ -356,7 +362,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "seed": args.seed,
         "total_timesteps": raw_timesteps,
         "participating_timesteps": args.timesteps,
-                                                                       # Rung 1a T3: "self" (both teams learn) or "noop" (statue opponent —
+                                                                       # Rung 1a T3: "self" (both teams learn) or "noop"/"walker" (scripted opponent —
                                                                        # hero-team-only participation AND budget, see raw_timesteps above).
                                                                        # NOT an EnvConfig knob: the statue is enforced trainer-side, in
                                                                        # the patched evaluate(), so the env is identical either way. Not

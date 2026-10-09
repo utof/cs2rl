@@ -38,8 +38,9 @@ CHECKPOINT_HELPERS = (
 # post-construction method: +_max_entropy and +_ret_device (methods the fixed list
 # never read), +_action_mask_view_main (a 3-argument getattr became a direct read),
 # -_warmstart_phase (now also stored by an anchored method, _prepare_entropy_update;
-# the _WARMSTART_ATTRS check below still requires it on the instance).
-EXPECTED_ANCHOR_COUNT = 24
+# the _WARMSTART_ATTRS check below still requires it on the instance). --opponent walker
+# added +_opponent_walker (read by _walk_scripted_opponents, declared by _init_selfplay).
+EXPECTED_ANCHOR_COUNT = 25
 # Read AND overwritten by anchored bodies, so derive_anchor() (reads minus stores) never
 # requires them; this list pins their constructor declarations by name.
 DECLARED_AND_OVERWRITTEN = ("_last_nan_warn_t", "_selfplay_used_past", "_tag_metrics")

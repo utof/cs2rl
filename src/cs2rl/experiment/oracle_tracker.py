@@ -80,7 +80,7 @@ from cs2rl.experiment import oracle_statue as L0
 
 # Walker-motion floors. Deliberately NOT CLI-configurable, like L0's thresholds.
 # KNOWN LIMIT: wall stalls count as not moving, so this is calibrated to the default WalkerActor (a strafe-only
-# walker reads 0.874 and fails); recalibrate before changing the walker's bins or holds (the planned WalkerParams).
+# walker reads 0.874 and fails); recalibrate before changing the walker's bins or holds (WalkerParams exists now; this walker uses none).
 MIN_MOVING_FRAC = 0.90
 MIN_NET_DISP_MEDIAN = 50.0             # u
 

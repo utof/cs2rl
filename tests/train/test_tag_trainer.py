@@ -180,11 +180,9 @@ def test_row_mask_matches_obs_team_bit():
         trainer.evaluate()
         seg = torch.arange(trainer.segments)
         expected_t = ((seg % 10) < 5).float()
-        # Probe timestep 1, not 0: on the FIRST evaluate() the t=0 slot still
-        # holds the zero-initialized pre-step obs (verified empirically:
-        # eval-0 t0 is all zeros, t1+ and every later eval match exactly).
-        # The TAG mask keys on segment index, never on obs content, so the
-        # invariant under test is unaffected by which timestep we pin.
+        # Probe timestep 1: the TAG mask keys on segment index, never on obs
+        # content, so any timestep works. (Before #157 the first evaluate()'s t=0
+        # slot was the all-zero reset obs.)
         team_bits = trainer.observations[:, 1, 24].float().cpu()
         assert torch.equal(team_bits,
                            expected_t), ("segment%10 team mask disagrees with obs[24] team bit — "
@@ -245,9 +243,8 @@ def test_row_mask_matches_obs_team_bit_on_a_split_trainer():
         trainer.evaluate()
         seg = torch.arange(trainer.segments)
         expected_t = ((seg % 10) < 5).float()
-        # Probe timestep 1, NOT 0: on the FIRST-ever evaluate() the t=0 slot
-        # still holds the zero-initialized pre-step obs (same artifact the
-        # legacy pin above documents and dodges the same way).
+        # Probe timestep 1, as the legacy pin above does: the TAG mask keys on
+        # segment index, so any timestep works.
         team_bits = trainer.observations[:, 1, 24].float().cpu()
         assert torch.equal(team_bits, expected_t), (
             "segment%10 team mask disagrees with obs[24] team bit on the split path — "
@@ -263,15 +260,15 @@ def test_row_mask_matches_obs_team_bit_on_a_both_flags_trainer():
 
     WHAT: tct_split_heads=True, tct_split_trunk=True; after one evaluate()
     the segment-index team mask still equals the C-env team bit. Probe
-    timestep 1, not 0 (same t=0 zero-obs artifact as the heads-only pin).
+    timestep 1 (as the heads-only pin does; any timestep works).
 
     WHY: trunk routing also keys on obs[24]. If PufferLib segment order
     or the env slot layout drifted only under a split trunk, TAG would
     measure the wrong partition of a correctly routed network. The
     heads-only pin is test_row_mask_matches_obs_team_bit_on_a_split_trainer.
 
-    PITFALL: do not probe t=0 on the first evaluate() — that slot is
-    still the zero-initialized pre-step obs.
+    NOTE: before #157 the first evaluate()'s t=0 slot was the all-zero reset
+    obs, which is why these pins probe timestep 1.
     """
     from tests._helpers.trainer_harness import _build_trainer_for_test
     torch.manual_seed(0)

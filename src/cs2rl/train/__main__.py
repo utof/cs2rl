@@ -184,7 +184,9 @@ if __name__ == "__main__":
                         help="Rung 1a T3: 'noop' turns the opponent team into a stationary "
                         "statue (no-op bin on every action head, zero aim delta) and excludes "
                         "its rows from participation, from --timesteps and from every loss. "
-                        "Requires --no-self-play. Default 'self' = today's behaviour.")
+                        "'walker' is the same except each opponent row walks a scripted walker "
+                        "(cs2rl.eval.walker.TRAIN_MIX, re-drawn every episode). "
+                        "Both require --no-self-play. Default 'self' = today's behaviour.")
     # R0-G env knobs. Default None ⇒ the env/nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.
@@ -339,7 +341,7 @@ if __name__ == "__main__":
     # --dump-config / the sweep fingerprint reject a bad --aim-log-std-max
     # instead of build_policy() 30 s into every retry.
     validate_aim_log_std_max(args.aim_log_std_max)
-    # Rung 1a T3: --opponent noop is only coherent with self-play bookkeeping
+    # Rung 1a T3: a scripted --opponent (noop, walker) is only coherent with self-play bookkeeping
     # off. Checked HERE, above the --dump-config exit, for the same reason as
     # the σ cap: the Modal/run_rung1 fingerprint step must reject the launch
     # before any env is built.
