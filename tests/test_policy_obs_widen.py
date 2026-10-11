@@ -45,9 +45,9 @@ def test_sim_v3_columns_map_every_old_field_to_its_new_slot():
     assert set(range(spec_obs.OBS_DIM)) - set(cols) == _velocity_columns()
 
 
-def _layout(self_w=28, count=5, stride=10, global_w=14):
-    """A tiled OBS_BLOCKS of these widths (teammate 28 as in every layout so far)."""
-    en0 = self_w + 28
+def _layout(self_w=28, team_w=28, count=5, stride=10, global_w=14):
+    """A tiled OBS_BLOCKS of these widths; the defaults are the live sim-v4 layout."""
+    en0 = self_w + team_w
     g0 = en0 + count * stride
     blocks = {
         "self": (0, self_w),
@@ -60,12 +60,14 @@ def _layout(self_w=28, count=5, stride=10, global_w=14):
 
 # Planted siblings of the sim-v4 layout: each changes ONE shape the column map assumes.
 @pytest.mark.parametrize(
-    "blocks, count, stride",
-    [_layout(self_w=30),
-     _layout(stride=7),
-     _layout(count=6),
-     _layout(global_w=16)],
-    ids=["self-grew", "enemy-stride-shrank", "enemy-count-grew", "global-grew"])
+    "blocks, count, stride", [
+        _layout(self_w=30),
+        _layout(team_w=36),
+        _layout(stride=7),
+        _layout(count=6),
+        _layout(global_w=16)
+    ],
+    ids=["self-grew", "teammate-grew", "enemy-stride-shrank", "enemy-count-grew", "global-grew"])
 def test_sim_v3_columns_refuse_a_layout_of_another_shape(monkeypatch, blocks, count, stride):
     # Positive control: _layout() with no change IS the live layout, which maps.
     assert _layout() == (spec_obs.OBS_BLOCKS, spec_obs.OBS_ENEMY_COUNT, spec_obs.OBS_ENEMY_STRIDE)
