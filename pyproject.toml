@@ -437,7 +437,7 @@ layers = [
     "loop",
     "compose",
     "record : evaluate : trainer",
-    "selfplay : envs : update : rewards : entropy : resume : metrics",
+    "selfplay : envs : update : rewards : entropy : resume : metrics : duel_opponent",
     "config",
 ]
 broken_contract_guidance = "Give a new train/ module a layer here. Move an upward import down, or the shared code to a lower module."

@@ -43,10 +43,12 @@ import pufferlib
 import torch
 from pufferlib.pufferl import PuffeRL, compute_puff_advantage
 
+from cs2rl.eval.duel_bot import DuelBot, parse_params
 from cs2rl.eval.walker import H_MOVE, TRAIN_MIX, TRAIN_WEIGHTS, RandomWalker
 from cs2rl.policy import _MASK_HEAD_SLICES, _hybrid_sample_logits
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.train.config import SCRIPTED_OPPONENT_MODES
+from cs2rl.train.duel_opponent import DuelOpponent, duel_rngs
 from cs2rl.train.entropy import WS_GRACE, WS_OFF, warmstart_entropy_state
 from cs2rl.train.resume import _atomic_save_state_dict, collect_train_state
 from cs2rl.train.rewards import WelfordStd, process_step_rewards
@@ -582,6 +584,9 @@ class Cs2PuffeRL(PuffeRL):
         # The scripted walker of --opponent walker; None in every other mode.
         self._opponent_walker = (self._build_opponent_walker()
                                  if self_play_mgr.opponent_mode == "walker" else None)
+        # The duel bot and its level mix of --opponent duel; None in every other mode.
+        self._opponent_duel = (self._build_opponent_duel()
+                               if self_play_mgr.opponent_mode == "duel" else None)
         # Whether this epoch's rollout drew a past policy; every evaluate() overwrites it.
         self._selfplay_used_past = False
         self._past_lstm_h = {k: torch.zeros_like(v) for k, v in self.lstm_h.items()}
@@ -640,8 +645,9 @@ class Cs2PuffeRL(PuffeRL):
         Per chunk of agent rows the vector env returns: count participating steps,
         ``_sample_actions`` (policy forward and hybrid sample), ``_process_rewards``,
         the opponent overrides (``_play_past_opponent`` when this epoch drew a past
-        policy, then ``_freeze_statue_opponents`` under ``--opponent noop`` or
-        ``_walk_scripted_opponents`` under ``--opponent walker``),
+        policy, then ``_freeze_statue_opponents`` under ``--opponent noop``,
+        ``_walk_scripted_opponents`` under ``--opponent walker`` or
+        ``_duel_scripted_opponents`` under ``--opponent duel``),
         ``_store_step``, ``_collect_infos``, and send the (discrete, continuous)
         action pair to ``HybridAimVecEnv``.
 
@@ -700,6 +706,8 @@ class Cs2PuffeRL(PuffeRL):
                     self._freeze_statue_opponents(step, o_device.shape[0])
                 elif self._self_play_mgr.opponent_mode == "walker":
                     self._walk_scripted_opponents(step, d, o_device.shape[0], action_mask)
+                elif self._self_play_mgr.opponent_mode == "duel":
+                    self._duel_scripted_opponents(step, o, d, action_mask, info)
                 elif self._self_play_mgr.opponent_mode in SCRIPTED_OPPONENT_MODES:
                     # A scripted mode without an override would let the policy play the
                     # non-participating team: refuse instead of falling through.
@@ -893,6 +901,52 @@ class Cs2PuffeRL(PuffeRL):
                             np.random.default_rng(self.config["seed"]),
                             mix=TRAIN_MIX,
                             weights=TRAIN_WEIGHTS)
+
+    def _duel_scripted_opponents(self, step, o, d, action_mask, info):
+        """``--opponent duel``: the opponent rows of ``step`` play the duel bot (Rung 1c).
+
+        The rows get ``_freeze_statue_opponents``' overwrite (logprobs and value 0), then
+        every discrete head and the aim become ``DuelOpponent.step``'s, decided from the
+        rows' observations in ``o`` (this tick's, the ones the policy just read) and their
+        bool ``action_mask`` rows. ``d`` starts new episodes and ``info`` carries the
+        finished rounds' winners (``DuelOpponent``). The aim goes to the env as written:
+        HybridAimVecEnv sends ``step.cont_action`` unchanged, and the env clamps Δyaw to
+        ±max_turn_speed as it does the policy's. One bot per trainer over all opponent
+        rows, so a chunk must be the whole batch, as for the walker.
+
+        The bot picks only mask-legal actions (it fires and reloads on the mask's bins,
+        and a dead or parked row gets bin 0 on every head), so nothing is zeroed here.
+        """
+        batch_n = o.shape[0]
+        self._freeze_statue_opponents(step, batch_n)
+        opp_idx = torch.where(self._self_play_mgr.get_opponent_mask(batch_n,
+                                                                    self.config["device"]))[0]
+        duel = self._opponent_duel
+        assert duel is not None, "--opponent duel builds its bot in _init_selfplay"
+        assert action_mask is not None, "--opponent duel decides from the action masks"
+        rows = opp_idx.cpu()
+        act, cont = duel.step(o[rows].numpy(), action_mask[opp_idx].cpu().numpy(),
+                              d[opp_idx].cpu().numpy() > 0, info)
+        step.action[opp_idx] = torch.as_tensor(act).to(step.action)
+        step.cont_action[opp_idx] = torch.as_tensor(cont).to(step.cont_action)
+
+    def _build_opponent_duel(self):
+        """The run's one ``DuelOpponent`` over the opponent rows, seeded from ``config["seed"]``.
+
+        The bot's geometry (turn clamp, map extent, aim height, move speed) is read off the
+        vecenv's driver env, built in this process from the same factory and config as
+        every worker env (the pin-pitch and turn-speed agreement checks read it too).
+        """
+        mgr = self._self_play_mgr
+        n_opp = int(mgr.get_opponent_mask(self.total_agents, "cpu").sum())
+        bot_rng, level_rng = duel_rngs(self.config["seed"])
+        mix = self.config["duel_mix"]
+        bot = DuelBot.for_env(self.vecenv.driver_env, n_opp, bot_rng, parse_params(mix[0][0]))
+        return DuelOpponent(bot,
+                            mix,
+                            rows_per_env=mgr.AGENTS_PER_ENV // 2,
+                            hero_team=0 if mgr.opponent_team == "ct" else 1,
+                            rng=level_rng)
 
     def _store_step(self, step, o, o_device, r, d, env_id, action_mask):
         """Write one chunk into the rollout buffers at each row's current segment slot."""
@@ -1317,7 +1371,7 @@ class Cs2PuffeRL(PuffeRL):
         The other rows would misstate it. An n_active-parked row has one valid bin per
         discrete head (discrete entropy 0), but with aim_entropy_bonus on (the
         default) its entropy also includes the aim Gaussian's, which is negative for
-        σ below 1/sqrt(2πe) ≈ 0.24. A scripted row under ``--opponent`` noop or walker is a
+        σ below 1/sqrt(2πe) ≈ 0.24. A scripted row under ``--opponent`` noop, walker or duel is a
         spawned agent with the env's ordinary masks. ``alpha_loss`` is built every
         minibatch because it is logged; ``_step_alpha`` skips the step in GRACE and
         when the loss is non-finite.
