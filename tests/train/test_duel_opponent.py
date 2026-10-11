@@ -375,6 +375,7 @@ def test_the_trainers_bot_geometry_is_oracle_duels():
         for name in ("mts", "half", "map_diag", "aim_dz", "vmax", "centre"):
             assert getattr(got, name) == getattr(want, name), name
         assert got.n_rows == 20
+        assert trainer._opponent_duel.hero == 0, "the hero is team T while CT is the bot"
         drv, ref = trainer.vecenv.driver_env.config, ref_env.config
         for knob in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "accuracy",
                      "hitboxes"):
