@@ -12,8 +12,9 @@ WHAT IS PINNED HERE (seed 0, obs-only bots; the values observed 2026-10-11)
   its arrangement. If this goes red after a sim change, find the first step whose state
   differs before suspecting the decoding.
 * A perfect mirror is all double kills, and the verdict fails it as "no decided round".
-  That pins the simultaneous combat (cs2_combat.h alive_pre, cs2_env.h WINNER_DRAW) and
-  duel_bot.LANDS_TOL together: without either, one side wins rounds.
+  That pins cs2_combat.h's alive_pre and duel_bot.LANDS_TOL together: without either, one
+  side wins rounds. oracle_duel scores rounds by death ticks and never reads winner;
+  WINNER_DRAW is pinned by tests/env/c/test_simultaneous_combat.py.
 * Floors: under the cone and the hitboxes the hard stop bot beats the hard runner (its
   share's interval above 0.5 at 150 rounds a side; observed 0.6220 [0.5650, 0.6758]);
   without the cone it does not (observed 0.4437 [0.3870, 0.5018]). The same holds for the
