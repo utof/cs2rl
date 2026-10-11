@@ -40,9 +40,9 @@ PITFALLS
 * A pinhole's children live in its 2D image space, so ``aim`` and ``shot`` are siblings of
   ``pov`` under ``eye``, never children of ``pov``.
 * The eye frame is FLU (x forward, y left, z up; ``_eye_quat``), the pinhole is declared FLU
-  too, so x is the aim direction in both. The combat ray's direction is
-  (cos p cos y, cos p sin y, sin p) (cs2_combat.h); tests/viz/test_replay.py pins the
-  quaternion to it.
+  too, so x is the aim direction in both. The aimed ray's direction is
+  (cos p cos y, cos p sin y, sin p) (cs2_combat.h; the combat ray before the cone and recoil
+  turn it, below); tests/viz/test_replay.py pins the quaternion to it.
 * Snapshots are read after ``env.step``: the positions and facing ``process_combat`` used.
   A tracer is drawn from the post-step pose for that reason.
 * The tracer colour reads "an enemy of the shooter lost hp this tick". With several
@@ -50,7 +50,8 @@ PITFALLS
 * The tracer runs along facing / pitch, the aimed ray. The combat ray is also turned by the
   movement-inaccuracy cone (``EnvConfig.accuracy``, on by default) and, with
   ``EnvConfig.recoil`` on (off by default, no CLI flag), by a recoil punch. The snapshot
-  carries neither offset, so a missed shot's tracer can run through the target (KNOWN LIMIT).
+  carries neither offset, so a missed shot's tracer can run through the target, and a hit's
+  beside it (KNOWN LIMIT).
 * Rerun stores positions and the eye quaternion as float32. The C positions are float32
   too, so they are exact; the aim direction is within float32 rounding.
 * The file is opened at the first round's end, then written round by round: a crash
@@ -114,7 +115,7 @@ def _eye_quat(yaw: float, pitch: float) -> list[float]:
     """xyzw quaternion turning the FLU eye frame's +x onto the aim direction.
 
     Yaw about +z, then pitch about the turned +y (negative angle: +pitch looks up), so
-    +x lands on (cos p cos y, cos p sin y, sin p), the combat ray of cs2_combat.h.
+    +x lands on (cos p cos y, cos p sin y, sin p), the aimed ray of cs2_combat.h.
     """
     sz, cz = math.sin(yaw / 2), math.cos(yaw / 2)
     sy, cy = math.sin(-pitch / 2), math.cos(-pitch / 2)

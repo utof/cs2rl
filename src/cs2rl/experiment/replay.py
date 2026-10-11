@@ -10,10 +10,9 @@ WHAT
 Plays ``--rounds`` rounds of oracle_statue's arena harness (``run_check``: the Rung 1a env,
 jump off, the movement-inaccuracy cone as ``--accuracy`` says) with the hero on the T row
 and an opponent from ``aim_eval.OPPONENTS`` on the CT row, and records every tick with
-``cs2rl.viz.render.ReplayRecorder``. The hero is a
-checkpoint (``aim_eval.load_checkpoint``: its run's config.json must sit beside it) played
-like aim_eval's policy cells (``--aim``, ``--lstm``), or ``oracle`` / ``obs-oracle``,
-oracle_statue's two scripted heroes. It prints one row per round, writes the replay (one
+``cs2rl.viz.render.ReplayRecorder``. The hero is a checkpoint (``aim_eval.load_checkpoint``:
+its run's config.json must sit beside it) played like aim_eval's policy cells (``--aim``,
+``--lstm``), or ``oracle`` / ``obs-oracle``, oracle_statue's two scripted heroes. It prints one row per round, writes the replay (one
 Rerun recording per round, in one .rrd) and a per-tick text dump beside it (``.txt``), and
 prints the command that opens the replay. Exit status 0 whenever the rounds complete.
 
@@ -26,8 +25,8 @@ FIDELITY
 --------
 Round k is episode k of the ``run_check`` call aim_eval makes for the same cell, seed and
 cone setting: the same opponent factory, the same hero, the same torch seeding for a policy
-hero, and episodes do not depend on how many follow. Recording only reads the snapshots run_check
-already takes, and draws no random numbers. tests/experiment/test_replay.py pins both (the
+hero, and episodes do not depend on how many follow. Recording only reads the snapshots
+run_check already takes, and draws no random numbers. tests/experiment/test_replay.py pins both (the
 aim_eval cell only where the Rung 1a checkpoint is present).
 
 PITFALLS
@@ -211,7 +210,8 @@ def main(argv=None) -> int:
                     help="the movement-inaccuracy cone (EnvConfig.accuracy): 1 on, 0 off. "
                     "Default: a checkpoint's run's own config.json setting (a run without the "
                     "key trained without the cone), as aim_eval plays it; EnvConfig.accuracy "
-                    "for a scripted hero")
+                    "for a scripted hero. A checkpoint value that differs from its run's prints "
+                    "the env-mismatch warning.")
     ap.add_argument("--out",
                     type=Path,
                     help="the .rrd to write (default under outputs/recordings/)")

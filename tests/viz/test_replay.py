@@ -2,9 +2,10 @@
 
 WHAT IS PINNED HERE
 -------------------
-* The eye quaternion turns the FLU eye frame's +x onto cs2_combat.h's combat ray
+* The eye quaternion turns the FLU eye frame's +x onto cs2_combat.h's aimed ray
   (cos p cos y, cos p sin y, sin p) and keeps +y level (no roll), so the aim stick, the
-  tracer and the eyes camera all look where the sim shoots. The call site is pinned too: a
+  tracer and the eyes camera all look along the sim's aimed ray (the cone and recoil then
+  turn the shot: render.py KNOWN LIMIT). The call site is pinned too: a
   hero with non-zero facing and pitch logs the eye quaternion of (facing, pitch), an FLU
   pinhole, and an aim stick and a tracer along the eye's +x.
 * ``room_walls``: the arena (24 adjacent cells) is walled by its outline only; on the

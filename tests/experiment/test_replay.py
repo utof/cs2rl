@@ -15,8 +15,14 @@ WHAT IS PINNED HERE
   ``--rounds 0`` before touching the file; ``default_path`` names a checkpoint by its run
   directory and stem.
 * A checkpoint's rounds are the episodes of aim_eval's policy cell for the same opponent,
-  seed and modes. It needs the Rung 1a checkpoint, which only the owner's checkouts have
-  (outputs/ is not in git), so it skips without one.
+  seed, modes and cone setting (the run's own, as aim_eval's CLI plays it). It needs the
+  Rung 1a checkpoint, which only the owner's checkouts have (outputs/ is not in git), so it
+  skips without one. KNOWN LIMIT: that run's config.json has no ``accuracy`` key, so the pin
+  covers the cone-off resolution only; cone-on parity was measured once (lane F review,
+  2026-10-11), not pinned.
+* The CLI's ``--accuracy``: a checkpoint plays its run's own cone unless the flag overrides it
+  (then it warns), a scripted hero the flag, else the EnvConfig default; the .txt header
+  names the cone that ran.
 """
 import re
 import subprocess
