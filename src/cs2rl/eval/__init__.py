@@ -2,6 +2,7 @@
 
 Members:
   baselines       -- the fixed-baseline evaluator (random, oracle, idle and policy actors);
+  duel_bot        -- the scripted duel bot at CS2's bot-profile dials (#152 L2), import-light;
   metrics_schema  -- REGISTRY, the one registry of every metrics key, and EVAL_KEYS;
   scripted_expert -- the scripted walk-to-bombsite-and-plant expert behind the BC demos;
   walker          -- the random-walker opponent (#152), import-light like metrics_schema.

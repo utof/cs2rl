@@ -626,6 +626,11 @@ typedef struct {
     float   x, y, z;    /* where the bomb lies (DROPPED, and from the plant on) */
 } BombState;
 
+/* GameState.winner when the last T and the last CT die on the same tick (process_combat
+ * resolves a tick's shots simultaneously, #152 L2): no team wins; cs2_rewards.h pays no
+ * round-outcome reward and counts it in neither winner_t nor winner_ct. */
+#define WINNER_DRAW (-2)
+
 /* ── Game state ── */
 typedef struct {
     int32_t    tick;
@@ -633,7 +638,7 @@ typedef struct {
     AgentState agents[10];  /* agents[0..4]=T, agents[5..9]=CT              */
     int8_t     round_over;
     int8_t     _pad_gs0[3]; /* explicit padding to int32 boundary            */
-    int32_t    winner;      /* 0=T, 1=CT, -1=ongoing                        */
+    int32_t    winner;      /* 0=T, 1=CT, -1=ongoing or timed out, WINNER_DRAW */
     BombState  bomb;        /* #164: the bomb lifecycle, see BombState above */
     /* Batch 2: round-fixed designated bomb carrier (T-side index 0..4).
      * Distinct from bomb_carrier(), which is the *dynamic* possession
@@ -719,7 +724,7 @@ typedef struct {
     /* ── Rung 0 R0-A (spec 2026-08-29 §3): combat instrumentation ──
      * Written into BOTH step_stats and episode_stats at the accumulation
      * site (there is no ss→es merge). Shooter counters are per round fired
-     * by a participating && alive agent; the *_facing/_on_target/_hit/
+     * by a participating agent alive before combat; the *_facing/_on_target/_hit/
      * _stance_blocked subsets are scored against the nearest visible
      * participating enemy snapshotted BEFORE process_combat (cs2_env.h), so
      * a same-tick kill cannot make a shot "unscored". mutual_vis pair

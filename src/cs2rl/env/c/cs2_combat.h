@@ -332,9 +332,23 @@ static void process_combat(Dust2Env*      env,
      * is cs2_hitboxes.h's capsules and does not read it. */
     static const float HIT_HALF_WIDTH = 16.0f;
 
+    /* Simultaneous resolution (#152 L2): every shot of the tick is resolved against the agents
+     * alive BEFORE combat. A shooter killed earlier in this loop still fires, and a later ray
+     * can still hit an agent this tick has already killed (its body blocks the ray, the damage
+     * lands, no second kill is recorded). WHY: with deaths applied inside the loop, the lower
+     * index fired first, so when both duellists fired lethal shots on one tick the T (agents
+     * 0..4) lived and the CT never fired (two identical scripted duel bots: the T won 646 of
+     * 1000 rounds, 2026-10-11). A same-tick exchange is now a double kill, and
+     * env_step scores a round where both teams die on one tick as a draw (WINNER_DRAW).
+     * PITFALL: kill credit on a target hit by several shooters this tick still goes to the
+     * lowest index whose shot took hp to 0. */
+    int8_t alive_pre[N_AGENTS];
+    for (int i = 0; i < N_AGENTS; i++)
+        alive_pre[i] = g->agents[i].alive;
+
     for (int i = 0; i < N_AGENTS; i++) {
         AgentState* a = &g->agents[i];
-        if (!a->alive)
+        if (!alive_pre[i])
             continue;
 
         int shoot = actions[i * ACTION_DIM + HEAD_SHOOT];
@@ -479,7 +493,7 @@ static void process_combat(Dust2Env*      env,
 
         for (int ej = en_start; ej < en_start + TEAM_SIZE; ej++) {
             AgentState* en = &g->agents[ej];
-            if (!en->alive || !vis10[i][ej])
+            if (!alive_pre[ej] || !vis10[i][ej])
                 continue;
 
             if (hitboxes) {
@@ -619,12 +633,15 @@ static void process_combat(Dust2Env*      env,
         }
 
         if (best_enemy->hp <= 0) {
-            best_enemy->hp    = 0;
-            best_enemy->alive = 0;
-            if (*n_kills < N_AGENTS) {
-                kills[*n_kills][0] = i;
-                kills[*n_kills][1] = (int)(best_enemy - g->agents);
-                (*n_kills)++;
+            best_enemy->hp = 0;
+            /* The tick's first lethal shot kills; a later one hits the body (alive_pre). */
+            if (best_enemy->alive) {
+                best_enemy->alive = 0;
+                if (*n_kills < N_AGENTS) {
+                    kills[*n_kills][0] = i;
+                    kills[*n_kills][1] = (int)(best_enemy - g->agents);
+                    (*n_kills)++;
+                }
             }
         }
     }

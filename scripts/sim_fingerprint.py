@@ -126,14 +126,41 @@ real reset obs, so it sees round-start carrier changes the all-zero obs hid
     --steps 5000 --aim-mode bomb --n-active 3
         6b412b0ecf80d64f0a65cb2ec64e0fc713d5d32e9f3d933b065abab325acb5d5
   All six predate the movement-inaccuracy cone and reproduce with it off (EnvConfig.accuracy
-  False, the default until 2026-10-09). With it on, the default since, the two random rows
-  reproduce and the track and bomb rows do not (measured, lane D).
-  The hit model (#391) leaves all six as they were under --hitboxes 0 (the legacy ellipsoid):
-  with the cone off they reproduce, and with it on every row equals its pre-#391 value. Under
+  False, the default until 2026-10-09), the two bomb rows only until #152 L2 (below). With it
+  on, the default since, the two random rows reproduce and the track and bomb rows do not
+  (measured, lane D).
+  The hit model (#391) left all six as they were under --hitboxes 0 (the legacy ellipsoid):
+  with the cone off they reproduced, and with it on every row equalled its pre-#391 value. Under
   the hitbox model, the default since #391, the two random rows reproduce and the track and
   bomb rows do not; track mode still kills there (deaths=4 at --steps 200 and 12 at 700, cone
   off). This script has no --accuracy flag: hold the cone off by building the script's
   EnvConfig with accuracy=False (measured, #391).
+
+SIMULTANEOUS-COMBAT FINGERPRINTS (seed 7, rng-seed 123, --hitboxes 0, the cone off). #152 L2
+made process_combat resolve a tick's shots against the agents alive before combat. The rows
+tests/env/c/test_hitboxes.py pins at --steps 200 (random, track) and 700 (track) still
+reproduce; the two bomb rows moved to:
+    --steps 5000 --aim-mode bomb
+        4c4a1d5d1d3cd819b634564c98387dba40c4ca890d45ec0f224020f5cfbb3cb7
+    --steps 5000 --aim-mode bomb --n-active 3
+        3c4c13e4bedc59ab2db508bb70257de2168f3524e71fef2654919d38d11b966d
+  A per-step compare against the parent found the first difference on a tick where one CT
+  died and the new build had one more shooter than the parent (7 against 6 at step 717; 5
+  against 4 at step 227 with --n-active 3): the dying CT fired. Every earlier step is
+  identical, including 8 (2) earlier ticks with a death and two or more shooters, on which
+  the order changed nothing (lane E evidence).
+  The shot penalty then stopped testing `alive` (cs2_rewards.h: every agent that fired this
+  tick pays, so a shooter killed on its firing tick pays too, #152 L2 review), and the two
+  bomb rows moved again, to:
+    --steps 5000 --aim-mode bomb
+        1d00d994054e671d873df865562e8cc6052f29d6eadf4dff00f4a1c764544675
+    --steps 5000 --aim-mode bomb --n-active 3
+        cbaa454b29ffeece96cb5c4f176f1b624c943ed6e53d27d8304d93adf27537d5
+  A per-step compare against the build with the alive test found masks, observations and
+  terminals identical, and rewards different only on the (step, agent) pairs where a shooter
+  was dead at the end of its firing tick, each by the penalty to float32 rounding: 19 such
+  shooters on 16 steps from step 717, and 12 on 12 steps from step 171 with --n-active 3.
+  The 200- and 700-step rows have no such step and still reproduce (lane E fix evidence).
 
 SIM-V4 FINGERPRINTS (enemy-velocity slots, OBS_DIM 110 -> 120). The obs is wider, so every
 whole-obs hash moves; the masks, rewards, terminals and the stderr counters do not.
