@@ -134,9 +134,10 @@ def sim_v3_obs_columns() -> list[int]:
     slot s's field f moves from 56 + 8 s + f to 56 + OBS_ENEMY_STRIDE * s + f, and the
     global block moves by the enemy block's growth.
 
-    Raises RuntimeError if the current layout no longer has that shape (another block
-    resized, enemy fields inserted rather than appended): a later layout change must add
-    its own mapping, not reuse this one.
+    Raises RuntimeError if another block is resized, the enemy count changes or the enemy
+    stride drops below 8. KNOWN LIMIT: it cannot see where new enemy fields went. A later
+    layout that inserts fields before +8, rather than appending them, passes this check and
+    must replace the map.
     """
     from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
 
