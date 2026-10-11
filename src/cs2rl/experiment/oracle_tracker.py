@@ -8,7 +8,8 @@ hero (``OracleActor``, or ``ObsOracleActor`` under ``--obs-only``), the loop and
 L0 thresholds are oracle_statue's; the CT row is driven by
 ``eval.walker.WalkerActor`` (a random move direction held for 4..16 ticks, never
 shooting or turning). It prints one row per episode, then the totals and one PASS/FAIL
-line. Exit status 0 = PASS, 1 = FAIL.
+line. Exit status 0 = PASS, 1 = FAIL. Like oracle_statue's, a capture does not pin the
+movement-inaccuracy cone (KNOWN LIMIT there).
 
     env UV_NO_SYNC=1 PYTHONPATH=<checkout>/src .venv/bin/python -m cs2rl.experiment.oracle_tracker
     env UV_NO_SYNC=1 PYTHONPATH=<checkout>/src .venv/bin/python -m cs2rl.experiment.oracle_tracker --obs-only

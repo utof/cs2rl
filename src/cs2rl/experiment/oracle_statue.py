@@ -20,6 +20,12 @@ owner's decision of 2026-10-09), so ``--accuracy 0`` is the exact Rung 1a env:
 It reports kill rate, time-to-kill quantiles and the R0-A shot counters, then
 prints one PASS/FAIL line. Exit status 0 = PASS, 1 = FAIL.
 
+KNOWN LIMIT: a capture does not pin the cone. The hero never moves, so every shot carries
+the standing cone (6.255 mrad), and with the cone on no hit or kill changed against the
+statue or oracle_tracker's walker (200 episodes, seed 0, measured 2026-10-11): this report
+only gains its cone line, and the tracker's is identical. tests/env/c/test_accuracy.py pins
+the cone itself.
+
     UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue
     UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue --statue-z 24
     UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue --obs-only
