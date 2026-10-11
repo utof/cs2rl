@@ -19,7 +19,12 @@ from typing import Any
 import numpy as np
 
 from cs2rl.env.factory import build_eval_env
-from cs2rl.policy import state_dict_is_split, state_dict_is_trunk_split
+from cs2rl.policy import (
+    SIM_V3_OBS_DIM,
+    state_dict_is_split,
+    state_dict_is_trunk_split,
+    widen_sim_v3_encoder,
+)
 from cs2rl.spec.paths import CHECKPOINTS_DIR
 from cs2rl.train.compose import PolicyInit, _close_on_exit, build_trainer
 from cs2rl.train.config import (
@@ -425,6 +430,11 @@ def _resume_policy_init(args, *, full_state: bool) -> PolicyInit:
     gh#91: a BC warm-start checkpoint carries aim_log_std frozen at LOG_STD_INIT, and
     without the re-init the KL early stop throttles the run. A full-state resume
     (``full_state``) restores the exact pre-crash σ and is never widened.
+
+    sim-v4 obs widen, before all of that: a 110-wide (sim-v3) checkpoint's encoder input
+    weights become OBS_DIM wide (cs2rl.policy.widen_sim_v3_encoder). It touches only those
+    weights, so its place in the order does not change the result. With ``full_state`` a
+    110-wide checkpoint is refused (SystemExit): the saved optimizer moments keep the old width.
     """
     heads, trunk, state_dict, resume_path = resolve_resume_split(
         getattr(args, "resume", None),
@@ -432,6 +442,16 @@ def _resume_policy_init(args, *, full_state: bool) -> PolicyInit:
         trunk_flag=bool(getattr(args, "tct_split_trunk", False)))
     if resume_path is None:
         return PolicyInit(tct_split_heads=heads, tct_split_trunk=trunk)
+    state_dict, widened = widen_sim_v3_encoder(state_dict)
+    if widened and full_state:
+        raise SystemExit(f"[Resume] {resume_path.name} reads the {SIM_V3_OBS_DIM}-wide sim-v3 obs: "
+                         f"--resume-run restores optimizer moments shaped for it and cannot "
+                         f"cross the sim-v4 obs change. Start a new run with --resume "
+                         f"{resume_path} (weights only).")
+    if widened:
+        print(f"[Train] Obs widen: {resume_path.name} reads the {SIM_V3_OBS_DIM}-wide sim-v3 "
+              f"obs; encoder input moved onto the current layout, the enemy-velocity columns "
+              f"zero (outputs unchanged on the old features).")
     if not full_state and reinit_frozen_aim_log_std(state_dict,
                                                     cap=getattr(args, "aim_log_std_max", None)):
         print(f"[Train] BC-frozen aim_log_std detected in {resume_path.name}: "

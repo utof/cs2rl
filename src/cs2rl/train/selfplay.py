@@ -11,6 +11,7 @@ from cs2rl.policy import (
     load_state_dict_arch_checked,
     state_dict_is_split,
     state_dict_is_trunk_split,
+    widen_sim_v3_encoder,
 )
 from cs2rl.train.config import OPPONENT_MODES
 
@@ -214,6 +215,9 @@ class SelfPlayManager:
             self.pool.remove(path)
             return None
         state_dict = torch.load(path, map_location=device, weights_only=True)
+        # A pool may hold sim-v3 (110-wide) files: sp_seed.pt is a copy of the --resume
+        # checkpoint, and an older pool predates sim-v4. Widened as in the trainer's --resume.
+        state_dict, _ = widen_sim_v3_encoder(state_dict)
         # Both bits inferred from keys — this method receives no config.
         policy = build_policy(vecenv,
                               device,
