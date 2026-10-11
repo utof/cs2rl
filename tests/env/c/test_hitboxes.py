@@ -485,14 +485,16 @@ LEGACY_BOMB_FINGERPRINTS = {
 def _fingerprint(monkeypatch, capsys, argv):
     """scripts/sim_fingerprint.py's hash for `argv` + --hitboxes 0, the cone held off: the
     script builds every env through its module-level EnvConfig name, rebound here (it has no
-    --accuracy flag)."""
+    --accuracy flag). --obs-layout sim-v3 hashes the 110 obs columns these pins were
+    measured on: the sim-v4 enemy-velocity slots widen every obs."""
     path = REPO_ROOT / "scripts" / "sim_fingerprint.py"
     spec = importlib.util.spec_from_file_location("sim_fingerprint_t10", path)
     assert spec is not None and spec.loader is not None
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
     monkeypatch.setattr(mod, "EnvConfig", functools.partial(EnvConfig, accuracy=False))
-    monkeypatch.setattr("sys.argv", ["sim_fingerprint.py", *argv, "--hitboxes", "0"])
+    monkeypatch.setattr("sys.argv",
+                        ["sim_fingerprint.py", *argv, "--hitboxes", "0", "--obs-layout", "sim-v3"])
     capsys.readouterr()
     mod.main()
     out, err = capsys.readouterr()

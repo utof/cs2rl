@@ -153,6 +153,7 @@ from cs2rl.env.c.hit_model import HitGeometry, hit_geometry
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
+from cs2rl.policy import sim_v3_obs_columns
 from cs2rl.spec.action import (
     ACTION_DIM,
     ACTION_HEAD_NAMES,
@@ -426,7 +427,16 @@ def main():
         default=None,
         help="the hit model (EnvConfig.hitboxes): 1 the capsule hitboxes, 0 the legacy "
         "ellipsoid every fingerprint above was measured on. Default: EnvConfig.hitboxes.")
+    ap.add_argument(
+        "--obs-layout",
+        choices=("current", "sim-v3"),
+        default="current",
+        help="sim-v3: hash only the 110 obs columns the sim-v3 layout had "
+        "(cs2rl.policy.sim_v3_obs_columns), so a HEAD run compares with a hash measured "
+        "before the sim-v4 enemy-velocity slots. current: the whole obs.")
     a = ap.parse_args()
+    # slice(None) keeps the current layout's bytes exactly as before the flag existed.
+    obs_cols = sim_v3_obs_columns() if a.obs_layout == "sim-v3" else slice(None)
 
     # PITFALL: `--n-active` omitted must build the SAME env as before, so the
     # None arm is a bare `EnvConfig()`, never `EnvConfig(n_active_per_team=<the
@@ -454,7 +464,7 @@ def main():
     max_turn = float(env._c_env.sd.contents.max_turn_speed)
 
     obs, _ = env.reset()
-    h.update(np.ascontiguousarray(obs).tobytes())
+    h.update(np.ascontiguousarray(obs[:, obs_cols]).tobytes())
 
     # Activity counters — printed to stderr so stdout stays a bare hash that can
     # be diffed/piped. A rollout with all-zero rewards would hash fine yet prove
@@ -485,7 +495,7 @@ def main():
             act[:, HEAD_USE] = rng.random(N_AGENTS) < BOMB_USE_P
             act[:, HEAD_SHOOT] = masks[:, SHOOT_PRESS_COL]
         obs, rew, term, _trunc, info = env.step(act, cont)
-        h.update(np.ascontiguousarray(obs).tobytes())
+        h.update(np.ascontiguousarray(obs[:, obs_cols]).tobytes())
         h.update(np.ascontiguousarray(rew).tobytes())
         h.update(np.ascontiguousarray(term).tobytes())
         if a.aim_mode == "bomb":
