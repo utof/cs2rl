@@ -113,7 +113,8 @@ def test_pg_rows_subset_mean_hits_analytic_target(env_policy):
 
 
 def test_tag_param_groups_partition_the_policy(env_policy):
-    """Spec §4.2: trunk = encoder+lstm (620,544 of 626,971 params — 99%),
+    """Spec §4.2 groups: trunk = encoder+lstm (623,104 of 629,531 params at the 120-wide
+    sim-v4 obs, 620,544 of 626,971 at the 110-wide sim-v3 obs — 99%),
     policy_heads = action_heads+aim_mu+aim_log_std (6,170), value_head
     (257). The three groups must PARTITION named_parameters (requires_grad
     only) — an unmapped param must raise, not silently vanish from every
@@ -283,7 +284,7 @@ def test_tag_param_groups_partition_a_split_policy():
     # shared, and Batch 8 is where the critic split gets its turn.
     assert sum(p.numel() for p in groups["policy_heads"]) == 2 * 6170
     assert sum(p.numel() for p in groups["value_head"]) == 257
-    assert sum(p.numel() for p in groups["trunk"]) == 620544
+    assert sum(p.numel() for p in groups["trunk"]) == 623104
 
 
 def test_tag_param_groups_partition_a_both_flags_policy():
@@ -291,7 +292,7 @@ def test_tag_param_groups_partition_a_both_flags_policy():
 
     WHAT: a both-flags policy (heads + trunk split) still partitions every
     trainable param. Both encoder/lstm copies land in `trunk` (count > the
-    shared 620,544); both head copies stay in `policy_heads`.
+    shared 623,104); both head copies stay in `policy_heads`.
 
     WHY: the union trunk group is what makes T-vs-CT cross cos-sim exactly
     0.0 (each team's gradient is zero on the other copy). Unmapped
@@ -323,7 +324,7 @@ def test_tag_param_groups_partition_a_both_flags_policy():
             assert id(p) in trunk_ids, f"{name} did not land in trunk"
         if "action_heads_" in name or "aim_mu_" in name or "aim_log_std_" in name:
             assert id(p) in heads_ids, f"{name} did not land in policy_heads"
-    # Both trunk copies: strictly larger than the shared-trunk 620,544.
-    assert sum(p.numel() for p in groups["trunk"]) > 620544
+    # Both trunk copies: strictly larger than the shared-trunk 623,104.
+    assert sum(p.numel() for p in groups["trunk"]) > 623104
     assert sum(p.numel() for p in groups["policy_heads"]) == 2 * 6170
     assert sum(p.numel() for p in groups["value_head"]) == 257

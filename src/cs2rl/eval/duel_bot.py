@@ -126,7 +126,9 @@ SELF_CLIP = 17                         # clip / mag_size
 SELF_ALIVE = 23
 OBS_VEL_SCALE = 250.0
 OBS_Z_SCALE = 128.0
-EN_RX, EN_RY, EN_DZ, EN_SEE, EN_ALIVE, EN_SIN, EN_COS, EN_DIST = range(OBS_ENEMY_STRIDE)
+
+(EN_RX, EN_RY, EN_DZ, EN_SEE, EN_ALIVE, EN_SIN, EN_COS, EN_DIST, EN_VX,
+ EN_VY) = range(OBS_ENEMY_STRIDE)
 _EN_BASES = OBS_BLOCKS["enemy"][0] + OBS_ENEMY_STRIDE * np.arange(OBS_ENEMY_COUNT)
 
 # ── MIRRORS of cs2_movement.h's ground path (pinned against env.step by the tests) ──
@@ -335,7 +337,7 @@ class DuelBot:
         facing = np.arctan2(o[:, SELF_SIN_YAW], o[:, SELF_COS_YAW])
         sx, sy = o[:, SELF_X] * hx, o[:, SELF_Y] * hy
         svx, svy = o[:, SELF_VX] * OBS_VEL_SCALE, o[:, SELF_VY] * OBS_VEL_SCALE
-        slots = o[:, _EN_BASES[:, None] + np.arange(OBS_ENEMY_STRIDE)] # (n, 5, 8)
+        slots = o[:, _EN_BASES[:, None] + np.arange(OBS_ENEMY_STRIDE)] # (n, 5, OBS_ENEMY_STRIDE)
         visible = (slots[:, :, EN_SEE] > 0.5) & (slots[:, :, EN_ALIVE] > 0.5)
         key = np.where(visible, slots[:, :, EN_DIST], np.inf)
         best = slots[np.arange(n), np.argmin(key, axis=1)]

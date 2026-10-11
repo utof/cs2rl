@@ -821,14 +821,15 @@ def test_round_designated_carrier_property_50_seeds():
 
 
 def test_obs_designated_carrier_bit_t_side():
-    """Verify obs[109] (OBS_GLOBAL_BASE+13; was 106 before the Batch 6
-    bombsite-bearing slots) is the round-fixed role bit:
+    """Verify obs[OBS_GLOBAL_BASE+13] (119 since the sim-v4 enemy velocity slots;
+    109 before them, 106 before the Batch 6 bombsite-bearing slots) is the round-fixed
+    role bit:
        - 1.0 for the designated T agent
        - 0.0 for non-designated T agents
        - 0.0 for ALL CT agents
        - persists at 1.0 even after the carrier dies and a teammate picks up
 
-    obs[109] is distinct from obs[22] (transient self-has-bomb): it is set at
+    The role bit is distinct from obs[22] (transient self-has-bomb): it is set at
     round start and never reassigned, surviving drop/pickup events. This gives
     the policy a stable identity signal that obs[22] cannot.
 
@@ -843,23 +844,24 @@ def test_obs_designated_carrier_bit_t_side():
         # Take one step so the role bits are read from a post-step obs.
         actions = np.zeros((10, len(spec_action.ACTION_HEAD_SIZES)), dtype=np.int32)
         obs, *_ = env.step(actions)
+        bit = spec_obs.OBS_BLOCKS["global"][0] + 13
 
         # T side
         for i in range(5):
             expected = 1.0 if i == rid else 0.0
-            assert obs[i, 109] == expected, (
-                f"T idx {i}: obs[109]={obs[i,109]} expected {expected} (rid={rid})")
+            assert obs[i, bit] == expected, (
+                f"T idx {i}: obs[{bit}]={obs[i, bit]} expected {expected} (rid={rid})")
         # CT side: all zeros
         for j in range(5, 10):
-            assert obs[j, 109] == 0.0, f"CT idx {j}: obs[109]={obs[j,109]} expected 0.0"
+            assert obs[j, bit] == 0.0, f"CT idx {j}: obs[{bit}]={obs[j, bit]} expected 0.0"
 
         # Persistence after carrier death — drive 20 zero-action steps.
         kill_agent(env, rid)
         for _ in range(20):
             obs, *_ = env.step(actions)
-            assert obs[rid, 109] == 1.0, (
+            assert obs[rid, bit] == 1.0, (
                 f"designated carrier (T idx {rid}) lost the role bit mid-round; "
-                f"obs[109] should be round-fixed but read {obs[rid,109]}")
+                f"obs[{bit}] should be round-fixed but read {obs[rid, bit]}")
     finally:
         env.close()
 
@@ -1028,8 +1030,8 @@ def test_obs_blocks_tile_obs_dim():
     # Named boundaries are the ones the upcoming demo code depends on.
     assert spec.OBS_BLOCKS["self"] == (0, 28)
     assert spec.OBS_BLOCKS["teammate"] == (28, 56)
-    assert spec.OBS_BLOCKS["enemy"] == (56, 96)
-    assert spec.OBS_BLOCKS["global"] == (96, 110)
+    assert spec.OBS_BLOCKS["enemy"] == (56, 106)
+    assert spec.OBS_BLOCKS["global"] == (106, 120)
 
     # Structural invariant: contiguous, ordered, covers exactly [0, OBS_DIM).
     prev_stop = 0

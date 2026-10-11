@@ -151,7 +151,7 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
             tm_count++;
         }
 
-        /* ── Enemies (OBS_ENEMY_BASE ..): 5 × 8 ── */
+        /* ── Enemies (OBS_ENEMY_BASE ..): 5 × 10 ── */
         int en_start = (a->team == 0) ? TEAM_SIZE : 0;
         /* Sort by KNOWN distance — insertion sort over 5 elements.
          * F10 (2026-07-06 adversarial review): the key used to be the TRUE
@@ -236,6 +236,25 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                 obs[base + 5] = sinf(rel);
                 obs[base + 6] = cosf(rel);
                 obs[base + 7] = (map_diag > 0.0f) ? dist / map_diag : 0.0f;
+                /* sim-v4: the enemy's velocity RELATIVE to ours (en - a), rotated by
+                 * -facing exactly as rel-x/rel-y above, /250 like self obs[6]/[7]:
+                 * +8 = its component along "ahead", +9 = along "left". At a fixed
+                 * facing it is the time derivative of +0/+1 (times map_diag / 250), so
+                 * at constant velocities a one-tick lead is (+8, +9) * 250 * dt added
+                 * to (+0, +1) * map_diag. Relative, not the enemy's own: self
+                 * obs[6]/[7] is in the WORLD frame, so with an own-velocity slot the
+                 * policy would have to rotate its own velocity and subtract it. Measured
+                 * with an obs-only aimer that moves, vs the held-out walker (200 rounds):
+                 * leading by this slot hit 0.40 of its shots, by the enemy's own
+                 * velocity 0.29. Visibility-gated like +2/+5..+7: the memory branch
+                 * below and an unseen or dead enemy leave +8/+9 at 0 — the memory keeps
+                 * a nav-area index, no velocity. KNOWN LIMIT: teammate slots carry no
+                 * velocity. KNOWN LIMIT: a dead observer still sees from its corpse (as
+                 * +0..+7 always have), so its +8/+9 subtract the corpse's last velocity,
+                 * which process_movement no longer updates. */
+                float rvx = en->vx - a->vx, rvy = en->vy - a->vy;
+                obs[base + 8] = (rvx * cf + rvy * sf) / 250.0f;
+                obs[base + 9] = (-rvx * sf + rvy * cf) / 250.0f;
             } else if (a->enemy_mem_idx[mem_s] != INVALID_AREA_IDX) {
                 /* Use last-known position from memory — R0-E.1: same
                  * facing-relative frame as the visible branch, so slot +0/+1

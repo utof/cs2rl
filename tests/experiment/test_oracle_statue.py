@@ -21,6 +21,8 @@ WHAT IS PINNED HERE
   class makes a solvable env unlearnable, and this mode is what sees it. The
   two modes must agree exactly: both see the obs ``env.reset`` returns (real
   since #157), and against a statue the ground-truth lead is zero.
+* ``ObsOracleActor(lead=True)``: the enemy-velocity slot (sim-v4) gives the obs actor the
+  ground-truth oracle's lead against a moving target.
 * The FAIL report's diagnostics: censored TTK printed as "n/a (no kills)"
   rather than "None", and the failing episodes' spawn geometry.
 * The movement-inaccuracy switch reaches C: ``run_check(accuracy=True)`` shoots on a
@@ -220,6 +222,47 @@ def test_obs_only_and_ground_truth_modes_agree():
     # Both modes fire only at an enemy the sim says is visible and in range, so
     # neither may waste a shot with no line of sight.
     assert obs["shots_with_enemy_in_los"] == obs["shots_fired"], obs
+
+
+def test_obs_lead_from_the_enemy_velocity_slot_hits_like_the_ground_truth_lead():
+    """sim-v4: the enemy slot's +8/+9 carry the one-tick lead the C-state oracle uses.
+
+    Against aim_eval's held-out walker (cone on, hitbox model), ObsOracleActor(lead=True)
+    adds (+8, +9) * 250 * TICK_DT to the decoded target and nothing else. Measured at N=20,
+    seed 1: ground truth 0.7000, slot lead 0.7250, no lead 0.2057 hits per shot fired (at
+    N=200 0.7319 / 0.7387 / 0.2335). A slot rotated by +facing gave 0.3373 here, and a lead
+    of the wrong sign 0.1835, both red. NOT caught here: a /200 scale and the enemy's own
+    velocity in place of the relative one (the hero stands still, so the two are equal);
+    tests/env/c/test_enemy_velocity_obs.py pins both.
+    """
+    import numpy as np
+
+    from cs2rl.eval.baselines import BaselineEvaluator, OracleActor
+    from cs2rl.experiment import aim_eval
+    from cs2rl.experiment import oracle_statue as mod
+
+    env = mod.build_env(1, mod.ROUND_TIME, True, True)
+    try:
+        ev = BaselineEvaluator(env, episodes=2, seed=1)
+        mts, laser, diag, nav = ev.max_turn_speed, ev.laser_range, ev.map_diag, ev.nav
+    finally:
+        env.close()
+    heroes = {
+        "truth": OracleActor(np.random.default_rng(1), mts, laser, nav),
+        "slot": mod.ObsOracleActor(mts, laser, diag, range(mod.TEAM_SIZE), lead=True),
+        "none": mod.ObsOracleActor(mts, laser, diag, range(mod.TEAM_SIZE)),
+    }
+    rate = {}
+    for name, hero in heroes.items():
+        res = mod.run_check(episodes=20,
+                            seed=1,
+                            opponent=aim_eval.OPPONENTS["heldout-24-48"](1),
+                            hero=hero,
+                            accuracy=True,
+                            hitboxes=True)
+        rate[name] = res["shots_hit"] / res["shots_fired"]
+    assert rate["none"] < 0.35 < 0.6 < rate["slot"], rate
+    assert abs(rate["slot"] - rate["truth"]) < 0.1, rate
 
 
 def test_verdict_is_the_conjunction_of_all_three_checks():

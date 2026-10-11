@@ -162,6 +162,29 @@ reproduce; the two bomb rows moved to:
   shooters on 16 steps from step 717, and 12 on 12 steps from step 171 with --n-active 3.
   The 200- and 700-step rows have no such step and still reproduce (lane E fix evidence).
 
+SIM-V4 FINGERPRINTS (enemy-velocity slots, OBS_DIM 110 -> 120). The obs is wider, so every
+whole-obs hash moves; the masks, rewards, terminals and the stderr counters do not.
+`--obs-layout sim-v3` hashes only the 110 sim-v3 columns and reproduces the parent (4753428,
+main after #152 L2) on all six rows below under the default EnvConfig. tests/env/c/
+test_hitboxes.py's T10 pins it under --hitboxes 0 with the cone off on five rows above: the
+three POST-#157 rows it names (--steps 200, and track at 200 and 700) and the second pair of
+SIMULTANEOUS-COMBAT bomb rows. Whole-obs hashes at sim-v4, default EnvConfig (cone on, hitbox
+model); the parent's are in brackets where no row above holds them:
+    --steps 200                  105e6c01fd179b65e53619d86773e49520a630470e03fefc21ef4b389ae27882
+    --steps 700                  aa68538d04f31f347930f11c84c8e721618a5213175a9724de32b19d335d443d
+    --steps 200 --aim-mode track 9ab11ec3b28fba9d623cff1a5bb0f70f2d2a6284c91a7dd25b260ba21ba202a2
+                                 [54b89b426efef3076e2a600b6137560a98290cf648a14246ff7a72c66e55b10d]
+    --steps 700 --aim-mode track 9b67b0c7d4e3935c4f044c798f8699623d0b00a80fef85d1a332d444f86c2d5c
+                                 [ca34d3cd4b903095d4b7433c4684daa83dabaa219f9603b435d25e4dd3fb470c]
+    --steps 5000 --aim-mode bomb
+        5f63df4086a7b626eec1e86cb2f9d0c6a62cddf0c06d3c748180397ba5869337
+        [bdf62c2adb2c43035c816f2322cb806505d9b4d57e429bd0d71fc00ef7726f99]
+    --steps 5000 --aim-mode bomb --n-active 3
+        f3ec030e64b96fd30ba456668490f92da487ca4f891e75df6053f54613909587
+        [6c9eed517f23be28805f18d305c7efab1678317acfec85d5b009b796fca9a573]
+  Measured before #152 L2 (parent b8511a3), the random and track rows held these same hashes,
+  sim-v4 and parent alike; #152 L2 moved only the two bomb rows under the default EnvConfig.
+
 Usage:
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py [--steps 200] [--n-active 5]
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py --aim-mode track [--n-active 5]
@@ -180,6 +203,7 @@ from cs2rl.env.c.hit_model import HitGeometry, hit_geometry
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
+from cs2rl.policy import sim_v3_obs_columns
 from cs2rl.spec.action import (
     ACTION_DIM,
     ACTION_HEAD_NAMES,
@@ -453,7 +477,16 @@ def main():
         default=None,
         help="the hit model (EnvConfig.hitboxes): 1 the capsule hitboxes, 0 the legacy "
         "ellipsoid every fingerprint above was measured on. Default: EnvConfig.hitboxes.")
+    ap.add_argument(
+        "--obs-layout",
+        choices=("current", "sim-v3"),
+        default="current",
+        help="sim-v3: hash only the 110 obs columns the sim-v3 layout had "
+        "(cs2rl.policy.sim_v3_obs_columns), so a HEAD run compares with a hash measured "
+        "before the sim-v4 enemy-velocity slots. current: the whole obs.")
     a = ap.parse_args()
+    # slice(None) keeps the current layout's bytes exactly as before the flag existed.
+    obs_cols = sim_v3_obs_columns() if a.obs_layout == "sim-v3" else slice(None)
 
     # PITFALL: `--n-active` omitted must build the SAME env as before, so the
     # None arm is a bare `EnvConfig()`, never `EnvConfig(n_active_per_team=<the
@@ -481,7 +514,7 @@ def main():
     max_turn = float(env._c_env.sd.contents.max_turn_speed)
 
     obs, _ = env.reset()
-    h.update(np.ascontiguousarray(obs).tobytes())
+    h.update(np.ascontiguousarray(obs[:, obs_cols]).tobytes())
 
     # Activity counters — printed to stderr so stdout stays a bare hash that can
     # be diffed/piped. A rollout with all-zero rewards would hash fine yet prove
@@ -512,7 +545,7 @@ def main():
             act[:, HEAD_USE] = rng.random(N_AGENTS) < BOMB_USE_P
             act[:, HEAD_SHOOT] = masks[:, SHOOT_PRESS_COL]
         obs, rew, term, _trunc, info = env.step(act, cont)
-        h.update(np.ascontiguousarray(obs).tobytes())
+        h.update(np.ascontiguousarray(obs[:, obs_cols]).tobytes())
         h.update(np.ascontiguousarray(rew).tobytes())
         h.update(np.ascontiguousarray(term).tobytes())
         if a.aim_mode == "bomb":

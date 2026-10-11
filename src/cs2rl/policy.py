@@ -116,6 +116,93 @@ def load_state_dict_arch_checked(policy, state_dict, *, source):
     policy.load_state_dict(state_dict)
 
 
+# The obs vector before sim-v4 (cs2_types.h SIM_OBS_VERSION "sim-v3-110dim"): self 28,
+# teammate 4 x 7, enemy 5 x 8, global 14. Frozen history, never derived from spec.obs:
+# it describes checkpoints already on disk.
+SIM_V3_OBS_DIM = 110
+_SIM_V3_BLOCK_WIDTHS = {"self": 28, "teammate": 28, "global": 14}
+_SIM_V3_ENEMY_COUNT, _SIM_V3_ENEMY_STRIDE = 5, 8
+# The first Linear of every trunk: the only parameters whose shape holds the obs width.
+_ENCODER_INPUT_KEYS = ("encoder.0.weight", "encoder_t.0.weight", "encoder_ct.0.weight")
+
+
+def sim_v3_obs_columns() -> list[int]:
+    """Where each of the 110 sim-v3 obs columns sits in the current layout, in order.
+
+    sim-v4 widened each enemy slot from 8 to 10 fields (+8/+9, the relative velocity) and
+    left every other block's width alone, so self and teammate keep their columns, enemy
+    slot s's field f moves from 56 + 8 s + f to 56 + OBS_ENEMY_STRIDE * s + f, and the
+    global block moves by the enemy block's growth.
+
+    Raises RuntimeError if another block is resized, the enemy count changes or the enemy
+    stride drops below 8. KNOWN LIMIT: it cannot see where new enemy fields went. A later
+    layout that inserts fields before +8, rather than appending them, passes this check and
+    must replace the map.
+    """
+    from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_COUNT, OBS_ENEMY_STRIDE
+
+    widths = {name: hi - lo for name, (lo, hi) in OBS_BLOCKS.items() if name != "enemy"}
+    if (widths != _SIM_V3_BLOCK_WIDTHS or OBS_ENEMY_COUNT != _SIM_V3_ENEMY_COUNT
+            or OBS_ENEMY_STRIDE < _SIM_V3_ENEMY_STRIDE):
+        raise RuntimeError(
+            f"the obs layout changed shape since sim-v4 (blocks {OBS_BLOCKS}, enemy "
+            f"{OBS_ENEMY_COUNT} x {OBS_ENEMY_STRIDE}): sim_v3_obs_columns cannot map a "
+            f"110-wide checkpoint onto it; add a mapping for the new layout")
+    en0 = OBS_BLOCKS["enemy"][0]
+    cols = list(range(*OBS_BLOCKS["self"])) + list(range(*OBS_BLOCKS["teammate"]))
+    for s in range(OBS_ENEMY_COUNT):
+        cols += range(en0 + s * OBS_ENEMY_STRIDE, en0 + s * OBS_ENEMY_STRIDE + _SIM_V3_ENEMY_STRIDE)
+    cols += range(*OBS_BLOCKS["global"])
+    assert len(cols) == SIM_V3_OBS_DIM, len(cols)
+    return cols
+
+
+def widen_sim_v3_encoder(state_dict):
+    """Return ``(state_dict, widened)``: a sim-v3 (110-wide) checkpoint moved onto OBS_DIM.
+
+    WHAT: every encoder input weight (``_ENCODER_INPUT_KEYS``, shared or per-team) that is
+    ``SIM_V3_OBS_DIM`` wide becomes OBS_DIM wide: each old column is copied to its column
+    in the current layout (``sim_v3_obs_columns``) and the new columns (the enemy-velocity
+    slots) are ZERO. Returns a NEW dict and True; a dict already OBS_DIM wide, or of any
+    other width, comes back unchanged with False (an older schema then fails loudly at
+    the caller's load, as before).
+
+    WHY zero columns: in exact arithmetic the widened Linear computes what the old one did
+    on the old features, whatever the new features hold, so a fine-tune starts from the
+    checkpoint's own behaviour and the velocity weights are learned from zero. Measured on
+    CPU with the F2x checkpoint's encoder (lane H H-Q1): bit-identical outputs for batches
+    of 2 to 2560 rows; a 1-row batch differs by up to 1.8e-7 (another summation order).
+
+    PITFALLS:
+      * Its callers are the sites that load an RL checkpoint into a policy built for the
+        live env: load_policy_from_checkpoint, the trainer's --resume (cs2rl.train.loop
+        ._resume_policy_init, which is also the Modal runner's remote resume) and
+        SelfPlayManager.load_past_policy. A loader that skips it (train_bc --eval-only)
+        raises a size mismatch in load_state_dict on a 110-wide file, never a partial load.
+      * Weights only. A full-state resume (--resume-run) restores Adam moments shaped like
+        the old weights; the trainer refuses to widen there.
+      * The encoder biases and every other key pass through untouched (not cloned).
+      * Keyed on width alone: a pre-#130 sim-v2 file (also 110 wide, absolute enemy frame)
+        is widened the same way and named sim-v3 in the log; width equality does not prove
+        semantics (docs/formats.md).
+    """
+    import torch
+
+    from cs2rl.spec.obs import OBS_DIM
+
+    keys = [k for k in _ENCODER_INPUT_KEYS if k in state_dict]
+    if not keys or any(state_dict[k].shape[1] != SIM_V3_OBS_DIM for k in keys):
+        return state_dict, False
+    cols = torch.tensor(sim_v3_obs_columns())
+    out = dict(state_dict)
+    for k in keys:
+        old = state_dict[k]
+        new = old.new_zeros(old.shape[0], OBS_DIM)
+        new[:, cols] = old
+        out[k] = new
+    return out, True
+
+
 AGENT_IDS = tuple([f"t{i}" for i in range(5)] + [f"ct{i}" for i in range(5)])
 
 # ── SECTION: Shared eval / record helpers ──────────────────────────────────
@@ -140,6 +227,11 @@ def load_policy_from_checkpoint(checkpoint_path, device, aim_log_std_max=None, p
     # state_dict, and the other loaders (resume sniff, self-play pool) already
     # load with it — a checkpoint that fails here is untrusted or corrupt.
     state_dict = torch.load(checkpoint_path, map_location=device, weights_only=True)
+    state_dict, widened = widen_sim_v3_encoder(state_dict)
+    if widened:
+        print(f"[Policy] Obs widen: {checkpoint_path.name} reads the {SIM_V3_OBS_DIM}-wide "
+              f"sim-v3 obs; encoder input moved onto the current layout, the enemy-velocity "
+              f"columns zero")
 
     # Infer obs_dim from checkpoint to handle checkpoints trained with different obs sizes.
     # Trunk-split checkpoints have no shared encoder — the T copy is the marker
@@ -231,8 +323,11 @@ def select_policy_actions_native(policy, obs, device, policy_state, policy_mode)
         raise ValueError("Random action selection should bypass select_policy_actions_native")
 
     obs_t = torch.as_tensor(obs, device=device)
+    # sim-v4 widened a slot in the middle of the vector, so a narrower policy fed the
+    # first obs_dim columns would read shifted fields. Load through
+    # load_policy_from_checkpoint, which widens a sim-v3 checkpoint.
     if obs_t.shape[-1] != policy.obs_dim:
-        obs_t = obs_t[..., :policy.obs_dim]
+        raise ValueError(f"obs width {obs_t.shape[-1]} != policy obs_dim {policy.obs_dim}")
     with torch.no_grad():
         logits, mu_aim, log_std_aim, _ = policy.forward_eval(obs_t, policy_state)
         if policy_mode == "sample":

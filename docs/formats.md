@@ -5,9 +5,10 @@
 [cs2_types.h](../src/cs2rl/env/c/cs2_types.h) authors the layout;
 [obs.py](../src/cs2rl/spec/obs.py) and [action.py](../src/cs2rl/spec/action.py) are
 generated consumers. Use their symbols instead of copying dimensions into code.
-Currently each observation has 110 floats: self `[0,28)`, teammates `[28,56)`,
-enemies `[56,96)`, global `[96,110)`. Teammates have four slots of stride 7;
-enemies five of stride 8. Width equality alone does not prove semantic compatibility.
+Currently each observation has 120 floats: self `[0,28)`, teammates `[28,56)`,
+enemies `[56,106)`, global `[106,120)`. Teammates have four slots of stride 7;
+enemies five of stride 10, whose fields +8/+9 are the enemy's velocity relative to the
+observer (sim-v4). Width equality alone does not prove semantic compatibility.
 
 Discrete heads, in order, are move/shoot/reload/weapon/use/crouch/jump with
 sizes 9/2/2/3/2/2/2. Seven action entries have 22 mask entries. Continuous aim
