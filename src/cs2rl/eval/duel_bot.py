@@ -46,7 +46,11 @@ The dials (``DuelBotParams``) are the CS2 bot-profile dials at the sim's 16 Hz
       plant  stands still and fires whenever ready (OracleActor's habit);
       stop   strafes until engaged, then counter-strafes (presses the move bin most
              opposite its velocity while that brakes harder than releasing), stands,
-             and fires only when its post-move speed is under 0.34 x vmax;
+             and fires only when its post-move speed is under 0.34 x vmax (at 16 Hz one
+             counter-strafe tick from 220 u/s already lands at 72.9 u/s, under that
+             74.8 u/s: with the gate lifted to vmax, hard stop against hard run fired
+             the same 2041 shots and hit the same 220 at 150 rounds a side, lane E
+             2026-10-11);
       run    strafes all the time and fires whenever ready (run-and-gun);
       adad   strafes during the weapon's cooldown, counter-strafes on the tick it is
              ready and fires if that brings it under 0.34 x vmax, then strafes the
