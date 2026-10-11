@@ -2,7 +2,7 @@
 
 What each test catches (cs2_observations.h, the enemy slot loop):
   * the rotation: the slot rotated by +facing instead of -facing, or not rotated;
-  * the scale: any divisor other than 250 (self obs[6]/[7]'s);
+  * the scale: a divisor other than 250 (self obs[6]/[7]'s);
   * relative, not own: the observer's velocity not subtracted;
   * the slot order: a slot carrying another enemy's velocity than the one its +0/+1 locate
     (the distance sort reorders the slots; one active enemy cannot show it);
