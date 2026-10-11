@@ -33,8 +33,8 @@ combat.
     of shots fired at or above 0.34 x vmax (research G2, the counter-strafe failure rate), and
     hit per fired of the fast and of the slow shots; the first-shot hit rate per engagement
     with its Wilson interval, and shots per kill (G3); time to damage, its median over the
-    rounds whose first hit came under 1 s, and the share of those with a hit at or over 1 s,
-    which Leetify excludes (G4); hp lost and lifetime per round, lifetime being the death
+    rounds whose first hit came under 1 s, and, of the rounds with a first hit, the share
+    whose first hit came at or over 1 s, the ones Leetify excludes (G4); hp lost and lifetime per round, lifetime being the death
     tick, else the round's last tick (G5); and the moving-while-visible-not-firing share, the
     share of idle engagement ticks that were fast (G5, the ADAD signature);
   * ``accounting_ok``: each side's fired, hit and fast shots sum to the env's StepStats totals,
@@ -50,7 +50,7 @@ oracle_duel's arrangement.
 
 PITFALLS
 --------
-* The bots aim their pitch (hit_geometry), a Rung 1 policy's pitch head is pinned. The arena
+* The bots aim their pitch (hit_geometry), a Rung 1 policy's pitch head is masked. The arena
   runs pin_pitch=1, which holds every agent's pitch at 0, so neither side has an advantage.
 * Each policy cell forks the torch RNG and seeds it with its arrangement's seed, so cells
   reproduce in any order (aim_eval's rule). The bots draw from their own Generators.
