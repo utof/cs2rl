@@ -175,6 +175,7 @@ from cs2rl.eval.baselines import (
     H_MOVE,
     H_RELOAD,
     H_SHOOT,
+    TICK_DT,
     BaselineEvaluator,
     IdleActor,
     OracleActor,
@@ -226,6 +227,9 @@ OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]
 # ground-truth mode would keep passing 200/200 with every one of these wrong.
 (EN_RX, EN_RY, EN_DZ, EN_SEE, EN_ALIVE, EN_SIN, EN_COS, EN_DIST, EN_VX,
  EN_VY) = range(OBS_ENEMY_STRIDE)
+# The horizontal velocities in the obs (self +6/+7, enemy +8/+9) are normalised by
+# 250 u/s. MIRROR of cs2_observations.h, like OBS_Z_SCALE below.
+OBS_VEL_SCALE = 250.0
 
 # Self-block slot the obs actor needs: obs[13] = is_crouching (cs2_observations.h).
 # crouch_enabled=0 pins it to 0 in this env; decoded anyway so the eye height is
@@ -361,8 +365,12 @@ class ObsOracleActor:
 
     name = "obs-oracle"
 
-    def __init__(self, max_turn_speed, laser_range, map_diag, rows):
+    def __init__(self, max_turn_speed, laser_range, map_diag, rows, lead=False):
         self.mts = max_turn_speed
+        # lead=True aims one tick ahead along the slot's relative velocity (+8/+9, sim-v4):
+        # the obs-only twin of OracleActor's v * dt lead. Off by default, so the
+        # "obs-oracle" reference (aim_eval, oracle_tracker) stays the one-tick-lag aimer.
+        self.lead = bool(lead)
         self.laser_range = laser_range
         self.map_diag = map_diag
         # Which agent rows this actor is responsible for. `_episode` splices
@@ -416,6 +424,12 @@ class ObsOracleActor:
         rel = math.atan2(float(o[b + EN_SIN]), float(o[b + EN_COS]))
         rz = float(o[b + EN_DZ]) * OBS_Z_SCALE + target_z_offset - eye_z_offset
         self._cross_check(rx, ry, dist2d, rel)
+        if self.lead:
+                                       # Where the target will be relative to us one tick on, from +0/+1 and the
+                                       # relative velocity +8/+9 alone (both already in the facing frame).
+            rx += float(o[b + EN_VX]) * OBS_VEL_SCALE * TICK_DT
+            ry += float(o[b + EN_VY]) * OBS_VEL_SCALE * TICK_DT
+            dist2d, rel = math.hypot(rx, ry), math.atan2(ry, rx)
         return True, math.hypot(dist2d, rz), rel, dist2d, rz
 
     def _cross_check(self, rx, ry, dist2d, rel):
