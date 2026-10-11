@@ -228,10 +228,12 @@ def test_obs_lead_from_the_enemy_velocity_slot_hits_like_the_ground_truth_lead()
     """sim-v4: the enemy slot's +8/+9 carry the one-tick lead the C-state oracle uses.
 
     Against aim_eval's held-out walker (cone on, hitbox model), ObsOracleActor(lead=True)
-    adds (+8, +9) * 250 * TICK_DT to the decoded target and nothing else. A slot with the
-    wrong rotation, scale or sign leads the wrong way and falls toward the no-lead hit
-    rate. Measured at N=20, seed 1 (lane H): ground truth 0.7000, slot lead 0.7250, no
-    lead 0.2057 hits per shot fired; at N=200 0.7319 / 0.7387 / 0.2335.
+    adds (+8, +9) * 250 * TICK_DT to the decoded target and nothing else. Measured at N=20,
+    seed 1: ground truth 0.7000, slot lead 0.7250, no lead 0.2057 hits per shot fired (at
+    N=200 0.7319 / 0.7387 / 0.2335). A slot rotated by +facing gave 0.3373 here, and a lead
+    of the wrong sign 0.1835, both red. NOT caught here: a /200 scale and the enemy's own
+    velocity in place of the relative one (the hero stands still, so the two are equal);
+    tests/env/c/test_enemy_velocity_obs.py pins both.
     """
     import numpy as np
 
