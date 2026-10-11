@@ -5,8 +5,8 @@ WHAT IS PINNED
   env.step, to 1e-3 u/s, on every tick of a seeded run of random move bins and turns
   that stays WALL_MARGIN inside the map's extent (a wall clips the velocity; 68 of the
   160 ticks at seed 3, among them ticks at the speed cap and at rest).
-  Every style's "fire only when slow" rule and its aim from the post-move position
-  rest on it.
+  The stop and adad styles' "fire only when slow" rule and every style's aim from the
+  post-move position rest on it.
 * The CS2 profiles at 16 Hz: every template's dials in ticks (ReGameDLL's half-up
   rounding), and the shipped focus values.
 * The dials' validation: each out-of-range dial raises ValueError.

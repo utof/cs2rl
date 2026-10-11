@@ -7,9 +7,10 @@ WHAT IS PINNED HERE (seed 0, obs-only bots; the values observed 2026-10-11)
   95% Wilson intervals contain 0.5 (observed hero share 0.5600 [0.4859, 0.6315]).
 * Obs-only = ground truth, round for round (outcome, length, each side's shots), on the
   default mirror and on stop against run, 40 rounds a side. KNOWN LIMIT: a ray grazing a
-  hitbox can flip on float32 rounding (the obs normalises positions); lane E measured two
-  such rounds in 3000 per cell over five cells, the first at round 79. If this goes red
-  after a sim change, find the first step whose state differs before suspecting the decoding.
+  hitbox can flip on float32 rounding (the obs normalises positions); lane E found two such
+  first divergences in 3000 rounds over five cells (600 a cell), the earlier at round 79 of
+  its arrangement. If this goes red after a sim change, find the first step whose state
+  differs before suspecting the decoding.
 * A perfect mirror is all double kills, and the verdict fails it as "no decided round".
   That pins the simultaneous combat (cs2_combat.h alive_pre, cs2_env.h WINNER_DRAW) and
   duel_bot.LANDS_TOL together: without either, one side wins rounds.
