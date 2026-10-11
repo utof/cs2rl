@@ -16,9 +16,11 @@ WHAT IS PINNED HERE (seed 0, obs-only bots; the values observed 2026-10-11)
   duel_bot.LANDS_TOL together: without either, one side wins rounds.
 * Floors: under the cone and the hitboxes the hard stop bot beats the hard runner (its
   share's interval above 0.5 at 150 rounds a side; observed 0.6220 [0.5650, 0.6758]);
-  without the cone it does not (observed 0.4437 [0.3870, 0.5018]). Lead: the perfect
-  planted bot's hit/fired on the L1 walker is above 0.6 led (observed 0.7665) and below
-  0.35 unled (observed 0.2176), at 50 rounds a side.
+  without the cone it does not (observed 0.4437 [0.3870, 0.5018]). The same holds for the
+  hard ADAD bot, which brakes only while engaged with its weapon ready (its own brake term):
+  observed 0.5860 [0.5280, 0.6416] with the cone, 0.4725 [0.4141, 0.5317] without. Lead:
+  the perfect planted bot's hit/fired on the L1 walker is above 0.6 led (observed 0.7665)
+  and below 0.35 unled (observed 0.2176), at 50 rounds a side.
 * The verdict's rules, parse_bot's spec grammar, and main's exit code and switches.
 """
 
@@ -66,11 +68,12 @@ def test_a_perfect_mirror_is_all_double_kills_and_fails_the_verdict():
     assert checks["T share 95% CI contains 0.5"] == (False, "no decided round: every round a draw")
 
 
+@pytest.mark.parametrize("hero", [D.DEFAULT_BOT, "hard,style=adad"])
 @pytest.mark.parametrize("cone", [True, False])
-def test_stopping_beats_running_only_under_the_cone(cone):
-    s = D.summary(_duel(D.DEFAULT_BOT, "hard,style=run", 150, accuracy=cone, hitboxes=True)["rows"])
+def test_stopping_beats_running_only_under_the_cone(hero, cone):
+    s = D.summary(_duel(hero, "hard,style=run", 150, accuracy=cone, hitboxes=True)["rows"])
     lo, hi = s["hero_ci"]
-    assert (lo > 0.5) == cone, (cone, s["hero_share"], s["hero_ci"])
+    assert (lo > 0.5) == cone, (hero, cone, s["hero_share"], s["hero_ci"])
 
 
 @pytest.mark.parametrize("lead", [1, 0])
