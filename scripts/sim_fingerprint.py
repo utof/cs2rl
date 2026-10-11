@@ -164,11 +164,12 @@ reproduce; the two bomb rows moved to:
 
 SIM-V4 FINGERPRINTS (enemy-velocity slots, OBS_DIM 110 -> 120). The obs is wider, so every
 whole-obs hash moves; the masks, rewards, terminals and the stderr counters do not.
-`--obs-layout sim-v3` hashes only the 110 sim-v3 columns and reproduces the parent (b8511a3)
-on all six rows below under the default EnvConfig, and tests/env/c/test_hitboxes.py's T10
-pins it on five rows above under --hitboxes 0 with the cone off. Whole-obs hashes at sim-v4,
-default EnvConfig (cone on, hitbox model); the parent's are in brackets where no row above
-holds them:
+`--obs-layout sim-v3` hashes only the 110 sim-v3 columns and reproduces the parent (4753428,
+main after #152 L2) on all six rows below under the default EnvConfig. tests/env/c/
+test_hitboxes.py's T10 pins it under --hitboxes 0 with the cone off on five rows above: the
+three POST-#157 rows it names (--steps 200, and track at 200 and 700) and the second pair of
+SIMULTANEOUS-COMBAT bomb rows. Whole-obs hashes at sim-v4, default EnvConfig (cone on, hitbox
+model); the parent's are in brackets where no row above holds them:
     --steps 200                  105e6c01fd179b65e53619d86773e49520a630470e03fefc21ef4b389ae27882
     --steps 700                  aa68538d04f31f347930f11c84c8e721618a5213175a9724de32b19d335d443d
     --steps 200 --aim-mode track 9ab11ec3b28fba9d623cff1a5bb0f70f2d2a6284c91a7dd25b260ba21ba202a2
@@ -176,11 +177,13 @@ holds them:
     --steps 700 --aim-mode track 9b67b0c7d4e3935c4f044c798f8699623d0b00a80fef85d1a332d444f86c2d5c
                                  [ca34d3cd4b903095d4b7433c4684daa83dabaa219f9603b435d25e4dd3fb470c]
     --steps 5000 --aim-mode bomb
-        7bdc8ee706236cf3734b4083a6b6dcd18c4c69747429b81c1b97aad62cbc6fc6
-        [1da570dc0e689e39e5dcc3b980540b84b6431b559ec90e4de04a9fac4a2667a3]
+        5f63df4086a7b626eec1e86cb2f9d0c6a62cddf0c06d3c748180397ba5869337
+        [bdf62c2adb2c43035c816f2322cb806505d9b4d57e429bd0d71fc00ef7726f99]
     --steps 5000 --aim-mode bomb --n-active 3
-        6fe542c932adef0355318fd3abc0181f5607b7ed347cefff965c990d3c643887
-        [43c6e77a0a7b8fab976cbeab3b2b6ad78d1e9ff8e325328feb868b6eedb460f4]
+        f3ec030e64b96fd30ba456668490f92da487ca4f891e75df6053f54613909587
+        [6c9eed517f23be28805f18d305c7efab1678317acfec85d5b009b796fca9a573]
+  Measured before #152 L2 (parent b8511a3), the random and track rows held these same hashes,
+  sim-v4 and parent alike; #152 L2 moved only the two bomb rows under the default EnvConfig.
 
 Usage:
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py [--steps 200] [--n-active 5]
