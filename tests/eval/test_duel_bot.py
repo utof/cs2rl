@@ -14,8 +14,12 @@ WHAT IS PINNED
   "recognition" aims at the enemy as seen now and "percept" at the enemy as seen k
   ticks ago, and "recognition" drops an enemy it no longer sees while "percept" keeps
   shooting at the old percept.
-* Rows are independent: one DuelBot over two rows with different dials (and a reset
-  of one row) equals two one-row bots fed the same rows. That is what a trainer
+* Rows are independent: one DuelBot over two rows with different dials equals two
+  one-row bots fed the same rows. test_rows_are_independent_and_reset_per_row feeds
+  random rows and resets one row mid-run; its rows never fire.
+  test_rows_are_independent_on_the_arena feeds the arena's observations for 15 rounds,
+  with the rows at different reaction, attack-delay and focus dials, and both rows fire,
+  so it reaches the per-row acquisition and attack-delay clock. That is what a trainer
   needs (per-row state, per-row dials through ``configure``).
 * DuelBotActor fills only its own rows.
 * Importing the module pulls none of the HEAVY modules of tests/train/test_w1_modules.py.
@@ -198,6 +202,59 @@ def test_rows_are_independent_and_reset_per_row():
         for r in (0, 1):
             a1, c1 = one[r].step_obs(obs[r:r + 1], mask[r:r + 1])
             assert np.array_equal(act[r], a1[0]) and np.array_equal(cont[r], c1[0]), (t, r)
+
+
+def test_rows_are_independent_on_the_arena():
+    """The env-driven half of row independence (module docstring). 15 rounds: at seed 0 the
+    runner (row b) first fired in round 8 (0-based); 10 of the 15 rounds lasted 8 ticks,
+    fewer than its reaction plus attack delay (11). focus_initial_deg stays 0: one Generator
+    serves every row (KNOWN LIMIT in DuelBot), so a non-zero focus would make a row's draws
+    depend on when the other row acquires."""
+    from cs2rl.experiment import oracle_statue as L0
+    rows = [L0.HERO, L0.STATUE]
+    a = DuelBotParams(style="stop",
+                      reaction_ticks=3,
+                      attack_delay_ticks=2,
+                      focus_initial_deg=0.0,
+                      focus_offset_scale=0.5,
+                      focus_interval_ticks=3)
+    b = DuelBotParams(style="run",
+                      reaction_ticks=5,
+                      attack_delay_ticks=6,
+                      focus_initial_deg=0.0,
+                      focus_offset_scale=0.3,
+                      focus_interval_ticks=5)
+    env, _ = _arena()
+    try:
+        obs, _ = env.reset()
+        both = DuelBotActor(rows, [a, b], np.random.default_rng(0))._build(env)
+        one = [
+            DuelBotActor([r], p, np.random.default_rng(0))._build(env)
+            for r, p in zip(rows, (a, b), strict=True)
+        ]
+        fires, rounds, tick = [0, 0], 0, 0
+        while rounds < 15:
+            masks = env._masks_view
+            act2, cont2 = both.step_obs(obs[rows], masks[rows])
+            for k, r in enumerate(rows):
+                a1, c1 = one[k].step_obs(obs[[r]], masks[[r]])
+                assert np.array_equal(act2[k], a1[0]) and np.array_equal(cont2[k], c1[0]), \
+                    (rounds, tick, r)
+                fires[k] += int(a1[0, B.H_SHOOT] != 0)
+            act = np.zeros((len(obs), ACTION_DIM), dtype=np.int32)
+            cont = np.zeros((len(obs), AIM_DIM), dtype=np.float32)
+            act[rows], cont[rows] = act2, cont2
+            obs, _, term, trunc, _ = env.step(act, cont)
+            tick += 1
+            if term.any() or trunc.any():
+                obs, _ = env.reset()
+                both.reset()
+                for o in one:
+                    o.reset()
+                rounds, tick = rounds + 1, 0
+    finally:
+        env.close()
+    assert min(fires) > 0, f"a row never fired, so the fire path was not compared: {fires}"
 
 
 def test_the_actor_fills_only_its_rows():
