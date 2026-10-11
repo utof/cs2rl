@@ -52,6 +52,7 @@ def test_train_help_shows_current_cli():
             "--crouch-enabled",
             "--jump-enabled",                          # Rung 1a T2b (stance parity)
             "--accuracy",                              # the movement-inaccuracy cone
+            "--hitboxes",                              # the hit model (#391)
             "--opponent",                              # Rung 1a T3 (statue opponent)
             "--aim-entropy-bonus",                     # R0-E.3/4 (Task 10)
             "--aim-log-std-max",
@@ -142,7 +143,7 @@ def test_env_knob_cli_defaults(tmp_path):
 
     A parser default of zero would silently mask stance actions; a concrete
     numeric knob default would replace the env's choice in every run. The cone
-    follows EnvConfig's default: a parser literal (a store_true's False) would
+    and the hit model follow EnvConfig's defaults: a parser literal (a store_true's False) would
     keep an unflagged run off whatever the env declares.
     """
     from cs2rl.env.config import EnvConfig
@@ -153,6 +154,7 @@ def test_env_knob_cli_defaults(tmp_path):
     for key in ("crouch_enabled", "jump_enabled"):
         assert cfg[key] == 1 and type(cfg[key]) is int, key
     assert cfg["accuracy"] is EnvConfig().accuracy, "the CLI default drifted from EnvConfig's"
+    assert cfg["hitboxes"] is EnvConfig().hitboxes, "the CLI default drifted from EnvConfig's"
 
 
 @pytest.mark.slow
@@ -164,10 +166,12 @@ def test_env_knob_cli_defaults(tmp_path):
     ("--jump-enabled", "jump_enabled", "jump_enabled", "0", 0),
     ("--accuracy", "accuracy", "accuracy", "0", False),
     ("--accuracy", "accuracy", "accuracy", "1", True),
+    ("--hitboxes", "hitboxes", "hitboxes", "0", False),
+    ("--hitboxes", "hitboxes", "hitboxes", "1", True),
 ],
                          ids=[
                              "round-time", "laser-range", "max-turn-speed", "crouch", "jump",
-                             "accuracy-off", "accuracy-on"
+                             "accuracy-off", "accuracy-on", "hitboxes-off", "hitboxes-on"
                          ])
 def test_env_knob_cli_overrides_round_trip(tmp_path, flag, key, field, value, expected):
     """A missing flag, wrong dest or coercion cannot hide behind resolver defaults.

@@ -28,7 +28,6 @@ from tests.conftest import REPO_ROOT
 
 H_SHOOT = 1                            # cs2_types.h head order
 AGENT_HULL_RADIUS = 12.0               # cs2_types.h:26
-EYE_STAND = 48.0                       # cs2_combat.h standing eye height
 
 
 def _run_group(argv, *, timeout, **kw) -> subprocess.CompletedProcess:
@@ -231,11 +230,13 @@ def test_arena_survives_solids_bake():
     """Spec §8 / R12.5: bake PR #127's solid faces from the arena's room quads
     and check nothing the duel needs got walled off: only exterior faces on
     the 600×400 perimeter, every spawn centroid ≥ hull radius from any face,
-    every T→CT lane clear at standing eye height. A ray that leaves the arena
+    every T→CT lane clear at standing eye height (the env's hit model's eye, read
+    from the C table). A ray that leaves the arena
     is blocked, proving the list is live (an empty bake would make every
     ray "clear")."""
     from cs2rl.env.c import binding
     from cs2rl.env.c.cs2_env import make_env
+    from cs2rl.env.c.hit_model import hit_geometry
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_arena_duel_map
     md = make_arena_duel_map()
@@ -243,6 +244,7 @@ def test_arena_survives_solids_bake():
                    config=EnvConfig(n_active_per_team=1, pin_pitch=1),
                    seed=1,
                    auto_reset=False)
+    eye_stand = hit_geometry(env.config.hitboxes).eye_z(0.0, False)
     try:
         assert int(env._c_env.sd.contents.wall_list.count) == 0                                      # training path does not bake
         count = binding.bake_solids(env._capsule)
@@ -260,10 +262,10 @@ def test_arena_survives_solids_bake():
                 assert d >= AGENT_HULL_RADIUS
         for t, ct in itertools.product(md.t_spawn_areas, md.ct_spawn_areas):
             (tx, ty), (cx, cy) = md.centroids[t], md.centroids[ct]
-            assert binding.solid_ray_clear(env._capsule, float(tx), float(ty), EYE_STAND, float(cx),
-                                           float(cy), EYE_STAND) == 1
-        assert binding.solid_ray_clear(env._capsule, 150.0, 150.0, EYE_STAND, -50.0, 150.0,
-                                       EYE_STAND) == 0
+            assert binding.solid_ray_clear(env._capsule, float(tx), float(ty), eye_stand, float(cx),
+                                           float(cy), eye_stand) == 1
+        assert binding.solid_ray_clear(env._capsule, 150.0, 150.0, eye_stand, -50.0, 150.0,
+                                       eye_stand) == 0
                                                                                                      # The sim keeps stepping (finite rewards) with the list attached; env.close frees it.
         env.reset()
         a, c = zero_actions()

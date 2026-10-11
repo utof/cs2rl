@@ -44,7 +44,9 @@ RUNG1A_CKPT = "outputs/checkpoints/rung1a/s0/rung1a-s0.pt"
 
 
 def _state(xy, facing=0.0, z=(0.0, 0.0), hp=(100, 100), fired=0):
-    """A two-agent snapshot (row 0 = hero, row 1 = opponent) with the keys the recorder reads."""
+    """A two-agent snapshot (row 0 = hero, row 1 = opponent) with the keys the recorder reads.
+
+    The legacy hit model (eye and torso both 48 u), which the geometry pins below assume."""
     return {
         "x": np.array([0.0, xy[0]]),
         "y": np.array([0.0, xy[1]]),
@@ -55,6 +57,7 @@ def _state(xy, facing=0.0, z=(0.0, 0.0), hp=(100, 100), fired=0):
         "alive": np.array([1, int(hp[1] > 0)]),
         "hp": np.array(hp),
         "fired_this_tick": np.array([fired, 0]),
+        "hitboxes": False,
     }
 
 
@@ -123,6 +126,9 @@ def test_the_summary_splits_fires_at_the_horizon_and_by_the_window():
 
 
 def test_lag_reads_one_tick_without_lead_and_zero_with_it():
+    """On the LEGACY ellipsoid (hitboxes=False, #391), where the oracle aims at the target's
+    axis, the point the bearing is measured to. Under hitboxes it aims at the head, off the
+    axis, and its lag reads 0.33 here (aim_eval's docstring)."""
     from cs2rl.experiment import aim_eval
     from cs2rl.experiment.oracle_statue import run_check
     out = {}
@@ -132,7 +138,8 @@ def test_lag_reads_one_tick_without_lead_and_zero_with_it():
                         0,
                         obs_only=obs_only,
                         opponent=aim_eval.OPPONENTS["walker-4-16"](0),
-                        on_step=rec)
+                        on_step=rec,
+                        hitboxes=False)
         s = rec.summary(64)
         assert (s["fires"], s["on_target_recount"], s["hit_recount"]) == \
             (res["shots_fired"], res["shots_on_target"], res["shots_hit"]), hero

@@ -76,15 +76,15 @@ import rerun as rr
 import rerun.blueprint as rrb
 import shapely
 
+from cs2rl.env.c.hit_model import hit_geometry
 from cs2rl.env.nav import TICK_RATE
-from cs2rl.eval.baselines import EYE_CROUCH, EYE_STAND
 
 APP_ID = "cs2rl-replay"
 TIMELINE = "tick"
 AIM_LEN = 120.0                        # u, the aim stick
 SHOT_LEN = 1000.0                      # u, a tracer with no live enemy to measure to
-BODY_RADIUS = 16.0                     # u, a body to look at, not the hitbox (that is
-BODY_HEIGHT_STAND = 72.0               # cs2_combat.h's ellipsoid, not drawn here)
+BODY_RADIUS = 16.0                     # u, a body to look at, not the hit volume (the
+BODY_HEIGHT_STAND = 72.0               # hit model's capsules or legacy ellipsoid, not drawn)
 BODY_HEIGHT_CROUCH = 54.0
 POV_FOV_Y = math.radians(70.0)         # cs2_demo's camera.fovy
 WALL_H = 150.0                         # u, drawn wall height; cs2_combat.h's 2D sight treats
@@ -474,7 +474,7 @@ class ReplayRecorder:
                               colors=[TEAM_COLOR[team] if alive else DEAD_COLOR],
                               labels=[label]))
             rec.log(f"hp/{name}", rr.Scalars(float(st["hp"][r]) if alive else 0.0))
-            eye = EYE_CROUCH if crouch else EYE_STAND
+            eye = hit_geometry(st["hitboxes"]).eye_z(0.0, crouch)
             rec.log(
                 f"agents/{name}/eye",
                 rr.Transform3D(translation=[0.0, 0.0, eye],

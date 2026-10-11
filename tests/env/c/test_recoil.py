@@ -1,4 +1,8 @@
-"""Sim recoil v1 (#120) — punch on the hit ray when recoil_enabled."""
+"""Sim recoil v1 (#120) — punch on the hit ray when recoil_enabled.
+
+The two hit-geometry tests (the punch against the v1c 36u vertical semi-axis) run the
+LEGACY hit model (``hitboxes=False``, #391), whose ellipsoid their arithmetic is.
+"""
 import inspect
 import math
 
@@ -59,7 +63,10 @@ def test_flag_on_rifle_three_steps_punch_table(make_map):
 
 
 def test_increment_is_after_the_ray(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
+    env = make_env(seed=0,
+                   auto_reset=False,
+                   map_data=make_map,
+                   config=EnvConfig(recoil=True, hitboxes=False))
     env.reset()
     g = env._c_env.game
     place_agent(env, 0, 8.0, 1056.0)
@@ -89,7 +96,10 @@ def test_increment_is_after_the_ray(make_map):
 
 
 def test_ray_uses_existing_punch(make_map):
-    env = make_env(seed=0, auto_reset=False, map_data=make_map, config=EnvConfig(recoil=True))
+    env = make_env(seed=0,
+                   auto_reset=False,
+                   map_data=make_map,
+                   config=EnvConfig(recoil=True, hitboxes=False))
     env.reset()
     g = env._c_env.game
     place_agent(env, 0, 8.0, 1056.0)

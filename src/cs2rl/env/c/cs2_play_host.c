@@ -42,6 +42,7 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
     for (i = 0; i < N_AGENTS; i++) {
         if (ev.shot_mask & (1u << i))
             _demo_play_at(cl,
+                          env,
                           DEMO_VOICE_SHOT,
                           curr->agents[i].x,
                           curr->agents[i].y,
@@ -49,6 +50,7 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
                           800.0f);
         if (ev.foot_mask & (1u << i))
             _demo_play_at(cl,
+                          env,
                           DEMO_VOICE_FOOT,
                           curr->agents[i].x,
                           curr->agents[i].y,
@@ -57,6 +59,7 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
         /* Every set bit, including the human. No rate-limit. */
         if ((ev.reload_mask | ev.reload_end_mask) & (1u << i))
             _demo_play_at(cl,
+                          env,
                           DEMO_VOICE_RELOAD,
                           curr->agents[i].x,
                           curr->agents[i].y,
@@ -65,11 +68,21 @@ static void demo_play_events(Client* cl, Dust2Env* env, const DemoWorldTick* cur
     }
     /* DemoWorldTick has no bomb xyz; wrapper reads the post-step game. */
     if (ev.plant)
-        _demo_play_at(
-            cl, DEMO_VOICE_PLANT, env->game.bomb.x, env->game.bomb.y, env->game.bomb.z, 800.0f);
+        _demo_play_at(cl,
+                      env,
+                      DEMO_VOICE_PLANT,
+                      env->game.bomb.x,
+                      env->game.bomb.y,
+                      env->game.bomb.z,
+                      800.0f);
     if (ev.beep)
-        _demo_play_at(
-            cl, DEMO_VOICE_BEEP, env->game.bomb.x, env->game.bomb.y, env->game.bomb.z, 1200.0f);
+        _demo_play_at(cl,
+                      env,
+                      DEMO_VOICE_BEEP,
+                      env->game.bomb.x,
+                      env->game.bomb.y,
+                      env->game.bomb.z,
+                      1200.0f);
 }
 
 /* View-kick is sim punch (#120). Client fields are unused leftovers. */

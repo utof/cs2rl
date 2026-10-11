@@ -128,6 +128,12 @@ real reset obs, so it sees round-start carrier changes the all-zero obs hid
   All six predate the movement-inaccuracy cone and reproduce with it off (EnvConfig.accuracy
   False, the default until 2026-10-09). With it on, the default since, the two random rows
   reproduce and the track and bomb rows do not (measured, lane D).
+  The hit model (#391) leaves all six as they were under --hitboxes 0 (the legacy ellipsoid):
+  with the cone off they reproduce, and with it on every row equals its pre-#391 value. Under
+  the hitbox model, the default since #391, the two random rows reproduce and the track and
+  bomb rows do not; track mode still kills there (deaths=4 at --steps 200 and 12 at 700, cone
+  off). This script has no --accuracy flag: hold the cone off by building the script's
+  EnvConfig with accuracy=False (measured, #391).
 
 Usage:
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py [--steps 200] [--n-active 5]
@@ -143,6 +149,7 @@ import sys
 import numpy as np
 
 from cs2rl.env.c.cs2_env import make_env
+from cs2rl.env.c.hit_model import HitGeometry, hit_geometry
 from cs2rl.env.config import EnvConfig
 from cs2rl.env.map import SIMPLE_ROOMS, make_simple_map
 from cs2rl.env.nav import N_AGENTS, TEAM_SIZE
@@ -256,22 +263,14 @@ def build_map(aim_mode):
     return make_simple_map()
 
 
-# Hitbox geometry mirrored from process_combat (src/cs2rl/env/c/cs2_combat.h): the
-# hitscan ray starts at the shooter's EYE and the perpendicular-distance gate is
-# measured against the target's TORSO point. Track mode aims eye→torso so a
-# converged aim gives perp ≈ 0 and the shot connects.
-# PITFALL: hand-mirrored constants. If cs2_combat.h changes them, track mode
-# aims slightly off — that does NOT corrupt any hash (the aim is still a pure
-# function of state), but the combat coverage this mode exists for degrades
-# silently. Re-measure the kill counter after any EYE_HEIGHT_*/TORSO_OFFSET_*
-# or hitbox-geometry edit.
-EYE_HEIGHT_STAND = 48.0
-EYE_HEIGHT_CROUCH = 24.0
-TORSO_OFFSET_STAND = 48.0
-TORSO_OFFSET_CROUCH = 24.0
+# The hitscan ray starts at the shooter's EYE (src/cs2rl/env/c/cs2_combat.h process_combat).
+# Track mode aims from the eye at the hit model's aim point (cs2rl.env.c.hit_model, read
+# from the C table: the torso centre on the legacy ellipsoid, the head capsule's midpoint
+# under hitboxes), so a converged aim connects. Until #391 these heights were hand-mirrored
+# constants here; the legacy model's are the same numbers, so --hitboxes 0 aims as before.
 
 
-def track_aim_actions(game, max_turn):
+def track_aim_actions(game, max_turn, geo: HitGeometry):
     """Continuous aim that steers every alive agent onto its nearest alive enemy.
 
     WHAT: returns the (N_AGENTS, AIM_DIM) float32 continuous-action buffer for
@@ -293,13 +292,16 @@ def track_aim_actions(game, max_turn):
     PITFALL: `game` must be the LIVE ctypes overlay (`env._c_env.game`), read at
     the top of the tick. A stale copy would aim at last tick's positions and
     still hash deterministically — a silent coverage loss, not a crash.
+    `geo` must be the env's own hit model (`hit_geometry(env.config.hitboxes)`): aiming
+    at the other model's point still hashes deterministically, so a mismatch shows only
+    in the combat counters.
     """
     cont = np.zeros((N_AGENTS, AIM_DIM), np.float32)
     for i in range(N_AGENTS):
         a = game.agents[i]
         if not a.alive:
             continue                   # dead agents' aim is ignored by the C step
-        eye_z = a.z + (EYE_HEIGHT_CROUCH if a.is_crouching else EYE_HEIGHT_STAND)
+        eye_z = geo.eye_z(a.z, a.is_crouching)
 
         # Team layout is fixed: agents [0, TEAM_SIZE) are T, [TEAM_SIZE, N_AGENTS) are CT
         # — same `en_start` split process_combat uses to scan for targets.
@@ -312,9 +314,8 @@ def track_aim_actions(game, max_turn):
             en = game.agents[j]
             if not en.alive:
                 continue
-            rx, ry = en.x - a.x, en.y - a.y
-            torso_z = en.z + (TORSO_OFFSET_CROUCH if en.is_crouching else TORSO_OFFSET_STAND)
-            rz = torso_z - eye_z
+            tx, ty, tz = geo.target_xyz(en.x, en.y, en.z, en.facing, en.is_crouching)
+            rx, ry, rz = tx - a.x, ty - a.y, tz - eye_z
             d2 = rx * rx + ry * ry + rz * rz
             if best_d2 is None or d2 < best_d2:
                 best, best_d2 = (rx, ry, rz), d2
@@ -418,6 +419,13 @@ def main():
                     help="random: uniform aim noise (never hits — no combat coverage). "
                     "track: aim at the nearest alive enemy, so the hash covers the "
                     "hitscan/damage/death path. Different modes => different hashes.")
+    ap.add_argument(
+        "--hitboxes",
+        type=int,
+        choices=(0, 1),
+        default=None,
+        help="the hit model (EnvConfig.hitboxes): 1 the capsule hitboxes, 0 the legacy "
+        "ellipsoid every fingerprint above was measured on. Default: EnvConfig.hitboxes.")
     a = ap.parse_args()
 
     # PITFALL: `--n-active` omitted must build the SAME env as before, so the
@@ -428,7 +436,10 @@ def main():
     config = EnvConfig() if a.n_active is None else EnvConfig(n_active_per_team=a.n_active)
     if a.aim_mode == "bomb":
         config = dataclasses.replace(config, round_time=BOMB_ROUND_TIME)
+    if a.hitboxes is not None:
+        config = dataclasses.replace(config, hitboxes=bool(a.hitboxes))
     env = make_env(config=config, seed=a.seed, map_data=build_map(a.aim_mode))
+    geo = hit_geometry(env.config.hitboxes)
     if a.aim_mode == "bomb":
         sd = env._c_env.sd.contents
         for name, ticks in BOMB_CLOCKS:
@@ -467,7 +478,7 @@ def main():
         # draw at all, so the two modes' RNG streams diverge immediately. Bomb
         # mode then draws USE and overrides shoot with the mask's press bin.
         if a.aim_mode in ("track", "bomb"):
-            cont = track_aim_actions(game, max_turn)
+            cont = track_aim_actions(game, max_turn, geo)
         else:
             cont = rng.uniform(-0.5, 0.5, size=(N_AGENTS, AIM_DIM)).astype(np.float32)
         if a.aim_mode == "bomb":

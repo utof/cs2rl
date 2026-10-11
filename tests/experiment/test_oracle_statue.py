@@ -26,6 +26,9 @@ WHAT IS PINNED HERE
 * The movement-inaccuracy switch reaches C: ``run_check(accuracy=True)`` shoots on a
   cone, ``accuracy=False`` on none, and ``--accuracy`` (unset, 1, 0) reaches run_check
   as None, True, False.
+* The hit model: the ``--statue-z`` tests and every rz number pin the LEGACY ellipsoid
+  (``hitboxes=False``, #391), whose semi-axes they were written against; the grounded
+  kills and the obs-only agreement run at EnvConfig's default (the hitbox model).
 
 WHY the thresholds here are looser than the script's (0.8 vs 0.90 kill rate):
 this is the fast regression tripwire at N=20, not the gate. The gate is
@@ -91,7 +94,7 @@ def test_oracle_kills_statue_held_at_crouch_height_offset():
     crouched target is not reachable through the Rung 1a action space.
     """
     from cs2rl.experiment.oracle_statue import run_check, verdict
-    res = run_check(episodes=20, seed=0, statue_z=CROUCH_HEIGHT_OFFSET)
+    res = run_check(episodes=20, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, hitboxes=False)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
     assert res["rz_min"] == pytest.approx(expect_rz, abs=0.05), res
     assert res["rz_max"] == pytest.approx(expect_rz, abs=0.05), res
@@ -121,7 +124,7 @@ def test_statue_above_the_standing_semi_axis_is_unkillable():
     """
     from cs2rl.env.nav import MAX_TURN_SPEED_RAD
     from cs2rl.experiment.oracle_statue import run_check, verdict
-    res = run_check(episodes=4, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET)
+    res = run_check(episodes=4, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET, hitboxes=False)
     assert res["rz_min"] == pytest.approx(ABOVE_SEMI_AXIS_OFFSET - GRAVITY_SAG, abs=0.05), res
     assert res["kills"] == 0 and res["ttk_min"] is None, res
     assert res["shots_fired"] > 0, res
@@ -179,7 +182,11 @@ def test_obs_only_decodes_the_enemy_z_delta_the_c_state_reports():
     carries that 0 too; the realised rz at combat never does.
     """
     from cs2rl.experiment.oracle_statue import OBS_RZ_TOL, _rz_disagrees, run_check
-    res = run_check(episodes=4, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
+    res = run_check(episodes=4,
+                    seed=0,
+                    statue_z=CROUCH_HEIGHT_OFFSET,
+                    obs_only=True,
+                    hitboxes=False)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
     assert res["obs_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
     assert res["obs_rz_min"] == pytest.approx(0.0, abs=0.05), res
@@ -345,7 +352,11 @@ def test_a_mutated_z_normaliser_fails_the_obs_only_exit_code(monkeypatch):
     argv = ["--episodes", "2", "--seed", "0", "--statue-z", str(CROUCH_HEIGHT_OFFSET), "--obs-only"]
     assert mod.main(argv) == 0
     monkeypatch.setattr(mod, "OBS_Z_SCALE", mod.OBS_Z_SCALE / 2)
-    res = mod.run_check(episodes=2, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
+    res = mod.run_check(episodes=2,
+                        seed=0,
+                        statue_z=CROUCH_HEIGHT_OFFSET,
+                        obs_only=True,
+                        hitboxes=False)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
     assert res["kill_rate"] == 1.0 and res["obs_inconsistent_slots"] == 0, res
     assert res["observed_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
@@ -367,7 +378,11 @@ def test_a_sign_flipped_z_delta_fails_the_obs_only_exit_code(monkeypatch):
     from cs2rl.experiment import oracle_statue as mod
     argv = ["--episodes", "2", "--seed", "0", "--statue-z", str(CROUCH_HEIGHT_OFFSET), "--obs-only"]
     monkeypatch.setattr(mod, "OBS_Z_SCALE", -mod.OBS_Z_SCALE)
-    res = mod.run_check(episodes=2, seed=0, statue_z=CROUCH_HEIGHT_OFFSET, obs_only=True)
+    res = mod.run_check(episodes=2,
+                        seed=0,
+                        statue_z=CROUCH_HEIGHT_OFFSET,
+                        obs_only=True,
+                        hitboxes=False)
     expect_rz = CROUCH_HEIGHT_OFFSET - GRAVITY_SAG
     assert res["kill_rate"] == 1.0 and res["obs_inconsistent_slots"] == 0, res
     assert res["observed_rz_max"] == pytest.approx(expect_rz, abs=0.05), res
@@ -411,7 +426,10 @@ def test_main_exit_code_follows_the_verdict(capsys):
     from cs2rl.experiment.oracle_statue import main
     assert main(["--episodes", "4", "--seed", "0"]) == 0
     assert "PASS" in capsys.readouterr().out
-    assert main(["--episodes", "2", "--seed", "0", "--statue-z", str(ABOVE_SEMI_AXIS_OFFSET)]) == 1
+    assert main([
+        "--episodes", "2", "--seed", "0", "--statue-z",
+        str(ABOVE_SEMI_AXIS_OFFSET), "--hitboxes", "0"
+    ]) == 1
     assert "FAIL" in capsys.readouterr().out
 
 
@@ -441,7 +459,7 @@ def test_fail_report_names_the_facing_denominator_and_the_censored_ttk():
       which is what separates "one bad spawn row" from "nothing can die".
     """
     from cs2rl.experiment.oracle_statue import format_summary, run_check
-    res = run_check(episodes=1, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET)
+    res = run_check(episodes=1, seed=0, statue_z=ABOVE_SEMI_AXIS_OFFSET, hitboxes=False)
     out = format_summary(res)
     assert res["kills"] == 0 and res["shots_facing_enemy"] > 0, res
     assert f"shots_facing_enemy       {res['shots_facing_enemy']}" in out, out

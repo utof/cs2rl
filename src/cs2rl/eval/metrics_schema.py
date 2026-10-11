@@ -376,6 +376,23 @@ REGISTRY.update({
         "window-mean-pufferlib", "radians", (),
         "Sum of the accuracy cone's max radius over the episode's shots; 0 while "
         "EnvConfig.accuracy is off. Divide by environment/shots_fired for the mean."),
+    "environment/hits_head":
+    _e(
+        "window-mean-pufferlib", "count", (),
+        "Hits per CS hit group (#391; cs2_hitboxes.h hb_count_group): the six hits_* keys "
+        "sum to environment/shots_hit. Under EnvConfig.hitboxes the group is the region the "
+        "ray entered first; on the legacy ellipsoid it is the random roll's outcome, and "
+        "hits_neck and hits_arm stay 0."),
+    "environment/hits_neck":
+    _e("window-mean-pufferlib", "count", (), "See environment/hits_head."),
+    "environment/hits_chest":
+    _e("window-mean-pufferlib", "count", (), "See environment/hits_head."),
+    "environment/hits_stomach":
+    _e("window-mean-pufferlib", "count", (), "See environment/hits_head."),
+    "environment/hits_arm":
+    _e("window-mean-pufferlib", "count", (), "Either arm. See environment/hits_head."),
+    "environment/hits_leg":
+    _e("window-mean-pufferlib", "count", (), "Either leg. See environment/hits_head."),
     "environment/damage_dealt":
     _e("window-mean-pufferlib", "hp", _GAME_METRICS),
     "environment/mutual_vis_pair_ticks":
@@ -391,10 +408,10 @@ REGISTRY.update({
     "environment/min_enemy_distance_valid":
     _e("window-mean-pufferlib", "flag", _GAME_METRICS,
        "Denominator of the game/min_enemy_distance conditional mean."),
-                                                                                           # The one non-window key on this path, and the one the aggregation assert has
-                                                                                           # an explicit case for: cs2rl.train.trainer.Cs2PuffeRL._log_and_checkpoint writes it as a ONE-ELEMENT LIST so
-                                                                                           # PufferLib's np.mean is an identity. It is the denominator of every
-                                                                                           # weighted_sum(...)/episodes ratio in both gate scripts.
+                                                                                              # The one non-window key on this path, and the one the aggregation assert has
+                                                                                              # an explicit case for: cs2rl.train.trainer.Cs2PuffeRL._log_and_checkpoint writes it as a ONE-ELEMENT LIST so
+                                                                                              # PufferLib's np.mean is an identity. It is the denominator of every
+                                                                                              # weighted_sum(...)/episodes ratio in both gate scripts.
     "environment/episodes":
     _e(
         "last", "count", ("rung1_gate", "rung1a_smoke_read"),
@@ -403,9 +420,9 @@ REGISTRY.update({
         "not a mean. Turning it into a bare write would silently divide every gate "
         "ratio by the window length; that is the case the aggregation assert pins by "
         "name."),
-                                                                                           # Not a metric: a ctypes view merged into the terminal info when
-                                                                                           # include_step_stats_in_info=True (the test harness; `cs2rl.train.envs.build_env_factory`
-                                                                                           # never sets it, so it stays False).
+                                                                                              # Not a metric: a ctypes view merged into the terminal info when
+                                                                                              # include_step_stats_in_info=True (the test harness; `cs2rl.train.envs.build_env_factory`
+                                                                                              # never sets it, so it stays False).
     "environment/step_stats":
     _e(
         "dropped-non-numeric", "struct", (),

@@ -219,7 +219,10 @@ static void process_movement(Dust2Env* env, const int32_t* actions, StepStats* s
          * would poison that reading. Zeroing after the is_crouching write would
          * green the histogram while leaving the agent crouched; zeroing after
          * count_action would stop the crouch but keep counting attempts. Both
-         * are covered by tests/env/c/test_stance_flags.py. */
+         * are covered by tests/env/c/test_stance_flags.py.
+         * KNOWN LIMIT (#391, #393): under the hitbox model a standing shooter
+         * with pitch pinned cannot hit a crouched target at all, so crouch must
+         * stay off while pitch is pinned (cs2_env.h compute_masks). */
         if (!sd->crouch_enabled)
             crouch_act = 0;
         a->is_crouching = (crouch_act == 1) ? 1 : 0;

@@ -1075,6 +1075,7 @@ def _differing_config(base_env, name):
         "reward_symmetrize": not cfg.reward_symmetrize,
         "recoil": not cfg.recoil,
         "accuracy": not cfg.accuracy,
+        "hitboxes": not cfg.hitboxes,
         "n_active_per_team": cfg.n_active_per_team - 1,
         "pin_pitch": 1 - cfg.pin_pitch,
         "crouch_enabled": 1 - cfg.crouch_enabled,
@@ -1117,8 +1118,8 @@ def test_eval_env_agreement_two_directions(simple_map, field_name):
                     these names.
       every other field — `on config.<field>`, which ONLY (b) produces, because
                     (a) reads Python attributes and `pbrs_gamma`, `recoil`,
-                    `accuracy`, `laser_range` and `max_turn_speed` are not
-                    attributes of a Cs2Env (measured). `rewards` is the trap: `env.rewards` DOES
+                    `accuracy`, `hitboxes`, `laser_range` and `max_turn_speed` are
+                    not attributes of a Cs2Env (measured). `rewards` is the trap: `env.rewards` DOES
                     exist and is the per-agent reward BUFFER, an ndarray with
                     nothing to do with `config.rewards`, so adding `rewards` to
                     (a)'s tuple would compare two buffers and quietly stop

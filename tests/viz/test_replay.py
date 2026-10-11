@@ -123,6 +123,7 @@ def _snap(hp5=100, fired0=0, alive5=1, x5=300.0, facing0=0.0, pitch0=0.0):
         "bomb_planted": 0,
         "bomb_carrier": 0,
         "bomb_pos": (0.0, 0.0, 0.0),
+        "hitboxes": True,
     }
     st["x"][0], st["x"][5] = 100.0, x5
     st["hp"][0], st["hp"][5] = 100, hp5

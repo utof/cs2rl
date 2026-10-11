@@ -885,7 +885,8 @@ static void test_solids_cliff_lip(void) {
     }
 
     /* Eye level inside the drop is blocked; above the lip is the overlook
-     * (an agent standing on the high room has its eye at 64+48=112). */
+     * (a legacy-eye test height: an agent standing on the high room has its
+     * legacy eye at 64+48=112). The literals are geometric, not the model's eye. */
     check_i("cliff lip blocks eye",
             solid_ray_clear(&f.sd, 50.0f, 50.0f, 48.0f, 50.0f, 150.0f, 48.0f),
             0);
@@ -940,7 +941,9 @@ static void test_solids_elevated_cliff_lip(void) {
         check_f_near("elevated lip ny", lip->ny, -1.0f, 1e-4f);
     }
 
-    /* The behavioural half, with the real map's eye heights. Standing in the
+    /* The behavioural half, with the legacy eye height (48 above the feet; the
+     * literals are geometric and stay). At the CS eye (64) the bombsite eye is
+     * 128, exactly the lip top: cs2_solids.h's KNOWN LIMIT. Standing in the
      * bombsite (feet 64, eye 112) you are inside the drop and blocked;
      * standing on the catwalk (feet 128, eye 176) you see over it. y=100 is
      * the only face either ray crosses, so each mutant loses exactly one of

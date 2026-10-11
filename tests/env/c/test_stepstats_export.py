@@ -16,8 +16,11 @@ def test_scripted_hit_tick(simple_map):
     # = 138 > 100 hp), which ends the round; the auto-reset branch
     # (cs2_env.py step -> binding.reset -> clear_stats) would memset
     # episode_stats before the asserts below read it. ~10 % flake otherwise.
+    # The LEGACY hit model (#391): that head roll is the ellipsoid's. Under hitboxes this
+    # level shot killed the target (measured, #391), and a target killed this tick reads
+    # unseen in the obs, which the geometry guard below takes for a wall.
     env = make_env(map_data=simple_map,
-                   config=EnvConfig(n_active_per_team=1),
+                   config=EnvConfig(n_active_per_team=1, hitboxes=False),
                    seed=1,
                    auto_reset=False)
     try:

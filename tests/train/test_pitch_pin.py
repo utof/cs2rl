@@ -105,6 +105,11 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     in the sign of rz. auto_reset=False: at n_active=1 a head-roll hit can end
     the round, and the auto-reset would clear episode_stats before the asserts.
 
+    Every case runs the LEGACY hit model (``hitboxes=False``, #391): the semi-axes above are
+    the ellipsoid's. Under the hitbox model a standing shooter cannot hit a crouched target
+    at pinned pitch at all (cs2_env.h compute_masks' KNOWN LIMIT); tests/env/c/test_hitboxes.py
+    pins that.
+
     Every case states shots_hit and shots_stance_blocked SEPARATELY on purpose:
     they answer different questions (see the counters' comment in
     cs2_combat.h), so a coupled `blocked == 1 - hit` assert would pass if both
@@ -114,7 +119,10 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     from cs2rl.env.map import make_arena_duel_map
     arena = make_arena_duel_map()
     env = make_env(map_data=arena,
-                   config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
+                   config=EnvConfig(n_active_per_team=1,
+                                    pin_pitch=1,
+                                    crouch_enabled=0,
+                                    hitboxes=False),
                    seed=1,
                    auto_reset=False)
     try:
@@ -132,7 +140,10 @@ def test_arena_stance_parity_hit_and_stance_blocked():
         env.close()
 
     env = make_env(map_data=arena,
-                   config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=1),
+                   config=EnvConfig(n_active_per_team=1,
+                                    pin_pitch=1,
+                                    crouch_enabled=1,
+                                    hitboxes=False),
                    seed=1,
                    auto_reset=False)
     try:
@@ -156,7 +167,10 @@ def test_arena_stance_parity_hit_and_stance_blocked():
     for airborne_idx, z_off, expect_hit, expect_blocked in ((5, 57.0, 0, 1), (5, 20.0, 1, 0),
                                                             (0, 57.0, 0, 1), (0, 20.0, 1, 0)):
         env = make_env(map_data=arena,
-                       config=EnvConfig(n_active_per_team=1, pin_pitch=1, crouch_enabled=0),
+                       config=EnvConfig(n_active_per_team=1,
+                                        pin_pitch=1,
+                                        crouch_enabled=0,
+                                        hitboxes=False),
                        seed=1,
                        auto_reset=False)
         try:

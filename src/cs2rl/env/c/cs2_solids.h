@@ -701,9 +701,16 @@ _solid_span_range(float p0, float d, float lo, float hi, float* out_a, float* ou
  *       drawn — and must NOT be stopped by a lip they are looking over,
  *       which is what makes the catwalk an overlook rather than a wall.
  *
- * z0/z1 are EYE heights (cs2_combat.h: 48 standing, 24 crouched, above the
- * agent's feet), not feet z. Passing feet z silently lets shots through the
+ * z0/z1 are EYE heights above the agent's feet (cs2_combat.h agent_eye_height:
+ * 64 standing, 46 crouched under the hitbox model; 48 / 24 on the legacy
+ * ellipsoid), not feet z. Passing feet z silently lets shots through the
  * bottom of a lip.
+ *
+ * KNOWN LIMIT (#391): no production caller passes an eye yet. When LoS is wired
+ * to this, the shipping simple map's lip steps 64 u (bombsite 64 under catwalk
+ * 128, demo_events_test.c), which equals the standing CS eye: a standing eye on
+ * the lower floor sits exactly at the lip's top, and the inclusive z test
+ * decides the ray.
  *
  * Pitfalls:
  *  - A ray lying exactly in a face's plane counts as blocked. Tolerance is

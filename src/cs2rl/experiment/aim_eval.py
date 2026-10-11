@@ -35,13 +35,19 @@ THE MISS DECOMPOSITION
 ----------------------
 Read off the C state after each step: positions and facing as ``process_combat`` used them.
   * e: the aim error (bearing - facing, elevation - pitch) from the hero's eye to the
-    opponent's torso, in units of the hit half-window ``asin(16/d)`` (d = the 2D distance; the
-    test cs2_combat.h's ``shots_on_target`` applies), so ``|e_yaw| < 1`` is on target.
+    opponent, in units of the hit half-window ``asin(16/d)`` (d = the 2D distance; the
+    test cs2_combat.h's ``shots_on_target`` applies), so ``|e_yaw| < 1`` is on target. The
+    bearing is to the opponent's axis in both hit models, as ``shots_on_target`` measures
+    it; the elevation is to ``hit_geometry``'s aim height (the torso centre on the legacy
+    ellipsoid, the head capsule midpoint's height under hitboxes). Under hitboxes on_target
+    is looser than what a shot can hit: the standing head is 7.75 u wide front-on (#391).
   * w: the line of sight's angular velocity over the tick (rad/tick): the change of
     (bearing, elevation) from the state before the step to the one after it.
   * along = e . w/|w|: + means the crosshair trails the target (lag), - that it leads.
-    across = the signed perpendicular component. With pitch pinned on flat ground every
-    elevation term is 0, so across is 0 and along is +-e_yaw. Below ``MIN_ANGULAR_SPEED``
+    across = the signed perpendicular component. With pitch pinned on flat ground the legacy
+    model's elevation terms are 0 (eye and torso both 48 u), so across is 0 and along is
+    +-e_yaw. Under hitboxes e_pitch is the head midpoint's 2.37 u above the eye seen from d,
+    not 0, so across is small but not 0. Below ``MIN_ANGULAR_SPEED``
     the motion has no direction and a sample has no along/across.
   * per fire: |e_yaw| median and p90, the share fired outside the window, along and across
     means, and hit/fired for fires up to and after episode tick ``bptt_horizon`` (C4);
@@ -49,7 +55,9 @@ Read off the C state after each step: positions and facing as ``process_combat``
     i.e. how many ticks of the line of sight's motion the crosshair trails by; its standard
     error comes from resampling whole episodes. Aiming at where the target was one tick ago
     reads exactly 1 (ObsOracleActor); a one-tick velocity lead reads near 0 (OracleActor: 0.08
-    to 0.16 against the three walkers on 2026-10-09).
+    to 0.16 against the three walkers on 2026-10-09, on the legacy ellipsoid). Under hitboxes
+    OracleActor aims at the head, up to 2.3 u off the axis the bearing is measured to, and its
+    lag read 0.33 against walker-4-16 (20 rounds, seed 0, #391).
     ``lag_by_speed`` gives the same ratio per quintile of |w|: flat means the trailing error is
     proportional to the angular speed. Tracking starts at the round's first on-target tick:
     the opening turn is acquisition, and its errors are tens of half-windows wide.
@@ -73,9 +81,12 @@ PITFALLS
 * Every tick of the arena has 2D line of sight, so nothing here is gated on visibility.
   KNOWN LIMIT: on a map with occlusion, gate on the pre-step visibility (the obs reads a target
   killed this tick as unseen, which would drop every killing shot).
-* Spawns are not paired across cells: the env's one RNG also rolls hit locations
-  (cs2_combat.h), so two cells on one seed share their first few spawns and then diverge (2 to
-  9 shared with the oracle's cell on 2026-10-09). Compare cells as samples.
+* On the legacy ellipsoid spawns are not paired across cells: the env's one RNG also rolls
+  hit locations (cs2_combat.h), so two cells on one seed share their first few spawns and then
+  diverge (2 to 9 shared with the oracle's cell on 2026-10-09). Compare cells as samples. The
+  hitbox model draws no RNG on a hit (tests/env/c/test_hitboxes.py), so there the spawns stay
+  paired: an oracle cell and a never-firing cell on seed 0 had equal spawns in 200 of 200
+  rounds, against 11 of 200 on the ellipsoid (#391).
 * ``HIT_HALF_WIDTH`` mirrors cs2_combat.h; tests/experiment/test_aim_eval.py pins it.
 * KNOWN LIMIT: ``run_check`` reads the env-wide shot counters (cs2_combat.h counts every
   participating agent's shots), so an opponent that shoots would mix its shots into
@@ -94,13 +105,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from cs2rl.env.c.hit_model import hit_geometry
 from cs2rl.eval.baselines import (
     ACTION_DIM,
     AIM_DIM,
-    EYE_CROUCH,
-    EYE_STAND,
-    TORSO_CROUCH,
-    TORSO_STAND,
     IdleActor,
     PolicyActor,
     wrap_pi,
@@ -189,14 +197,19 @@ def build_policy_hero(policy, aim: str, lstm: str, bptt_horizon: int):
 def aim_geometry(st_prev, st, hero, opp):
     """``(e, w, d)``: the aim error and the line of sight's angular velocity, both (yaw, pitch)
     in rad, and the 2D distance, for ``hero`` aiming at ``opp`` in the post-step state ``st``.
+
+    The bearing is to ``opp``'s axis (cs2_combat.h's ``shots_on_target`` test, so the
+    recount tripwire holds in both hit models); the elevation is to the aim height of
+    ``hit_geometry(st["hitboxes"])``.
     """
+    geo = hit_geometry(st["hitboxes"])
 
     def los(s):
         dx, dy = s["x"][opp] - s["x"][hero], s["y"][opp] - s["y"][hero]
-        eye = s["z"][hero] + (EYE_CROUCH if s["is_crouching"][hero] else EYE_STAND)
-        torso = s["z"][opp] + (TORSO_CROUCH if s["is_crouching"][opp] else TORSO_STAND)
+        eye = geo.eye_z(s["z"][hero], s["is_crouching"][hero])
+        target = geo.target_z(s["z"][opp], s["is_crouching"][opp])
         d = math.hypot(dx, dy)
-        return math.atan2(dy, dx), math.atan2(torso - eye, d), d
+        return math.atan2(dy, dx), math.atan2(target - eye, d), d
 
     bearing0, elev0, _ = los(st_prev)
     bearing, elev, d = los(st)

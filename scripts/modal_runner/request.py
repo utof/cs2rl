@@ -84,6 +84,7 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--crouch-enabled": 1,                             # R0-E.2 (#131)
     "--jump-enabled": 1,                               # Rung 1a T2b
     "--accuracy": 1,                                   # the movement-inaccuracy cone (EnvConfig.accuracy)
+    "--hitboxes": 1,                                   # the hit model (EnvConfig.hitboxes, #391)
     "--opponent": 1,                                   # Rung 1a T3: {self,noop,walker} opponent
     "--round-time-ticks": 1,                           # R0-G
     "--laser-range": 1,                                # R0-G
