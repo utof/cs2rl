@@ -96,7 +96,8 @@ PITFALLS
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, fields, replace
+from typing import Any
 
 import numpy as np
 
@@ -222,6 +223,28 @@ PROFILES = {
 }
 
 
+def parse_params(spec: str) -> DuelBotParams:
+    """``PROFILE[,dial=value...]`` -> DuelBotParams; raises ValueError.
+
+    PROFILE is a ``PROFILES`` key or ``perfect`` (``DuelBotParams()``); each dial is a
+    DuelBotParams field (``style=run``, ``reaction_ticks=3``, ``lead=0``). The grammar of
+    cs2rl.experiment.oracle_duel.parse_bot without its ``walker`` opponent. It lives here
+    for cs2rl.train, which the package layers forbid to import cs2rl.experiment.
+    """
+    name, *dials = spec.split(",")
+    if name != "perfect" and name not in PROFILES:
+        raise ValueError(f"unknown bot {name!r}: one of perfect, {', '.join(PROFILES)}")
+    params = DuelBotParams() if name == "perfect" else PROFILES[name]
+    types = {f.name: type(getattr(params, f.name)) for f in fields(params)}
+    kw: dict[str, Any] = {}
+    for d in dials:
+        key, _, value = d.partition("=")
+        if key not in types:
+            raise ValueError(f"unknown dial {key!r}: one of {', '.join(types)}")
+        kw[key] = bool(int(value)) if types[key] is bool else types[key](value)
+    return replace(params, **kw)
+
+
 def _wrap(a):
     return (a + np.pi) % (2.0 * np.pi) - np.pi
 
@@ -296,6 +319,27 @@ class DuelBot:
         self._sign = np.ones(n)                        # strafe direction: +1 right, -1 left
         self._hold = np.zeros(n, dtype=np.int64)
         self.reset()
+
+    @classmethod
+    def for_env(cls, env, n_rows: int, rng: np.random.Generator, params) -> DuelBot:
+        """A bot over ``n_rows`` rows of ``env``'s map, rules and hit model: the turn clamp
+        and the map's extent from its StaticData, the aim height from its hit model, and
+        the rifle's move speed. Any Cs2Env built with the same config and map serves (a
+        trainer passes its vecenv's driver env, which lives in the main process)."""
+        from cs2rl.env.c import binding
+        from cs2rl.env.c.hit_model import hit_geometry
+        sd = env._c_env.sd.contents
+        geo = hit_geometry(env.config.hitboxes)
+        half_x, half_y = 1.0 / sd.inv_x_range, 1.0 / sd.inv_y_range
+        return cls(n_rows,
+                   rng,
+                   params,
+                   max_turn_speed=sd.max_turn_speed,
+                   half_x=half_x,
+                   half_y=half_y,
+                   aim_dz=geo.target_z(0.0, False) - geo.eye_z(0.0, False),
+                   move_speed=binding.weapon_defs()[0]["move_speed"],
+                   centre=(sd.x_offset * half_x, sd.y_offset * half_y))
 
     def configure(self, rows, params) -> None:
         """Set ``rows``' dials: one ``DuelBotParams`` for all of them, or one per row."""
@@ -500,20 +544,7 @@ class DuelBotActor:
         self.core = None
 
     def _build(self, env) -> DuelBot:
-        from cs2rl.env.c import binding
-        from cs2rl.env.c.hit_model import hit_geometry
-        sd = env._c_env.sd.contents
-        geo = hit_geometry(env.config.hitboxes)
-        half_x, half_y = 1.0 / sd.inv_x_range, 1.0 / sd.inv_y_range
-        return DuelBot(len(self.rows),
-                       self.rng,
-                       self.params,
-                       max_turn_speed=sd.max_turn_speed,
-                       half_x=half_x,
-                       half_y=half_y,
-                       aim_dz=geo.target_z(0.0, False) - geo.eye_z(0.0, False),
-                       move_speed=binding.weapon_defs()[0]["move_speed"],
-                       centre=(sd.x_offset * half_x, sd.y_offset * half_y))
+        return DuelBot.for_env(env, len(self.rows), self.rng, self.params)
 
     def reset(self):
         if self.core is not None:
