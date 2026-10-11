@@ -119,7 +119,8 @@ class DuelRecorder:
         has 2D line of sight on every tick and the sim has no field of view
         (cs2_combat.h build_vis_matrix), so a round is exactly one engagement, from tick 1
         to the round's last tick. KNOWN LIMIT: on a map with occlusion, gate on visibility
-        and split a round into its engagements.
+        and split a round into its engagements. The both-alive gate never closes here (a
+        round ends on the tick a side dies), so no test exercises it.
       * FIRST SHOT: the side's first fired tick of the engagement (``first_fire``, None if it
         never fired); ``first_fire_hit``: that tick was a HIT.
       * TIME TO DAMAGE: from the observed state that first showed the enemy (the reset

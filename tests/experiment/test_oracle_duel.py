@@ -23,6 +23,7 @@ WHAT IS PINNED HERE (seed 0, obs-only bots; the values observed 2026-10-11)
   the perfect planted bot's hit/fired on the L1 walker is above 0.6 led (observed 0.7665)
   and below 0.35 unled (observed 0.2176), at 50 rounds a side.
 * The verdict's rules, parse_bot's spec grammar, and main's exit code and switches.
+* The accounting check reads each counter: fired, hit and fast.
 * DuelRecorder's definitions (the Rung 1c duel evaluation reads them), on hand-built states:
   FAST at or above 0.34 x the held weapon's move speed; FIRST SHOT, the first fired tick of
   the engagement, and whether it hit; TIME TO DAMAGE, the tick of the first hit; hp lost;
@@ -143,6 +144,16 @@ def test_the_verdict_fails_a_side_whose_shots_do_not_sum():
     res = _rows(win=50, loss=50)
     res["accounting"][0]["unmatched"] = 1
     assert _checks(res, "even")[1]["unmatched vis slots == 0"][0] is False
+
+
+@pytest.mark.parametrize("key", ["fired", "hit", "fast"])
+def test_the_accounting_check_reads_each_counter(key):
+    # Each counter on its own: the fast column is the one that caught the held-weapon threshold.
+    sums = {"fired": (3, 2, 5), "hit": (1, 1, 2), "fast": (1, 0, 1)}
+    assert D.shots_accounted([{**sums, "unmatched": 0}])
+    t, ct, env_total = sums[key]
+    sums[key] = (t, ct, env_total + 1)
+    assert not D.shots_accounted([{**sums, "unmatched": 0}])
 
 
 def test_parse_bot():
