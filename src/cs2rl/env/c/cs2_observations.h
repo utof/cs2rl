@@ -249,7 +249,9 @@ compute_observations(Dust2Env* env, int t_alive, int ct_alive, int8_t vis10[N_AG
                  * velocity 0.29. Visibility-gated like +2/+5..+7: the memory branch
                  * below and an unseen or dead enemy leave +8/+9 at 0 — the memory keeps
                  * a nav-area index, no velocity. KNOWN LIMIT: teammate slots carry no
-                 * velocity. */
+                 * velocity. KNOWN LIMIT: a dead observer still sees from its corpse (as
+                 * +0..+7 always have), so its +8/+9 subtract the corpse's last velocity,
+                 * which process_movement no longer updates. */
                 float rvx = en->vx - a->vx, rvy = en->vy - a->vy;
                 obs[base + 8] = (rvx * cf + rvy * sf) / 250.0f;
                 obs[base + 9] = (-rvx * sf + rvy * cf) / 250.0f;
