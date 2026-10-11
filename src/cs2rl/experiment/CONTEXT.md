@@ -31,10 +31,11 @@ uv run python -m cs2rl.experiment.replay oracle --vs walker-4-16
 
 On the arena duel (one agent a side, pitch pinned, crouch and jump off) with the cone and the
 capsule hitboxes on, seed 0, bots deciding from their own observation rows (measured
-2026-10-11, #152): a duel between two copies of one bot is winnable and symmetric (the default
-mirror `hard,style=stop` decided 1074 of 1200 rounds with no time-out, T share 0.5019 [0.4720,
-0.5317]; before #152 L2 resolved a tick's shots simultaneously, the T, first in agent order,
-won 646 of 1000 rounds of an `expert,style=stop` mirror); stopping before a rifle shot beats
+2026-10-11, #152): a duel between two copies of the default bot is winnable and symmetric (the
+default mirror `hard,style=stop` decided 1074 of 1200 rounds with no time-out, T share 0.5019
+[0.4720, 0.5317]; before #152 L2 resolved a tick's shots simultaneously, the T, first in agent
+order, won 646 of 1000 rounds of an `expert,style=stop` mirror); two perfect bots trade every
+round (1200 of 1200 double kills); stopping before a rifle shot beats
 running under the movement-inaccuracy cone and not without it (hard stop against hard run, hero
 share 0.5867 [0.5553, 0.6174] with the cone, 0.4671 [0.4354, 0.4990] without, 500 rounds a
 side); lead matters under the hitboxes (the perfect planted bot hit the L1 walker with 0.7809
@@ -49,10 +50,12 @@ The bot aims its pitch at the hit model's aim point (`hit_geometry`), which a Ru
 cannot (its pitch head is masked); the arena's `pin_pitch=1` holds every pitch at 0, so that is
 no advantage here, but it would be on a map that unpins pitch. Two traps it measured: at 16 Hz
 one counter-strafe tick from 220 u/s lands at 72.9 u/s, under the cone's 74.8 u/s start, so a
-stop takes one tick; and a perfect stopper loses to a perfect runner (hero share 0.1972): on a
-tick the runner starts or reverses, its velocity changes by 75.6 u/s, 4.7 u off the stopper's
-one-tick lead and wider than a head's half-width (the median miss of a perfect stopper, cone
-off, was off by exactly 4.727 u).
+stop along a move key's axis takes one tick (10 degrees or more off the nearest key's axis, one
+tick leaves 75.2 to 83.8 u/s and it takes two); and a perfect stopper loses to a perfect runner
+(hero share 0.1972): on a tick the runner starts, its velocity changes by 75.6 u/s, 4.7 u off
+the stopper's one-tick lead (a reversal from full speed changes it by 147.1 u/s, 9.2 u off),
+wider than a head's half-width (the median miss of a perfect stopper, cone off, was off by
+exactly 4.727 u).
 
 ## Where new code goes
 
