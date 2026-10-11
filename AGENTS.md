@@ -2,8 +2,9 @@
 
 Before working on this repository:
 
-- Read `/home/vboxuser/.claude/projects/-media-vboxuser-G-samsung1-0utoffiles-code-cs2rl/memory/MEMORY.md`, then `progress.md` (the live pointer). Do not create dated session-state files.
+- Read `/home/vboxuser/.claude/projects/-media-vboxuser-G-samsung-0utoffiles-code-cs2rl/memory/MEMORY.md`, then `progress.md` (the live pointer). Do not create dated session-state files.
 - Also read the repository-root `CLAUDE.md` and follow its project-specific workflow rules.
+- To see what a policy or scripted bot does, save and watch a replay: README "Watch replays", and CLAUDE.md "Show behaviour with a replay" for agents.
 - For the live RL-overhaul status and working roadmap, read GitHub tracker `#82` after the memory. Treat the latest dated update as provisional: newer experiment evidence and explicit user decisions supersede it, and no later gate starts automatically.
 - Reconcile both with the live repository and the user's newest explicit instructions; newer instructions take precedence over stale state.
 
@@ -17,14 +18,12 @@ A spec, plan, or other binary-verdict review that is meant to be the unbiased ga
 - A prior reviewer may confirm that *its own* findings were addressed. That is follow-up verification, not the final verdict.
 - Scoped SDD fix re-reviews are different: those agents exist to mark listed findings ADDRESSED / NOT ADDRESSED, so they receive the findings list. Do not use that pattern for the independent spec/plan gate.
 
-## Spec review and quality review are separate
+## One reviewer, both verdicts
 
-Do not combine spec-compliance and code-quality into one reviewer unless the task is truly trivial (one-file mechanical change, no training-loop / C-layout / metrics-math risk). Default is two freshly spawned reviewers:
+A diff, brief or lane gets ONE freshly spawned reviewer (owner, 2026-10-09). Do not split it into a spec reviewer and a quality reviewer. Its one report gives two verdicts:
 
-- **Spec reviewer** only: does the diff implement the brief/spec, nothing more, nothing less?
-- **Quality reviewer** only: correctness of the written code, tests, naming, edge cases, maintainability — not a second spec checklist.
-
-Each gets its own prompt and writes its own report. A combined spec+quality pass is the exception, not the template.
+- **Spec:** does the diff implement the brief/spec, nothing more, nothing less?
+- **Quality:** is the written code correct: tests, naming, edge cases, maintainability?
 
 ## Dispatch appendix for implementers and reviewers
 
@@ -65,3 +64,13 @@ counterexample.
 
 Rationale: `docs/postmortem-2026-09-03-duplication-blindness.md`. Decisions that
 constrain these choices: `docs/adr/`.
+
+## `.superpowers/` workspaces are permanent — never delete them
+
+`.superpowers/sdd/<date>-<topic>/` holds each SDD run's ledger (pre-flight
+scan, per-task reviews, rulings, deferred minors, gate results). That history
+is the raw data for workflow optimisation and is referenced from memory and
+later specs. Standing user instruction (2026-09-03): NEVER `rm -rf` or
+otherwise delete a `.superpowers/` directory, at branch end or at any other
+time — this overrides any skill or plugin step that says to clean up the
+workspace. Leave it in place; it is not committed and costs nothing.

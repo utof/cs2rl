@@ -1,7 +1,7 @@
 """The env configuration contract: one typed object owns every env knob and reward default.
 
 WHAT: two frozen dataclasses. `RewardWeights` holds the 23 reward/PBRS
-coefficients; `EnvConfig` holds a `RewardWeights` plus the ten sim knobs. Both
+coefficients; `EnvConfig` holds a `RewardWeights` plus the eleven sim knobs. Both
 validate in `__post_init__`. `Cs2Env` reads its scalars off an `EnvConfig`;
 `build_train_config` writes `to_config_dict()`.
 
@@ -48,7 +48,7 @@ def _knob_number(name, value, cast):
     """Coerce a knob, re-raising the conversion failure as a ValueError that NAMES it.
 
     WHY: `float(None)` and `int("x")` raise messages that describe the builtin,
-    not the knob, and these values arrive from an args namespace with ten
+    not the knob, and these values arrive from an args namespace with eleven
     candidates. ValueError (not the underlying TypeError) so every bad-knob path
     has one class, matching the reward-weight rule above.
     """
@@ -160,6 +160,7 @@ class EnvConfig:
     pbrs_gamma: float = 0.999                          # MUST equal the training gamma (PBRS policy-invariance)
     reward_symmetrize: bool = False
     recoil: bool = False
+    accuracy: bool = True                              # the movement-inaccuracy cone (Dust2Env.accuracy_enabled)
     n_active_per_team: int = TEAM_SIZE
     pin_pitch: int = 0
     crouch_enabled: int = 1
@@ -180,6 +181,7 @@ class EnvConfig:
         s(self, "pbrs_gamma", g)
         s(self, "reward_symmetrize", bool(self.reward_symmetrize))
         s(self, "recoil", bool(self.recoil))
+        s(self, "accuracy", bool(self.accuracy))
         n = self.n_active_per_team
         # reject, never truncate (int(2.9) parks a different roster)
         if _knob_number("n_active_per_team", n, int) != n:
@@ -210,11 +212,12 @@ class EnvConfig:
 
     def to_config_dict(self) -> dict:
         """The flat provenance keys build_train_config writes: the 23 weights
-        verbatim plus six knobs. NOT the R0-G trio (recorded under CLI names by
+        verbatim plus seven knobs. NOT the R0-G trio (recorded under CLI names by
         build_train_config) and NOT recoil (no CLI flag)."""
         d = self.rewards.as_dict()
         d.update(pbrs_gamma=self.pbrs_gamma,
                  reward_symmetrize=self.reward_symmetrize,
+                 accuracy=self.accuracy,
                  n_active_per_team=self.n_active_per_team,
                  pin_pitch=self.pin_pitch,
                  crouch_enabled=self.crouch_enabled,
@@ -225,6 +228,6 @@ class EnvConfig:
 # DERIVED, never hand-listed, and therefore defined below the class: every
 # EnvConfig field except the nested `rewards` object, in declaration order.
 # tests/env/c/test_struct_sizes.py builds its sentinel partition from this tuple; a
-# hand-written tuple would let EnvConfig grow an eleventh knob that the
+# hand-written tuple would let EnvConfig grow a twelfth knob that the
 # partition never sees, leaving the env on the default with every test green.
 KNOB_FIELDS: tuple[str, ...] = tuple(f.name for f in fields(EnvConfig) if f.name != "rewards")

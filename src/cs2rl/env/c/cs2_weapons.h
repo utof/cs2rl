@@ -3,12 +3,74 @@
 
 /* Compile-time weapon table — indexed by weapon_slot (0=rifle, 1=pistol, 2=knife).
  * T-side rifle = AK-47 stats, CT-side = M4A4 stats, averaged for slot 0.
- * Tick counts at TICK_RATE=16 Hz. */
+ * Tick counts at TICK_RATE=16 Hz.
+ * The last four columns are the cone's mrad attributes (WeaponDef), averaged the same way
+ * from the CS:GO items_game rows (last CS:GO build, 2023-05-31; research-1c Q1):
+ *   rifle  = AK-47 (0.6, 6.41, 4.81, 175.06) and M4A4 (0.6, 4.9, 4.1, 137.88);
+ *   pistol = Glock-18 (2, 5.6, 4.2, 10) and USP-S (2.5, 4.9, 3.68, 13.87); knife: none.
+ * AK-47 0.6 + 6.41 = 7.01 mrad times its "Accurate Range" is Valve's 15 cm plate radius,
+ * which is what fixes x 0.001 as radians. tests/env/c/test_accuracy.py pins the rifle and
+ * pistol rows. */
 static const WeaponDef WEAPON_DEFS[3] = {
-    /* rifle */ {0, 34.5f, 0.735f, 2, 25, 3, 39, 220.0f, 0.975f},
-    /* pistol */ {1, 32.5f, 0.490f, 3, 16, 2, 35, 240.0f, 0.820f},
-    /* knife */ {2, 34.0f, 0.850f, 6, -1, -1, 0, 250.0f, 0.000f},
+    /* rifle */ {0, 34.5f, 0.735f, 2, 25, 3, 39, 220.0f, 0.975f, 0.6f, 5.655f, 4.455f, 156.47f},
+    /* pistol */ {1, 32.5f, 0.490f, 3, 16, 2, 35, 240.0f, 0.820f, 2.25f, 5.25f, 3.94f, 11.935f},
+    /* knife */ {2, 34.0f, 0.850f, 6, -1, -1, 0, 250.0f, 0.000f, 0.0f, 0.0f, 0.0f, 0.0f},
 };
+
+/* Movement-inaccuracy ramp: the share f of inacc_move_mrad a shot carries rises from 0 at
+ * ACCURACY_RAMP_START_FRAC x move_speed to 1 at ACCURACY_RAMP_END_FRAC x move_speed (the
+ * weapon's unscoped, uncrouched max speed), as x^ACCURACY_RAMP_EXPONENT of the linear
+ * fraction x: 1 is the shipped linear ramp, and END 0.95 with EXPONENT 0.25 is the one
+ * public candidate below, a constant change.
+ * START 0.34 is public: Leetify scores a rifle shot as counter-strafed below "34% of your
+ * max speed with that weapon (34% is when inaccuracy kicks in)".
+ * END is UNVERIFIED: no primary or measured public source gives where the ramp ends or its
+ * curvature; one uncited secondary claim (sidcarrollworks/CSGODOT PR #23) says full at
+ * 0.95 x vmax on a fourth-root curve, linear with walk held (research D3; CS2's
+ * weapon_debug_spread_show or cl_weapon_debug_print_accuracy could measure it). 1.0 is the
+ * simplest monotone choice.
+ * KNOWN LIMIT: the ramp's end and shape decide what the cone costs a policy. Rung 1b's pooled
+ * hit/fired is 0.680 with the cone off; with it on, 0.660 linear to 1.0 (shipped), 0.609
+ * fourth root to 0.95 and 0.533 step: -0.020, -0.071 and -0.147 (lane D spec review,
+ * 2026-10-09).
+ * Setting END to START makes it a step (CS 1.6's model): every shot at or above 0.34 x
+ * move_speed carries the whole inacc_move_mrad. Both were measured (lane D, D-Q2): at 0.35 x
+ * move_speed the ramp's rifle cone is 8.6 mrad and every shot hit a standing target 200-520 u
+ * away; the step's is the full-speed 162.7 mrad, which hits 0.39 of them at 360 u.
+ * PITFALL: at 16 Hz one input tick from standstill reaches 75.6 u/s, just over the
+ * rifle's 74.8; the ramp makes that shot nearly free, a step would not. */
+#define ACCURACY_RAMP_START_FRAC 0.34f
+#define ACCURACY_RAMP_END_FRAC   1.0f
+#define ACCURACY_RAMP_EXPONENT   1.0f
+/* Radius law inside the cone: 0 = r = R * u (u uniform in [0, 1): as many shots inside half
+ * the radius as outside, centre-weighted); 1 = r = R * sqrt(u) (uniform over the disc).
+ * UNVERIFIED which one CS uses (research D2); 0 is the chosen law. Both were measured
+ * (lane D, D-Q2): a full-speed rifle shot at a standing target 360 u away hits 0.39 under 0
+ * and 0.17 under 1. */
+#define ACCURACY_RADIUS_LAW 0
+
+/* accuracy_cone_radius: the cone's maximum radius in rad for a shot from `def` at planar
+ * speed `speed` (u/s), crouched or not. spread + stance term + f x the move term, where f
+ * is the ramp above. The crouch term is the CS crouch-still value; the speed term uses the
+ * uncrouched move_speed for both stances, as the 34% threshold does.
+ * KNOWN LIMIT: no air term (research A2 keeps jump masked until there is one, as the Rung 1
+ * arena preset does), no per-shot fire penalty, no landing term. Lane D computed CS's
+ * penalty (7.4 mrad a shot, recovering over 0.35-0.49 s): it changes no first-four-shot hit
+ * chance of a perfectly aimed standing spray inside the arena (computed; shot 6 at 721 u:
+ * 0.98). Imperfect aim, moving sprays and later shots were not computed. */
+static inline float accuracy_cone_radius(const WeaponDef* def, int crouched, float speed) {
+    float s0 = ACCURACY_RAMP_START_FRAC * def->move_speed;
+    float s1 = ACCURACY_RAMP_END_FRAC * def->move_speed;
+    /* fmaxf keeps END == START (the step) finite: f jumps from 0 to 1 within 1e-3 u/s. */
+    float f = fminf(fmaxf((speed - s0) / fmaxf(s1 - s0, 1e-3f), 0.0f), 1.0f);
+    /* The exponent at 1 skips powf, so the linear ramp is bit-identical to the pre-exponent
+     * radius (lane D fix round). */
+    if (ACCURACY_RAMP_EXPONENT != 1.0f)
+        f = powf(f, ACCURACY_RAMP_EXPONENT);
+    float mrad = def->spread_mrad + (crouched ? def->inacc_crouch_mrad : def->inacc_stand_mrad) +
+                 f * def->inacc_move_mrad;
+    return 0.001f * mrad;
+}
 
 /* Returns current move speed in units/second for the agent. */
 static inline float get_move_speed(const AgentState* a) {

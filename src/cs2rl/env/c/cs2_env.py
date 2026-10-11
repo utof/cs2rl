@@ -371,7 +371,7 @@ class StepStatsC(ctypes.Structure):
         ("plant_tick", ctypes.c_int32),                                # g->tick at plant; 0 = never planted
                                                                        # R0-A (spec 2026-08-29 §3) — appended, never reorder. Mirrors the
                                                                        # combat-instrumentation tail of C StepStats (cs2_types.h); semantics
-                                                                       # documented there. reward_win_ct is the tail anchor (_C_OFFSET_FIELDS).
+                                                                       # documented there. The two cone counters are appended after this block.
         ("shots_fired", ctypes.c_int32),
         ("shots_with_enemy_in_los", ctypes.c_int32),
         ("shots_facing_enemy", ctypes.c_int32),
@@ -384,6 +384,10 @@ class StepStatsC(ctypes.Structure):
         ("min_enemy_distance", ctypes.c_float),                        # 1e30 sentinel = no pair coexisted
         ("reward_win_t", ctypes.c_float),
         ("reward_win_ct", ctypes.c_float),
+                                                                       # Movement-inaccuracy diagnostics, appended (cs2_types.h).
+                                                                       # cone_radius_sum is the tail anchor (_C_OFFSET_FIELDS).
+        ("shots_fired_fast", ctypes.c_int32),
+        ("cone_radius_sum", ctypes.c_float),
     ]
 
 
@@ -430,6 +434,11 @@ class Dust2EnvC(ctypes.Structure):
                                                                        # make_env writes this after from_address; env_reset does not
                                                                        # clear it (memsets GameState only). 0=hitscan, 1=punch on ray.
         ("recoil_enabled", ctypes.c_int32),
+                                                                       # Movement-inaccuracy cone: switch + its own xorshift32 stream,
+                                                                       # appended after recoil_enabled. env_init seeds the stream;
+                                                                       # make_env writes the switch the way it writes recoil_enabled.
+        ("accuracy_enabled", ctypes.c_int32),
+        ("accuracy_rng", ctypes.c_uint32),
     ]
 
 
@@ -499,6 +508,11 @@ _C_SIZE_MIRRORS = (
 # appended after a long run of float reward weights, and pbrs_nav_weight_ct pins
 # the end of that run, so a drift inside the run is localised rather than only
 # surfacing at the very end.
+#
+# KNOWN LIMIT: a TAIL field mis-sized into the struct's trailing padding (a
+# c_uint64 mirror of Dust2Env's uint32 accuracy_rng, say) keeps sizeof and the
+# tail offset equal, so both guards pass (measured, lane D quality review). The
+# extra bytes are the struct's padding, so the review judged it harmless.
 _C_OFFSET_FIELDS = (
     (StaticDataC, "pbrs_nav_weight_ct", "StaticData_pbrs_nav_weight_ct_offset"),
     (StaticDataC, "wall_list", "StaticData_wall_list_offset"),
@@ -513,8 +527,8 @@ _C_OFFSET_FIELDS = (
     # and sizeof are both blind to the bomb struct moving within GameStateC.
     (GameStateC, "bomb", "GameState_bomb_offset"),
     (BombStateC, "z", "BombState_z_offset"),
-    (StepStatsC, "reward_win_ct", "StepStats_reward_win_ct_offset"),
-    (Dust2EnvC, "recoil_enabled", "Dust2Env_recoil_enabled_offset"),
+    (StepStatsC, "cone_radius_sum", "StepStats_cone_radius_sum_offset"),
+    (Dust2EnvC, "accuracy_rng", "Dust2Env_accuracy_rng_offset"),
     (WallC, "kind", "Wall_kind_offset"),
     (WallListC, "capacity", "WallList_capacity_offset"),
 )
@@ -1129,7 +1143,7 @@ class Cs2Env(pufferlib.PufferEnv):
         (_resolve_sim_knobs), the spawn-capacity check, the C env
         (_static_data_values builds the StaticData mapping, _pointer_arrays
         checks the ten pointer arrays against StaticDataC, _init_native packs the
-        mapping and calls binding.init), the recoil flag and the area bounds,
+        mapping and calls binding.init), the recoil and accuracy flags and the area bounds,
         then the Python-side views and the per-step scratch.
         """
         if not isinstance(config, EnvConfig):
@@ -1186,6 +1200,9 @@ class Cs2Env(pufferlib.PufferEnv):
         # reset. Train / Modal stay off unless a later card passes recoil=True
         # into make_env.
         self._c_env.recoil_enabled = 1 if config.recoil else 0
+        # The movement-inaccuracy cone, the same way and for the same reason. Unlike recoil
+        # it has a training flag (--accuracy, recorded as config.json "accuracy").
+        self._c_env.accuracy_enabled = 1 if config.accuracy else 0
         self._attach_area_bounds(map_data)
         self._bind_buffer_views()
         self._init_step_scratch(include_step_stats_in_info)
@@ -1752,6 +1769,11 @@ class Cs2Env(pufferlib.PufferEnv):
             "min_enemy_distance_valid": _valid,
             "reward_win_t": float(stats.reward_win_t),
             "reward_win_ct": float(stats.reward_win_ct),
+                                                                                         # Movement inaccuracy: shots at >= 0.34 x the weapon's max
+                                                                                         # speed (counted with the cone off too), and the summed cone
+                                                                                         # radius in rad (0 with it off). Per-shot mean = sum / shots_fired.
+            "shots_fired_fast": int(stats.shots_fired_fast),
+            "cone_radius_sum": float(stats.cone_radius_sum),
         })
         return summary
 

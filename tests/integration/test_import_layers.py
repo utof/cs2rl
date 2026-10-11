@@ -443,10 +443,15 @@ def test_control_env_config_importing_nav_breaks_the_env_layers(tmp_path):
     assert "cs2rl layers KEPT" in r.stdout and "cs2rl acyclic siblings KEPT" in r.stdout, r.stdout
 
 
-# The pair control (e) ignores in its tmp copy of the config: env.nav (L1) -> viz.render (L3)
-# is upward in `cs2rl layers` and closes an env <-> viz package cycle, so both contracts
+# The pair control (e) ignores in its tmp copy of the config: env.factory (L1) -> viz.render
+# (L3) is upward in `cs2rl layers` and closes an env <-> viz package cycle, so both contracts
 # need the entry, exactly like the #92 entries #205 part 3 retired.
-_PLANT_PAIR = "cs2rl.env.nav -> cs2rl.viz.render"
+# The importer is env.factory, the TOP of `cs2rl.env layers`, because viz.render imports
+# eval.baselines, which reaches env.c and (through policy) env.factory: planted in a lower
+# env module (it was env.nav until #390), the import also breaks `cs2rl.env layers` through
+# render, and the premise below (import-linter passes) no longer holds.
+_PLANT_IMPORTER = "src/cs2rl/env/factory.py"
+_PLANT_PAIR = "cs2rl.env.factory -> cs2rl.viz.render"
 
 
 def _config_ignoring(tmp_path: Path, pair: str) -> Path:
@@ -493,14 +498,14 @@ def test_control_a_module_scope_site_of_an_ignored_pair(tmp_path, shape):
     tree, _ = _copy_package(tmp_path)
     config = _config_ignoring(tmp_path, _PLANT_PAIR)
     text = _MODULE_SCOPE_SHAPES[shape]
-    start = _append(tree, "src/cs2rl/env/nav.py", text)
+    start = _append(tree, _PLANT_IMPORTER, text)
     planted = start + next(i
                            for i, line in enumerate(text.split("\n")) if "cs2rl.viz.render" in line)
     r = _lint(tree, config)
     assert r.returncode == 0, ("import-linter now rejects a module-scope site of an ignored "
                                "pair; the scope pin's premise changed.\n" + r.stdout + r.stderr)
     failures = scope_pin_failures(tree, _graph_facts(tree, config))
-    assert any(f"nav.py:{planted} is not inside a def" in f for f in failures), failures
+    assert any(f"factory.py:{planted} is not inside a def" in f for f in failures), failures
 
 
 def test_control_a_directory_without_init_is_covered(tmp_path):

@@ -128,7 +128,10 @@ class StateReader:
         return self
 
     def snapshot(self):
-        """Deep copy of the mutable arrays (the read buffers are reused)."""
+        """Deep copy of the mutable arrays (the read buffers are reused).
+
+        ``bomb_carrier`` (row, -1 for nobody) and ``bomb_pos`` are for cs2rl.viz.render's replays.
+        """
         return {
             **{
                 k: v.copy()
@@ -144,6 +147,9 @@ class StateReader:
             "round_over": int(self._game.round_over),
             "winner": int(self._game.winner),
             "bomb_planted": int(self._game.bomb_planted),
+            "bomb_carrier": self._game.bomb_carrier,
+            "bomb_pos":
+            (float(self._game.bomb.x), float(self._game.bomb.y), float(self._game.bomb.z)),
         }
 
 

@@ -61,8 +61,50 @@ See the [public documentation index](docs/README.md) for architecture, ADRs, for
 ## Training
 
 `python -m cs2rl.train --help` lists every flag. `--train` runs PPO self-play training,
-`--eval` evaluates a checkpoint, `--record` records one episode for rerun, and `--dump-config`
-writes the run's `config.json` without training. Outputs go under `outputs/`.
+`--eval` evaluates a checkpoint, `--record` records one episode of the run's map as a replay
+(see [Watch replays](#watch-replays)), and `--dump-config` writes the run's `config.json`
+without training. Outputs go under `outputs/`.
+
+## Watch replays
+
+Save rounds of a rung's arena harness, then watch them in Rerun's viewer (`rerun-sdk` is a
+project dependency, so there is nothing to install):
+
+```bash
+uv run python -m cs2rl.experiment.replay <checkpoint.pt> --vs heldout-24-48   # a trained policy
+uv run python -m cs2rl.experiment.replay oracle --vs walker-4-16 --rounds 10   # a scripted hero
+uv run rerun outputs/recordings/<the name it printed>.rrd
+```
+
+- The save prints one line per round (kill tick, shots, hits), then a `view:` line: the
+  command that opens the file, runnable from any directory.
+- The hero is a checkpoint with its run's `config.json` beside it, `oracle` or `obs-oracle`.
+  `--vs` is `statue`, `walker-4-16`, `walker-2-8-stop` or `heldout-24-48`.
+- Optional: `--rounds` (default 5), `--seed`, `--aim` (`sample` or `mean`), `--lstm`
+  (`carried` or `zeroed`), `--accuracy` (`0` or `1`: the movement-inaccuracy cone; default: a
+  checkpoint plays its run's own setting, a scripted hero the env default, on) and `--out`.
+- Files go to `outputs/recordings/` (gitignored), with a per-tick text dump (`.txt`) beside each
+  replay.
+- `python -m cs2rl.train --record` writes one episode of the run's map with the same recorder,
+  as an `.rrd` only (no `.txt`).
+
+In the viewer, each round is a recording under Sources: click one, or press Ctrl+Alt+Down/Up
+for the next/previous round. Some desktops (Cinnamon, for one) keep Ctrl+Alt+Up/Down for
+switching workspaces; there, press Ctrl+P and run "Next recording".
+- Tabs: "free camera" (noclip: WASD/QE to fly, left-drag to look, Shift faster, Alt slower),
+  "follow <hero>", and "<agent> eyes" for each side. Alt+double-click any agent to track it;
+  Escape lets go.
+- Space plays and pauses, Alt+Left restarts the round, Ctrl+Left/Right steps one tick, and
+  dragging the time line scrubs.
+- Type digits to set the speed (2 = 2x, 05 = 0.5x). 1x is real time (16 ticks/s).
+- Opened on a file, the viewer also listens for SDK data on all interfaces (port 9876);
+  `rerun --bind 127.0.0.1 FILE` keeps it local.
+
+Without a screen (agents): read the `.txt` dump (one block per round, then per tick both
+agents' positions, the hero's yaw error against the hit half-window, fired/hit and the
+opponent's hp), or render one frame with
+`uv run rerun --window-size 1280x720 --screenshot-to OUT.png FILE.rrd` and open the PNG. That
+command exits 102 after "Screenshot saved"; the PNG is still written.
 
 ## Where things live
 

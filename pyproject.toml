@@ -22,6 +22,9 @@ dependencies = [
                                                        # resolve to 4.0 and break loudly at a random moment. Upgrade is a
                                                        # deliberate migration (see #85 playbook), not a version bump.
     "pufferlib==3.0.0",
+                                                       # KNOWN LIMIT: cs2rl.viz.render needs more than this floor
+                                                       # (send_recording_name arrived in 0.23, the blueprint eye
+                                                       # controls in 0.27); uv.lock pins 0.30.2, the version run.
     "rerun-sdk>=0.21.0",
     "shapely>=2.0.4",
 ]
@@ -219,11 +222,11 @@ ignore = ["E501"]
 "cs2rl.c_env".msg = "import `cs2rl.env.c` (#205 moved it)"
 "cs2rl.play".msg = "import `cs2rl.viz.play` (#205 moved it)"
 "cs2rl.play_actions".msg = "import `cs2rl.viz.play_actions` (#205 moved it)"
-"cs2rl.viz.init_recording".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
+"cs2rl.viz.init_recording".msg = "it is gone: `cs2rl.viz.render.ReplayRecorder` records the sim (#205 moved viz.py, #390 replaced it)"
 "cs2rl.viz.log_trimap".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
 "cs2rl.viz.log_navmesh".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
-"cs2rl.viz.log_simple_map".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
-"cs2rl.viz.log_tick".msg = "import it from `cs2rl.viz.render` (#205 moved viz.py)"
+"cs2rl.viz.log_simple_map".msg = "it is gone: `cs2rl.viz.render.ReplayRecorder` records the sim (#205 moved viz.py, #390 replaced it)"
+"cs2rl.viz.log_tick".msg = "it is gone: `cs2rl.viz.render.ReplayRecorder` records the sim (#205 moved viz.py, #390 replaced it)"
 # #205 part 3 moved the trainer family into the train/ package and the policy into
 # cs2rl.policy. The eight flat modules are banned whole. `cs2rl.train` is the new package
 # and cannot be banned, so every name the old train.py bound is banned by name: a stale
@@ -333,7 +336,7 @@ ignore = ["E501"]
 "cs2rl.train.resolve_resume_split".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train.resolve_run_name".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train.restore_train_state".msg = "import it from the module that owns it (#205 part 3 split train.py)"
-"cs2rl.train.rewards_array_to_dict".msg = "import it from the module that owns it (#205 part 3 split train.py)"
+"cs2rl.train.rewards_array_to_dict".msg = "it is gone: `cs2rl.viz.render.ReplayRecorder` takes the reward array (#390)"
 "cs2rl.train.seed_everything".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train.select_policy_actions_native".msg = "import it from the module that owns it (#205 part 3 split train.py)"
 "cs2rl.train.self_play_used_past_metric".msg = "import it from the module that owns it (#205 part 3 split train.py)"
