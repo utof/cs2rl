@@ -7,6 +7,8 @@ WHAT IS PINNED
   160 ticks at seed 3, among them ticks at the speed cap and at rest).
   The stop and adad styles' "fire only when slow" rule and every style's aim from the
   post-move position rest on it.
+* The slow gate's fraction is the C cone's start: ACCURACY_THRESHOLD_FRAC equals
+  tests/env/c/test_accuracy.py's RAMP_START, which that file pins against the C cone.
 * The CS2 profiles at 16 Hz: every template's dials in ticks (ReGameDLL's half-up
   rounding), and the shipped focus values.
 * The dials' validation: each out-of-range dial raises ValueError.
@@ -85,6 +87,14 @@ def test_ground_velocity_predicts_the_sim_velocity_after_a_step():
         env.close()
     # The run reaches the speed cap (the accelerate clamp) and comes to rest (friction to 0).
     assert checked >= 60 and fastest > 215.0 and stopped > 0, (checked, fastest, stopped)
+
+
+def test_the_slow_gate_is_the_c_cone_start():
+    """The binding does not export cs2_weapons.h's ACCURACY_RAMP_START_FRAC, so the bot's
+    mirror is pinned to test_accuracy's RAMP_START, which _rifle_R and the cone_radius_sum
+    asserts there tie to the C cone. oracle_duel's "fast" count reads the same constant."""
+    from tests.env.c.test_accuracy import RAMP_START
+    assert B.ACCURACY_THRESHOLD_FRAC == RAMP_START
 
 
 def test_the_profiles_are_the_cs2_templates_at_16_hz():

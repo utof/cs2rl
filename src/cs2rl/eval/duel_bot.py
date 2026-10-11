@@ -138,7 +138,8 @@ _LOCAL_Y = np.array([0.0, 1.0, 0.70710678, 0.0, -0.70710678, -1.0, -0.70710678, 
 STRAFE_RIGHT, STRAFE_LEFT = 3, 7       # facing-local right / left (test_strafe_labels_match_geometry)
 
 # Where the movement-inaccuracy cone starts, as a fraction of the weapon's move speed:
-# MIRROR of cs2_weapons.h ACCURACY_RAMP_START_FRAC.
+# MIRROR of cs2_weapons.h ACCURACY_RAMP_START_FRAC (the binding does not export it), pinned
+# by tests/eval/test_duel_bot.py::test_the_slow_gate_is_the_c_cone_start.
 ACCURACY_THRESHOLD_FRAC = 0.34
 
 MAX_REACTION_TICKS = 16                # the delay line's length: 1 s, above Easy's 10
