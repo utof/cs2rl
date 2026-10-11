@@ -357,12 +357,14 @@ def test_the_trainer_override_writes_the_duel_opponents_actions_on_the_opponent_
 
 def test_the_trainers_bot_geometry_is_oracle_duels():
     """Risk (d): the trainer's bot reads its numbers off its own driver env; they must be
-    those of the env every #152 L2 measurement ran (oracle_statue.build_env)."""
+    those of the env every #152 L2 measurement ran (oracle_statue.build_env). Built at seed 7,
+    not the harness's 0, so the run seed must reach duel_rngs."""
     from cs2rl.env.map import make_arena_duel_map
     from cs2rl.experiment.oracle_statue import build_env
     from tests._helpers.trainer_harness import _build_trainer_for_test
 
     trainer, cleanup = _build_trainer_for_test(num_envs=4,
+                                               seed=7,
                                                opponent="duel",
                                                map_data=make_arena_duel_map(),
                                                pin_pitch=1,
@@ -376,6 +378,10 @@ def test_the_trainers_bot_geometry_is_oracle_duels():
             assert getattr(got, name) == getattr(want, name), name
         assert got.n_rows == 20
         assert trainer._opponent_duel.hero == 0, "the hero is team T while CT is the bot"
+        for child, rng in enumerate((got.rng, trainer._opponent_duel.rng)):
+            seq = rng.bit_generator.seed_seq
+            assert isinstance(seq, np.random.SeedSequence)
+            assert (seq.entropy, seq.spawn_key) == (7, (child, )), "duel_rngs(config seed)"
         drv, ref = trainer.vecenv.driver_env.config, ref_env.config
         for knob in ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled", "accuracy",
                      "hitboxes"):
