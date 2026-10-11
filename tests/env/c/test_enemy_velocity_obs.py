@@ -4,6 +4,8 @@ What each test catches (cs2_observations.h, the enemy slot loop):
   * the rotation: the slot rotated by +facing instead of -facing, or not rotated;
   * the scale: any divisor other than 250 (self obs[6]/[7]'s);
   * relative, not own: the observer's velocity not subtracted;
+  * the slot order: a slot carrying another enemy's velocity than the one its +0/+1 locate
+    (the distance sort reorders the slots; one active enemy cannot show it);
   * the gating: velocity written for an unseen enemy, alive (behind a wall, with and without a
     last-known position) or dead.
 Every expected value is computed here from the post-step C state (positions, velocities and
@@ -61,6 +63,54 @@ def test_visible_enemy_slot_carries_relative_velocity_in_the_facing_frame(simple
         cf, sf = math.cos(a0.facing), math.sin(a0.facing)
         own = ((en.vx * cf + en.vy * sf) / VEL_SCALE, (-en.vx * sf + en.vy * cf) / VEL_SCALE)
         assert abs(own[0] - ex) + abs(own[1] - ey) > 0.1
+    finally:
+        env.close()
+
+
+def _enemy_located_by(px, py, observer, game, candidates):
+    """The candidate whose direction from the observer, rotated by -facing, is the slot's
+    rel-pos (+0, +1) direction (the 1 / map_diag scale cancels). Exactly one must match."""
+    cf, sf = math.cos(observer.facing), math.sin(observer.facing)
+    hits = []
+    for j in candidates:
+        dx, dy = game.agents[j].x - observer.x, game.agents[j].y - observer.y
+        rx, ry = dx * cf + dy * sf, -dx * sf + dy * cf
+        if (rx * px + ry * py) / (math.hypot(rx, ry) * math.hypot(px, py)) > 0.9999:
+            hits.append(j)
+    assert len(hits) == 1, (px, py, hits)
+    return hits[0]
+
+
+def test_each_slot_carries_the_velocity_of_the_enemy_it_locates(simple_map):
+    """Two visible enemies, the higher index (6) nearer: the distance sort puts 6 in slot 0 and
+    5 in slot 1, so a writer that took the velocity from another agent than the slot's sorted
+    enemy (say the slot index's, en_start + slot) fails here while every one-enemy case passes."""
+    env = make_env(map_data=simple_map, config=EnvConfig(n_active_per_team=2), seed=1)
+    try:
+        env.reset()
+        g = env._c_env.game
+        a0 = g.agents[0]
+        a0.facing = 1.0
+        place_agent(env, 5, a0.x + 50.0, a0.y + 50.0)  # farther, lower index
+        place_agent(env, 6, a0.x + 40.0, a0.y)         # nearer, higher index
+        a0.vx, a0.vy = 30.0, -50.0
+        g.agents[5].vx, g.agents[5].vy = 120.0, 80.0
+        g.agents[6].vx, g.agents[6].vy = -90.0, 40.0
+        o = _step(env)[0]
+
+        # Not vacuous: the two enemies' expected slot velocities are far apart.
+        e5, e6 = _expected(a0, g.agents[5]), _expected(a0, g.agents[6])
+        assert abs(e5[0] - e6[0]) + abs(e5[1] - e6[1]) > 0.1, (e5, e6)
+        carried = []
+        for s in range(2):
+            b = ENEMY_BASE + s * OBS_ENEMY_STRIDE
+            assert o[b + SEE] == 1.0, f"slot {s} not visible: placement geometry, not velocity"
+            j = _enemy_located_by(o[b], o[b + 1], a0, g, (5, 6))
+            carried.append(j)
+            ex, ey = _expected(a0, g.agents[j])
+            assert o[b + VX] == pytest.approx(ex, abs=1e-5), (s, j)
+            assert o[b + VY] == pytest.approx(ey, abs=1e-5), (s, j)
+        assert carried == [6, 5], f"slots in index order, the sort was not exercised: {carried}"
     finally:
         env.close()
 
