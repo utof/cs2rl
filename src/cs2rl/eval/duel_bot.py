@@ -254,6 +254,9 @@ class DuelBot:
     State per row: the delay line of percepts, the previous enemy position (for its
     velocity), the focus, and the strafe. ``reset(rows)`` clears a row's state for a
     new episode; call it before the row's first step.
+
+    KNOWN LIMIT: one Generator serves every row; with focus_initial_deg > 0 a row's draws
+    depend on the other rows' acquisitions.
     """
 
     def __init__(self,
@@ -343,6 +346,8 @@ class DuelBot:
         ez = best[:, EN_DZ] * OBS_Z_SCALE
 
         # One tick's displacement is the post-step velocity (module PITFALLS).
+        # KNOWN LIMIT: assumes the nearest-enemy slot holds the same enemy on consecutive ticks
+        # (true at 1v1).
         both = seen & (self._prev[:, 0] > 0.5)
         evx = np.where(both, (ex - self._prev[:, 1]) / DT, 0.0)
         evy = np.where(both, (ey - self._prev[:, 2]) / DT, 0.0)
