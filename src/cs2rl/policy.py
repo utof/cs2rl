@@ -182,6 +182,9 @@ def widen_sim_v3_encoder(state_dict):
       * Weights only. A full-state resume (--resume-run) restores Adam moments shaped like
         the old weights; the trainer refuses to widen there.
       * The encoder biases and every other key pass through untouched (not cloned).
+      * Keyed on width alone: a pre-#130 sim-v2 file (also 110 wide, absolute enemy frame)
+        is widened the same way and named sim-v3 in the log; width equality does not prove
+        semantics (docs/formats.md).
     """
     import torch
 
