@@ -23,10 +23,19 @@ WHAT IS PINNED HERE (seed 0, obs-only bots; the values observed 2026-10-11)
   the perfect planted bot's hit/fired on the L1 walker is above 0.6 led (observed 0.7665)
   and below 0.35 unled (observed 0.2176), at 50 rounds a side.
 * The verdict's rules, parse_bot's spec grammar, and main's exit code and switches.
+* DuelRecorder's definitions (the Rung 1c duel evaluation reads them), on hand-built states:
+  FAST at or above 0.34 x the held weapon's move speed; FIRST SHOT, the first fired tick of
+  the engagement, and whether it hit; TIME TO DAMAGE, the tick of the first hit; hp lost;
+  IDLE and moving-idle ticks. End to end, a shot one tick from rest (75.625 u/s, just above
+  the rifle's 74.8) is fast in the recorder and in C alike.
+* The hero columns follow the hero to either side: an idle hero fires nothing on T or on CT.
+* ``wilson`` is the 95% Wilson score interval (the closed form with z = 1.959964).
 """
 
+import math
 from typing import Any
 
+import numpy as np
 import pytest
 
 from cs2rl.experiment import oracle_duel as D
@@ -184,3 +193,88 @@ def test_main_exits_on_the_verdict_and_passes_the_switches(monkeypatch, capsys):
     assert seen == [(7, 0, True, None, None), (500, 0, False, False, True)]
     with pytest.raises(SystemExit):
         D.main(["--hero", "walker"])
+
+
+MOVE_SPEEDS = (220.0, 240.0, 250.0)    # binding.weapon_defs(): rifle, pistol, knife
+
+
+def _st(alive=(1, 1), hp=(100, 100), fired=(0, 0), v=(0.0, 0.0), slot=(0, 0)):
+    """A C-state snapshot with the keys DuelRecorder reads, T on row 0 and CT on row 5;
+    ``v`` is each side's speed along x."""
+    st = {k: np.zeros(10) for k in ("vx", "vy")}
+    st.update({k: np.zeros(10, int) for k in ("alive", "hp", "fired_this_tick", "weapon_slot")})
+    for s, i in enumerate(D.ROWS):
+        st["alive"][i], st["hp"][i], st["fired_this_tick"][i] = alive[s], hp[s], fired[s]
+        st["vx"][i], st["weapon_slot"][i] = v[s], slot[s]
+    return st
+
+
+def test_the_recorder_defines_first_shot_time_to_damage_and_idle_ticks():
+    rec = D.DuelRecorder(MOVE_SPEEDS)
+    ticks = [
+        _st(v=(200.0, 0.0)),                                           # 1: both idle, T fast
+        _st(fired=(1, 1), hp=(73, 100), v=(60.0, 0.0)),                # 2: T misses, CT hits
+        _st(fired=(1, 0), hp=(73, 60), v=(80.0, 0.0)),                 # 3: T hits, fast
+        _st(fired=(1, 0), hp=(73, 0), alive=(1, 0), v=(10.0, 0.0)),    # 4: T kills
+    ]
+    prev = _st()
+    for tick, st in enumerate(ticks, 1):
+        rec(tick, prev, st)
+        prev = st
+    r = rec.rounds[0]
+    assert (r["ticks"], r["died"]) == (4, [None, 4])
+    assert (r["fired"], r["hit"], r["fast"], r["fast_hit"]) == ([3, 1], [2, 1], [1, 0], [1, 0])
+    assert (r["first_fire"], r["first_fire_hit"], r["first_hit"]) == ([2, 2], [False, True], [3, 2])
+    assert (r["hp_lost"], r["idle"], r["idle_fast"]) == ([27, 100], [1, 3], [1, 0])
+
+
+@pytest.mark.parametrize("speed, slot, fast", [(74.79, 0, False), (74.8, 0, True), (81.19, 0, True),
+                                               (81.19, 1, False), (81.6, 1, True)])
+def test_fast_is_at_or_above_0_34_of_the_held_weapons_move_speed(speed, slot, fast):
+    rec = D.DuelRecorder(MOVE_SPEEDS)
+    assert rec.fast(_st(v=(speed, 0.0), slot=(slot, 0)), D.ROWS[0]) is fast
+
+
+class _StepAndFire:
+    """Presses forward and fire on a round's first tick, then stands: one shot at 75.625 u/s,
+    one tick of acceleration from rest (lane E, first-step), above the rifle's 74.8."""
+
+    def __init__(self, row):
+        self.row, self.tick = row, 0
+
+    def reset(self):
+        self.tick = 0
+
+    def act(self, obs, st, vis_prev, env):
+        from cs2rl.eval.duel_bot import H_MOVE, H_SHOOT
+        from cs2rl.spec.action import ACTION_DIM, AIM_DIM
+        self.tick += 1
+        act, cont = np.zeros((len(obs), ACTION_DIM), np.int32), np.zeros((len(obs), AIM_DIM),
+                                                                         np.float32)
+        if self.tick == 1:
+            act[self.row, H_MOVE], act[self.row, H_SHOOT] = 1, 1
+        return act, cont
+
+
+def test_a_shot_one_tick_from_rest_is_fast_in_the_recorder_and_in_c():
+    res = D.run_duel(lambda row, rng: _StepAndFire(row), D.parse_bot("expert,style=stop"), 4, 0)
+    assert D.shots_accounted(res["accounting"]), res["accounting"]
+    assert [(r["hero_fired"], r["hero_fast"]) for r in res["rows"]] == [(1, 1)] * 8
+
+
+def test_the_hero_columns_follow_the_hero_to_either_side():
+    from cs2rl.eval.baselines import IdleActor
+    res = D.run_duel(lambda row, rng: IdleActor(), D.parse_bot("expert,style=stop"), 4, 0)
+    assert [r["hero_side"] for r in res["rows"]] == ["T"] * 4 + ["CT"] * 4
+    assert all(r["hero_fired"] == 0 and r["opp_fired"] > 0 and r["outcome"] == "loss"
+               for r in res["rows"]), res["rows"]
+    assert all(r["death_tick"] == r["ticks"] and r["kill_tick"] is None for r in res["rows"])
+
+
+@pytest.mark.parametrize("k, n", [(0, 10), (5, 10), (50, 100), (97, 100), (1, 1)])
+def test_wilson_is_the_95_percent_score_interval(k, n):
+    z, p = 1.959963984540054, k / n    # z: the normal 0.975 quantile
+    centre = (p + z * z / (2 * n)) / (1 + z * z / n)
+    half = z / (1 + z * z / n) * math.sqrt(p * (1 - p) / n + z * z / (4 * n * n))
+    assert D.wilson(k, n) == pytest.approx((centre - half, centre + half), abs=1e-12)
+    assert all(math.isnan(x) for x in D.wilson(0, 0))
