@@ -27,8 +27,8 @@ Every number comes from the C state through ``oracle_duel.DuelRecorder``, whose 
 the definitions of FAST, ENGAGEMENT, FIRST SHOT and TIME TO DAMAGE; nothing here re-implements
 combat.
   * outcomes (win, loss, double: both died on one tick, timeout) and the hero's share of the
-    decided rounds with its 95% Wilson interval (``oracle_duel.summary``), and time to kill,
-    the median tick on which the opponent died;
+    decided rounds with its 95% Wilson interval (``oracle_duel.summary``), time to kill, the
+    median tick on which the opponent died, and ``death_tick_median``, the hero's;
   * per side (``hero_`` / ``opp_`` keys): fired, hit, hit per fired; fast per fired, the share
     of shots fired at or above 0.34 x vmax (research G2, the counter-strafe failure rate), and
     hit per fired of the fast and of the slow shots; the first-shot hit rate per engagement
@@ -134,6 +134,9 @@ def cell_summary(res: dict) -> dict:
     and the accounting check."""
     rows = res["rows"]
     s = D.summary(rows)
+    # oracle_duel.summary's ttd_median is the hero's time to DEATH; renamed so it cannot be read
+    # as the time to damage the per-side hero_ttd_* / opp_ttd_* keys hold.
+    s["death_tick_median"] = s.pop("ttd_median")
     for who, kills, died_key in (("hero", s["win"] + s["double"], "death_tick"),
                                  ("opp", s["loss"] + s["double"], "kill_tick")):
         s.update((f"{who}_{k}", v) for k, v in _side_summary(rows, who, kills, died_key).items())

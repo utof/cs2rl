@@ -110,6 +110,8 @@ def test_the_cell_summary_reads_the_recorders_definitions():
     assert s["hero_first_shot_hit_rate"] == 1 / 3 and s["hero_first_shot_ci"] == D.wilson(1, 3)
     # First hits on ticks 5 and 16: 16 ticks is 1 s, which Leetify leaves out.
     assert (s["hero_ttd_rounds"], s["hero_ttd_median"], s["hero_ttd_1s_share"]) == (2, 5.0, 0.5)
+    # Time to death (the hero died on ticks 20 and 30) has its own key, never a ttd_ one.
+    assert s["death_tick_median"] == 25.0 and "ttd_median" not in s
     assert s["hero_lifetime_mean"] == (10 + 20 + 30 + 161) / 4
     assert s["opp_lifetime_mean"] == (10 + 20 + 30 + 161) / 4
     assert s["hero_shots_per_kill"] == 9 / 2 and s["hero_hp_lost_mean"] == 227 / 4
