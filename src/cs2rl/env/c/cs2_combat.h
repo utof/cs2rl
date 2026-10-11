@@ -380,12 +380,13 @@ static void process_combat(Dust2Env*      env,
                     es->shots_facing_enemy++;
                 }
                 /* MARGINAL tests: on_target is the yaw error alone against the
-                 * half-window, stance_blocked is |dz| alone against the
-                 * target's vertical semi-axis (v1c). The hit ray's gate is the
-                 * JOINT ellipsoid (perp_h/16)² + (perp_v/HH)² ≤ 1 plus
-                 * laser_range and forward > 0, so shots_hit / shots_on_target
-                 * < 1 is EXPECTED near the boundary even at pitch 0. Do not
-                 * "fix" either counter to match the ray — they answer
+                 * half-window. On the legacy ellipsoid: stance_blocked is |dz|
+                 * alone against the target's vertical semi-axis (v1c), and the hit
+                 * ray's gate is the JOINT ellipsoid (perp_h/16)² + (perp_v/HH)² ≤ 1
+                 * plus laser_range and forward > 0 (under hitboxes: the eye against
+                 * the capsule z band, below, and the capsule test), so shots_hit /
+                 * shots_on_target < 1 is EXPECTED near the boundary even at pitch 0.
+                 * Do not "fix" either counter to match the ray — they answer
                  * different questions. Clamp keeps asinf NaN-free.
                  * Under the hitbox model on_target is the same yaw test against the
                  * same 16 u, kept so the counter means one thing in both models. It is

@@ -63,7 +63,11 @@ static inline float hb_sphere_t(float ox,
  * keeps the second check (tests/_helpers/hitbox_ref.py is the numpy twin).
  * PITFALL: two degenerate rows need their own branch. A == B (the neck) is a sphere: the
  * cylinder terms divide by |B - A|^2. A ray parallel to the axis never enters the cylinder's
- * side (a ~ 0), only the caps; without the `par` branch it would divide by ~0. */
+ * side (a ~ 0), only the caps; without the `par` branch it would divide by ~0.
+ * KNOWN LIMIT: the float32 test is pinned to 520 u (T1). At 1000-3000 u it decides rays within
+ * ~0.5 u of a surface differently from float64: 133 of 19960 rays at a 0.01 u margin, 0 from
+ * 0.5 u, where the entry distance agrees within 1.92 u. The lane G review judged that far below
+ * the cone's spread and the capsule fit error (its R2). */
 static inline float
 hb_capsule_t(const float* cp, float ox, float oy, float oz, float dx, float dy, float dz) {
     float ax = cp[0], ay = cp[1], az = cp[2], r = cp[6];
