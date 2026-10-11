@@ -1,8 +1,9 @@
 """L3 of `cs2rl layers` (pyproject.toml), beside eval: the viewers.
 
 Members:
-  render       -- the rerun recorder behind `python -m cs2rl.train --record` (init_recording,
-                  log_tick, ...); imports rerun at module scope;
+  render       -- the rerun replay recorder (ReplayRecorder) behind `python -m cs2rl.train
+                  --record` and `python -m cs2rl.experiment.replay`; imports rerun and
+                  eval.baselines at module scope;
   play         -- the play-vs-bots window, launched as `python -m cs2rl.viz.play`
                   (cs2_demo's `--policy` execs it); loads libcs2_play.so by ctypes;
   play_actions -- play's helpers with no ctypes and no raylib, safe to import from tests.

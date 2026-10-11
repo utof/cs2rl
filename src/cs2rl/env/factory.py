@@ -45,9 +45,9 @@ THE ROLES ARE NOT INTERCHANGEABLE, and the differences are the point:
 There is deliberately NO `record` role, and the reason is NOT that `--record`
 reuses one of the roles above — it does not. `cs2rl.train.record.record_episode` builds its
 own env with a bare `make_c_env(...)`, the LOWER-layer constructor, which W3
-never banned, and THAT is the env every recorded tick comes from: both its
-`log_tick` calls take `env.snapshot_state()`, and the name `policy_env` never
-appears in it. The `eval_legacy` env `cs2rl.policy.load_policy_from_checkpoint` builds
+never banned, and THAT is the env every recorded tick comes from: its
+`ReplayRecorder` is fed `eval.baselines.StateReader` snapshots of that env, and the
+name `policy_env` never appears in it. The `eval_legacy` env `cs2rl.policy.load_policy_from_checkpoint` builds
 on the way in is a SECOND, separate env, and it is only ever read — never reset,
 never stepped. Read twice, and it is the second read that surprises people: once
 for its obs_dim, which the checkpoint's must match, and once inside

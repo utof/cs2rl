@@ -356,7 +356,8 @@ def test_dust2_loads_never_build_vis(monkeypatch, tmp_path, entry):
     The MapData it leaves in _ENV_CACHE has no matrix, and an env built from it
     steps. The vis-less MapData is never put in map.py's _CS2_MAP_CACHE, where a
     build_vis=True caller would get it. `--record` runs one random-policy episode
-    with the rerun calls stubbed; it must log the env's own nav graph.
+    into tmp_path with the dust2 map loggers stubbed; it must log the env's own nav graph
+    and leave one recording in the file.
 
     KNOWN LIMIT: the four entry points are enumerated; a NEW direct make_cs2_map(...)
     caller using the default build_vis=True is outside this guard (follow-up removes the flag)."""
@@ -388,14 +389,16 @@ def test_dust2_loads_never_build_vis(monkeypatch, tmp_path, entry):
     else:
         from cs2rl.train.record import record_episode
         from cs2rl.viz import render
-        for name in ("init_recording", "log_trimap", "log_tick"):
-            monkeypatch.setattr(render, name, lambda *_a, **_k: None)
-        monkeypatch.setattr(render, "log_navmesh", logged.append)
+        monkeypatch.setattr(render, "log_trimap", lambda _rec: None)
+        monkeypatch.setattr(render, "log_navmesh", lambda _rec, graph: logged.append(graph))
         record_episode(policy_mode="random", save_path=str(tmp_path / "ep.rrd"))
     md = cs2_env._ENV_CACHE[(nav.NAV_PATH, nav.CACHE_PATH)]
     assert md.vis_matrix is None and map_mod._CS2_MAP_CACHE == {}
     if entry == "record_episode":
+        from rerun.recording import load_archive
         assert logged == [md.nav_graph]
+        recordings = load_archive(tmp_path / "ep.rrd").all_recordings()
+        assert len(recordings) == 1, "the episode never reached the file"
     env = cs2_env.make_env(seed=3)                                     # reuses md: the trap stays armed
     try:
         assert env.map_data is md
