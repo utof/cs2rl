@@ -444,16 +444,18 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "tct_split_trunk": tct_split_trunk,
     }
 
-    # ── Env provenance: 23 weights + 6 knobs, verbatim key names ──
+    # ── Env provenance: 23 weights + 7 knobs, verbatim key names ──
     # EnvConfig.to_config_dict() is the single declaration of what config.json
     # records about the env (spec 2026-09-03 §2.1): the 23 weights plus
-    # pbrs_gamma, reward_symmetrize, n_active_per_team, pin_pitch,
+    # pbrs_gamma, reward_symmetrize, accuracy, n_active_per_team, pin_pitch,
     # crouch_enabled and jump_enabled. The R0-G trio is NOT in it — those are
     # recorded above under their CLI names so a None survives as None.
     # None of these keys is in RESUME_CONFIG_ALLOWLIST: a run with different
-    # weights, a different roster or a different PBRS discount is a different
-    # experiment. Adding or removing one changes the Modal runner's config_hash for every
-    # future run.
+    # weights, a different roster, a different PBRS discount or a different
+    # shot cone is a different experiment. Adding or removing one changes the
+    # Modal runner's config_hash for every future run, and a run dir written
+    # before the key existed cannot --resume-run (check_resume_config reads a
+    # missing key as a mismatch): recorded for `accuracy` as for jump_enabled.
     # Merged via an explicit collision check rather than a trailing splat: a
     # splat in last position would SILENTLY overwrite an existing config key if
     # a weight were ever named like one of the keys above, and the result would
@@ -475,13 +477,13 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
 # resolve_gammas) and recoil (no flag). Kept separate from _ENV_KNOB_ARG_PAIRS so the
 # R0-G "None is the stored value" rule is never applied to a flag knob.
 _ARGS_KNOB_FIELDS = ("n_active_per_team", "pin_pitch", "crouch_enabled", "jump_enabled",
-                     "reward_symmetrize")
+                     "reward_symmetrize", "accuracy")
 
 
 def env_config_from_args(args) -> EnvConfig:
     """The single args → EnvConfig resolver (spec 2026-09-03 §2.3, Phase B R3).
 
-    WHAT: reads the 23 reward flags, the five flag knobs, the R0-G trio and
+    WHAT: reads the 23 reward flags, the six flag knobs, the R0-G trio and
     pbrs_gamma off `args` and returns one frozen EnvConfig — one resolver, one
     object. Until #165 Phase B the weights and the non-weight knobs were read by
     two separate helpers into two separate dicts that had to be kept in step by
@@ -492,7 +494,7 @@ def env_config_from_args(args) -> EnvConfig:
     `getattr(args, name, UNSET)` and then simply not passing it — so the field
     default in env/config.py is the only declaration of the value. Spelling a
     fallback as `getattr(args, "<knob>", <the field default>)` instead would put
-    a second copy of six defaults in this file, which is the duplication #165
+    a second copy of those defaults in this file, which is the duplication #165
     exists to remove and which tests/integration/test_no_restated_env_defaults.py fails on.
     That probe reads PROSE as well as code, so this paragraph names no value
     either.

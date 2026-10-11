@@ -59,7 +59,7 @@ from tests.conftest import REPO_ROOT
 
 DECLARATION = REPO_ROOT / "src" / "cs2rl" / "env" / "config.py"
 
-# name -> default, for the 23 weights and the seven non-None knobs. The three
+# name -> default, for the 23 weights and the eight non-None knobs. The three
 # None-valued R0-G knobs are excluded: `x = None` is not a restatement of
 # anything, it is the sentinel.
 _CFG = EnvConfig()
@@ -240,8 +240,20 @@ def _assert_exactly(found, pending, probe):
                        "standing permission for a restatement nobody is watching.")
 
 
-def _argparse_default_offenders(tree, label):
-    """add_argument calls in `tree` whose LITERAL `default=` equals a field default.
+# store_true / store_false sites on an EnvConfig field that may stay, keyed by (file, long
+# flag), each with its reason. An entry holds only while the action's implied default EQUALS
+# the field's default: flip the field and the site is reported again, because every
+# unflagged run would then override the env's new default. An entry that matches no store
+# action in its file fails test_no_argparse_default_restates_a_field_default.
+STORE_ACTION_ALLOWED = {
+    ("src/cs2rl/train/__main__.py", "--reward-symmetrize"):
+    "recorded A2-arm commands (its specs, the #82 tracker) spell it as a bare switch",
+}
+
+
+def _argparse_default_offenders(tree, label, seen=None):
+    """add_argument calls in `tree` whose LITERAL `default=` equals a field default,
+    and every store_true / store_false on a field dest.
 
     Takes a parsed tree and a display label rather than a path, so the knock-out
     below can hand it a scratch source string. Without that this probe would be
@@ -249,6 +261,16 @@ def _argparse_default_offenders(tree, label):
     `default=_ENV_DEFAULTS.x` is an ast.Attribute, skipped by the Constant
     guard, so the probe reports 0 forever and nothing shows it can still find a
     planted `default=1`.
+
+    STORE ACTIONS: `action="store_true"` with no `default=` is an implicit
+    default False (store_false: True), a literal argparse writes for the flag.
+    It cannot be derived from EnvConfig, so it is reported whether it equals the
+    field default (a restatement) or not (then every unflagged run overrides the
+    env's default). The lane D spec review measured the second case: with
+    EnvConfig.accuracy flipped to True, an unflagged training run still wrote
+    False through a store_true `--accuracy`, and no guard went red. The exceptions
+    are STORE_ACTION_ALLOWED's; `seen`, when given, collects the (label, long
+    flag) of every store-action site so the caller can find a stale entry.
     """
     offenders = []
     for node in ast.walk(tree):
@@ -256,14 +278,25 @@ def _argparse_default_offenders(tree, label):
                 and node.func.attr == "add_argument"):
             continue
         kw = {k.arg: k.value for k in node.keywords}
+        long_flag = next((a.value for a in node.args if isinstance(a, ast.Constant)
+                          and isinstance(a.value, str) and a.value.startswith("--")), None)
         dest = kw.get("dest")
         dest = dest.value if isinstance(dest, ast.Constant) else None
-        if dest is None:
-            for a in node.args:
-                flag = a.value if isinstance(a, ast.Constant) else None
-                if isinstance(flag, str) and flag.startswith("--"):
-                    dest = flag[2:].replace("-", "_")
-                    break
+        if dest is None and long_flag is not None:
+            dest = long_flag[2:].replace("-", "_")
+        action = kw.get("action")
+        action = action.value if isinstance(action, ast.Constant) else None
+        if (dest in FIELD_DEFAULTS and "default" not in kw
+                and action in ("store_true", "store_false")):
+            implied = action == "store_false"
+            if seen is not None:
+                seen.add((label, long_flag))
+            if (label, long_flag) in STORE_ACTION_ALLOWED and implied == FIELD_DEFAULTS[dest]:
+                continue
+            offenders.append(
+                f"{label}:{node.lineno}  {long_flag or dest} {action} (implied default "
+                f"{implied!r}, field default {FIELD_DEFAULTS[dest]!r})")
+            continue
         if dest not in FIELD_DEFAULTS or "default" not in kw:
             continue
         default = kw["default"]
@@ -302,7 +335,7 @@ def test_no_argparse_default_restates_a_field_default():
     a silently dropped file is the same blindness this scope fix removes, just
     wearing a different hat.
     """
-    offenders = []
+    offenders, seen = [], set()
     for path in _scanned_files():
         rel = path.relative_to(REPO_ROOT).as_posix()
         try:
@@ -311,11 +344,18 @@ def test_no_argparse_default_restates_a_field_default():
             pytest.fail(f"{rel} cannot be parsed, so this probe cannot see its add_argument "
                         f"calls: {exc}. Fix the file — never skip it, and never quietly narrow "
                         f"the scan to the files that happen to parse.")
-        offenders += _argparse_default_offenders(tree, rel)
+        offenders += _argparse_default_offenders(tree, rel, seen)
     assert not offenders, ("argparse default(s) restate a field default:\n  " +
                            "\n  ".join(offenders) +
                            "\nUse `default=_ENV_DEFAULTS.<field>` (EnvConfig() bound once above "
-                           "the parser).")
+                           "the parser). For a store_true/store_false, use the --jump-enabled "
+                           "form (`type=int, choices=(0, 1)` and a derived default), or add the "
+                           "site to STORE_ACTION_ALLOWED with a reason.")
+    stale = sorted(set(STORE_ACTION_ALLOWED) - seen)
+    assert not stale, (f"STORE_ACTION_ALLOWED entr(ies) that match no store_true/store_false "
+                       f"on an EnvConfig field: {stale}. The flag was renamed, removed or given "
+                       f"a derived default; delete the entry, it is standing permission for "
+                       f"nothing.")
 
 
 def test_field_defaults_covers_every_declared_default():
@@ -592,3 +632,36 @@ def test_the_argparse_probe_can_actually_fail():
                                        "<no-dest>") == [f"<no-dest>:2  --{name} default={value!r}"]
     assert _argparse_default_offenders(ast.parse(derived), "<derived>") == []
     assert _argparse_default_offenders(ast.parse(sentinel), "<sentinel>") == []
+
+
+def test_the_argparse_probe_reads_store_actions(monkeypatch):
+    """Knock-out for the store-action branch, on scratch trees.
+
+    store_true and store_false on a field dest are both found, whatever the
+    field's default; a derived `default=` and a non-field dest are not. A
+    STORE_ACTION_ALLOWED entry suppresses its site only while the implied
+    default equals the field's: flipping the field reports it again.
+
+    `recoil` is a bool field with no CLI flag, so no live site depends on it.
+    """
+    name = "recoil"
+    flag = "--" + name
+
+    def found(src):
+        return _argparse_default_offenders(ast.parse(src), "<planted>")
+
+    for action in ("store_true", "store_false"):
+        hits = found(f'parser.add_argument("{flag}", action="{action}")\n')
+        assert len(hits) == 1 and hits[0].startswith(f"<planted>:1  --{name} {action}"), hits
+    assert found(f'parser.add_argument("{flag}", action="store_true", '
+                 f'default=_ENV_DEFAULTS.{name})\n') == []
+    assert found('parser.add_argument("--tag-diagnostic", action="store_true")\n') == []
+
+    # The allowed spelling is the action whose implied default IS the field's default.
+    action = "store_false" if FIELD_DEFAULTS[name] else "store_true"
+    src = f'parser.add_argument("{flag}", action="{action}")\n'
+    monkeypatch.setattr(sys.modules[__name__], "STORE_ACTION_ALLOWED",
+                        {("<planted>", flag): "test"})
+    assert found(src) == []
+    monkeypatch.setitem(FIELD_DEFAULTS, name, not FIELD_DEFAULTS[name])
+    assert len(found(src)) == 1, "a flipped field default must void the allowance"

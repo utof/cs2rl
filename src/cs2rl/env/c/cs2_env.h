@@ -41,7 +41,15 @@ static void env_init(Dust2Env* env, StaticData* sd, uint32_t seed, float team_sp
      * sum wraps to exactly 0 — xorshift32 would be stuck at 0 forever).
      * PITFALL: changing this moves every xorshift32 stream => sim fingerprints
      * (scripts/sim_fingerprint.py) legitimately change; record the new set. */
-    env->rng         = (seed + 0x9E3779B9u) ? (seed + 0x9E3779B9u) : 1u;
+    env->rng = (seed + 0x9E3779B9u) ? (seed + 0x9E3779B9u) : 1u;
+    /* The cone's own stream (cs2_types.h Dust2Env.accuracy_rng), seeded from the same seed
+     * by a different bijection so it is not env->rng's state. Nothing draws from it while
+     * accuracy_enabled is 0, and env->rng above is untouched by it either way. The `: 1u`
+     * fallback is the one seed whose product is 0x0BADF00D, whose xor is 0. */
+    {
+        uint32_t s        = (seed * 0x85EBCA6Bu) ^ 0x0BADF00Du;
+        env->accuracy_rng = s ? s : 1u;
+    }
     env->team_spirit = team_spirit;
     clear_stats(&env->step_stats);
     clear_stats(&env->episode_stats);

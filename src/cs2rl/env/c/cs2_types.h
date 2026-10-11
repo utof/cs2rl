@@ -120,6 +120,14 @@ typedef struct {
     int32_t reload_ticks;
     float   move_speed;     /* units/second at this weapon */
     float   range_modifier; /* damage falloff per 500 units */
+    /* Movement-inaccuracy cone, read only when Dust2Env.accuracy_enabled (cs2_weapons.h
+     * accuracy_cone_radius). CS:GO/CS2 items_game attributes (spread, inaccuracy_stand,
+     * inaccuracy_crouch, inaccuracy_move) in MILLIRADIANS: x 0.001 is the cone's maximum
+     * radius in rad. Appended, never reorder: WEAPON_DEFS initialisers are positional. */
+    float spread_mrad;       /* every shot */
+    float inacc_stand_mrad;  /* standing */
+    float inacc_crouch_mrad; /* crouched, replaces inacc_stand_mrad */
+    float inacc_move_mrad;   /* added in full at the top of the speed ramp */
 } WeaponDef;
 
 /* ── Solid face geometry (shared by movement, LoS and the renderer) ──
@@ -716,9 +724,8 @@ typedef struct {
      * visibility; sentinel 1e30f (never INFINITY — -ffast-math) set in
      * clear_stats; converted per episode in cs2_env.py _build_terminal_info.
      * reward_win_t/ct: one-sided terminal payouts (diagnostic; reward_win
-     * stays the cross-team sum). Appended — never reorder. reward_win_ct is
-     * the struct tail: binding.c py_struct_sizes() and cs2_env.py
-     * _C_OFFSET_FIELDS anchor on it. */
+     * stays the cross-team sum). Appended — never reorder. reward_win_ct was
+     * the struct tail until the two cone counters below were appended after it. */
     int32_t shots_fired;
     int32_t shots_with_enemy_in_los;
     int32_t shots_facing_enemy;
@@ -731,6 +738,14 @@ typedef struct {
     float   min_enemy_distance;
     float   reward_win_t;
     float   reward_win_ct;
+    /* Movement-inaccuracy diagnostics, counted like shots_fired (participating shooters,
+     * both structs, cs2_combat.h). shots_fired_fast: shots fired at a planar speed >= 0.34 x
+     * the weapon's move_speed (ACCURACY_RAMP_START_FRAC), counted whether or not
+     * accuracy_enabled is set. cone_radius_sum: the summed cone radius (rad) the shots left on,
+     * 0 while accuracy_enabled is 0. Appended; cone_radius_sum is the struct tail
+     * (binding.c py_struct_sizes() and cs2_env.py _C_OFFSET_FIELDS anchor on it). */
+    int32_t shots_fired_fast;
+    float   cone_radius_sum;
 } StepStats;
 
 /* ── Full environment (one per parallel instance) ── */
@@ -759,6 +774,16 @@ typedef struct {
      * make_env writes this after Dust2EnvC.from_address. env_reset memsets
      * GameState only, so the flag survives mid-round reset. */
     int32_t recoil_enabled;
+    /* Movement-inaccuracy cone: env-wide physics switch, set and kept like recoil_enabled
+     * (Cs2Env writes it from EnvConfig.accuracy). 0 = today's exact ray, and no RNG draw;
+     * 1 = every shot leaves on a cone around the ray (cs2_combat.h process_combat).
+     * accuracy_rng is the cone's OWN xorshift32 stream, seeded by env_init. The shared
+     * env->rng also rolls hit locations and spawns, so a cone draw from it would move both
+     * on every shot. PITFALL: a C caller that skips env_init (cs2_demo.c memsets Dust2Env)
+     * leaves the stream at 0, where xorshift32 stays 0 and every cone draw is r = 0.
+     * Appended; accuracy_rng is the struct tail (the offsetof anchor). */
+    int32_t  accuracy_enabled;
+    uint32_t accuracy_rng;
 } Dust2Env;
 
 /* ── Angle utilities ────────────────────────────────────────────────────── */
