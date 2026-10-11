@@ -136,16 +136,18 @@ SV_STOPSPEED = 80.0
 _LOCAL_X = np.array([0.0, 0.0, 0.70710678, 1.0, 0.70710678, 0.0, -0.70710678, -1.0, -0.70710678])
 _LOCAL_Y = np.array([0.0, 1.0, 0.70710678, 0.0, -0.70710678, -1.0, -0.70710678, 0.0, 0.70710678])
 STRAFE_RIGHT, STRAFE_LEFT = 3, 7       # facing-local right / left (test_strafe_labels_match_geometry)
-                                       # Where the movement-inaccuracy cone starts, as a fraction of the weapon's move speed:
-                                       # MIRROR of cs2_weapons.h ACCURACY_RAMP_START_FRAC.
+
+# Where the movement-inaccuracy cone starts, as a fraction of the weapon's move speed:
+# MIRROR of cs2_weapons.h ACCURACY_RAMP_START_FRAC.
 ACCURACY_THRESHOLD_FRAC = 0.34
 
 MAX_REACTION_TICKS = 16                # the delay line's length: 1 s, above Easy's 10
-                                       # A turn "lands" when the aim is within max_turn_speed + LANDS_TOL. WHY the tolerance: a CT
-                                       # spawns facing float32(pi), so its turn to a 45-degree bearing (the arena's rows 200 u apart
-                                       # at 200 u) is max_turn_speed plus rounding, while the T's is exact; without it a perfect CT
-                                       # fired a tick late on those spawns and lost 128 of 1200 mirror rounds (lane E, 2026-10-11).
-                                       # 1e-5 rad is 0.004 u at the arena's 400 u, far inside a head.
+
+# A turn "lands" when the aim is within max_turn_speed + LANDS_TOL. WHY the tolerance: a CT
+# spawns facing float32(pi), so its turn to a 45-degree bearing (the arena's rows 200 u apart
+# at 200 u) is max_turn_speed plus rounding, while the T's is exact; without it a perfect CT
+# fired a tick late on those spawns and lost 128 of 1200 mirror rounds (lane E, 2026-10-11).
+# 1e-5 rad is 0.004 u at the arena's 400 u, far inside a head.
 LANDS_TOL = 1e-5
 WALL_MARGIN = 40.0                     # u
 WALL_LOOKAHEAD_TICKS = 3
@@ -338,7 +340,8 @@ class DuelBot:
         cf, sf = np.cos(facing), np.sin(facing)
         ex, ey = sx + rx * cf - ry * sf, sy + rx * sf + ry * cf
         ez = best[:, EN_DZ] * OBS_Z_SCALE
-                                                                       # One tick's displacement is the post-step velocity (module PITFALLS).
+
+        # One tick's displacement is the post-step velocity (module PITFALLS).
         both = seen & (self._prev[:, 0] > 0.5)
         evx = np.where(both, (ex - self._prev[:, 1]) / DT, 0.0)
         evy = np.where(both, (ey - self._prev[:, 2]) / DT, 0.0)
