@@ -40,7 +40,9 @@ CHECKPOINT_HELPERS = (
 # -_warmstart_phase (now also stored by an anchored method, _prepare_entropy_update;
 # the _WARMSTART_ATTRS check below still requires it on the instance). --opponent walker
 # added +_opponent_walker (read by _walk_scripted_opponents, declared by _init_selfplay).
-EXPECTED_ANCHOR_COUNT = 25
+# --opponent duel added +_opponent_duel (read by _duel_scripted_opponents and
+# _log_and_checkpoint, declared by _init_selfplay).
+EXPECTED_ANCHOR_COUNT = 26
 # Read AND overwritten by anchored bodies, so derive_anchor() (reads minus stores) never
 # requires them; this list pins their constructor declarations by name.
 DECLARED_AND_OVERWRITTEN = ("_last_nan_warn_t", "_selfplay_used_past", "_tag_metrics")
