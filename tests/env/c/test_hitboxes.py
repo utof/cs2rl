@@ -31,9 +31,9 @@ WHAT IS PINNED (T1-T10 of the #391 brief), and the knock-out each one caught:
     and crouch tops of the CS:GO hull, and both CS eyes inside their pose's head.
     Caught: the crouch eye moved below the head; a region's group set to generic (0).
   * T10 legacy reproduction: with hitboxes=False and the cone off, scripts/sim_fingerprint.py
-    reproduces its documented pre-#391 hashes (random and track rows here, the bomb rows in
-    the slow tier). Caught: one legacy roll threshold moved; the legacy stomach multiplier
-    moved.
+    reproduces its documented pre-#391 hashes (random and track rows here; the bomb rows, in
+    the slow tier, are its SIMULTANEOUS-COMBAT rows, #152 L2). Caught: one legacy roll
+    threshold moved; the legacy stomach multiplier moved.
   The knock-out runs are in the #391 phase 2 record (lane G evidence), not in this file.
 
 SETUP: the arena duel map, one agent a side (rows 0 and 5), rifle drawn, the cone off (an
@@ -474,11 +474,14 @@ LEGACY_FINGERPRINTS = {
     ("--steps", "700", "--aim-mode", "track"):
     "b7adbbe2a2c9e81ef86624e3699c38d832e7f66220b5980e7e2579bd26f8c8f5",
 }
+# The bomb rows as #152 L2 moved them: its SIMULTANEOUS-COMBAT rows, the second pair. Simultaneous
+# combat moved them first (a dying CT fires); then the shot penalty charged a shooter dead at the
+# end of its firing tick, which changed only those agents' rewards on those steps.
 LEGACY_BOMB_FINGERPRINTS = {
     ("--steps", "5000", "--aim-mode", "bomb"):
-    "58ab098b00c67b6bb56e78bb7381f2b07df339888acaf412671a05af3dd0101b",
+    "1d00d994054e671d873df865562e8cc6052f29d6eadf4dff00f4a1c764544675",
     ("--steps", "5000", "--aim-mode", "bomb", "--n-active", "3"):
-    "6b412b0ecf80d64f0a65cb2ec64e0fc713d5d32e9f3d933b065abab325acb5d5",
+    "cbaa454b29ffeece96cb5c4f176f1b624c943ed6e53d27d8304d93adf27537d5",
 }
 
 

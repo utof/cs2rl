@@ -206,6 +206,11 @@ NON_ISLAND_WRITES = (
         "settings came from (`accuracy_source`, `hitboxes_source`: the run's config.json or "
         "the flag) for the header it prints and the --json file. It never reaches a training row. Hit only because `out` is also an "
         "island container name."),
+    NonIslandWrite(
+        "experiment/oracle_duel.py", "summary",
+        "An OFFLINE duel report (#152 L2): the outcome counts, shares and per-side shot totals of "
+        "scripted duel rounds oracle_duel plays itself, which it prints and its verdict reads. It "
+        "never reaches a training row. Hit only because `out` is also an island container name."),
 )
 
 # Non-literal dicts merged into an island container that resolve, one hop back, to
