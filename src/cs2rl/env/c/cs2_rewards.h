@@ -116,6 +116,7 @@ static void compute_rewards(Dust2Env* env,
          *     - CT gets the timeout magnitude as a reward for surviving without a plant.
          *     - T agents receive -timeout magnitude as a penalty.
          *     - Note: the C env uses winner=-1 for this case, not winner=1.
+         *   Draw    (winner == WINNER_DRAW): both teams died on one tick; no outcome reward.
          *
          * We classify CT-defuse via the bomb_just_defused argument (set by
          * cs2_bomb.h only when the defuse branch actually completes). This is
@@ -154,7 +155,7 @@ static void compute_rewards(Dust2Env* env,
             ct_mag = sd->reward_win_ct_timeout;
             t_mag  = -ct_mag;
         } else {
-            t_mag  = 0.0f; /* defensive: ongoing round, should not be reached */
+            t_mag  = 0.0f; /* WINNER_DRAW (cs2_types.h): both teams died on one tick */
             ct_mag = 0.0f;
         }
 

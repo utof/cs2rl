@@ -510,7 +510,10 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
         else
             ct_alive++;
     }
-    if (!t_alive && !g->round_over) {
+    if (!t_alive && !ct_alive && !g->round_over) {
+        g->round_over = 1; /* both teams died on this tick (process_combat is simultaneous) */
+        g->winner     = WINNER_DRAW;
+    } else if (!t_alive && !g->round_over) {
         g->round_over = 1;
         g->winner     = 1;
     } else if (!ct_alive && !g->round_over) {
