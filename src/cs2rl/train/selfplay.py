@@ -74,7 +74,7 @@ class SelfPlayManager:
         from INITIAL_OPPONENT_TEAM (rather than hardcoding "t" at the call
         site) is what keeps the participation vector and the statue mask from
         silently disagreeing if the initial sides are ever swapped.
-        Under a scripted --opponent (noop, walker) the value is constant for the whole run: the mode
+        Under a scripted --opponent (noop, walker, duel) the value is constant for the whole run: the mode
         forbids self-play, and maybe_switch_teams is the only thing that flips
         opponent_team.
         """
@@ -101,9 +101,10 @@ class SelfPlayManager:
         self.pin_pitch = bool(pin_pitch)
         # Rung 1a T3: "noop" makes the patched evaluate() overwrite this team's
         # actions with the no-op bin on every head (see
-        # Cs2PuffeRL.evaluate); "walker" does the same except the move head walks.
+        # Cs2PuffeRL.evaluate); "walker" does the same except the move head walks;
+        # "duel" lets the duel bot play every head and the aim.
         # Validated here so a typo'd mode cannot reach the rollout
-        # as a silently-inactive branch. Callers that pass "noop" or "walker" MUST also
+        # as a silently-inactive branch. Callers that pass a scripted mode MUST also
         # have passed assert_opponent_self_play_compatible.
         if opponent_mode not in OPPONENT_MODES:
             raise ValueError(f"opponent_mode={opponent_mode!r} must be one of {OPPONENT_MODES}")
