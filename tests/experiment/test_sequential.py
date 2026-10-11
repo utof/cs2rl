@@ -73,6 +73,9 @@ def test_draws_cost_a_round_but_are_not_losses():
     s = Q.sign_stop([pattern * 10], 100)
     assert (s.decision, s.looks[-1].look) == ("hero", 4)
     assert (s.looks[-1].wins, s.looks[-1].losses, s.looks[-1].draws) == (24, 8, 48)
+    # The exact test, not its z-scale form (0.0047 here): that form exceeds 0.05 elsewhere on the
+    # K-Q1 grid while staying under it at the Monte Carlo test's point.
+    assert s.looks[-1].p_value == pytest.approx(stats.binomtest(24, 32).pvalue)
     assert s.wilson is None
     with pytest.raises(ValueError, match="not one of"):
         Q.sign_stop([["win"] * 19 + ["draw"]], 100)
