@@ -149,6 +149,18 @@ reproduce; the two bomb rows moved to:
   against 4 at step 227 with --n-active 3): the dying CT fired. Every earlier step is
   identical, including 8 (2) earlier ticks with a death and two or more shooters, on which
   the order changed nothing (lane E evidence).
+  The shot penalty then stopped testing `alive` (cs2_rewards.h: every agent that fired this
+  tick pays, so a shooter killed on its firing tick pays too, #152 L2 review), and the two
+  bomb rows moved again, to:
+    --steps 5000 --aim-mode bomb
+        1d00d994054e671d873df865562e8cc6052f29d6eadf4dff00f4a1c764544675
+    --steps 5000 --aim-mode bomb --n-active 3
+        cbaa454b29ffeece96cb5c4f176f1b624c943ed6e53d27d8304d93adf27537d5
+  A per-step compare against the build with the alive test found masks, observations and
+  terminals identical, and rewards different only on the (step, agent) pairs where a shooter
+  was dead at the end of its firing tick, each by the penalty to float32 rounding: 19 such
+  shooters on 16 steps from step 717, and 12 on 12 steps from step 171 with --n-active 3.
+  The 200- and 700-step rows have no such step and still reproduce (lane E fix evidence).
 
 Usage:
     UV_NO_SYNC=1 uv run python scripts/sim_fingerprint.py [--steps 200] [--n-active 5]

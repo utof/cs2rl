@@ -11,7 +11,8 @@ rounds of 1000 (lane E, 2026-10-11).
 
 Each test pins one hunk of the fix:
   * the shooter test (a CT killed by agent 0 this tick still fires): the exchange is a double
-    kill and a draw;
+    kill and a draw, and both shooters pay the shot penalty (cs2_rewards.h charges every agent
+    that fired this tick, dead or alive);
   * the enemy test (a killed agent still blocks a later ray): the agent behind it is unhurt;
   * the kill record (a body hit again is not killed again): one kill, credited once;
   * the round end (both teams dead is a draw, not a CT win).
@@ -85,6 +86,10 @@ def test_a_same_tick_exchange_is_a_double_kill_and_a_draw():
         assert (g.round_over, g.winner) == (1, WINNER_DRAW)
         assert (es.winner, es.winner_t, es.winner_ct, es.timed_out) == (WINNER_DRAW, 0, 0, 0)
         assert (es.reward_win_t, es.reward_win_ct) == (0.0, 0.0)
+        # Both shooters died on their firing tick and both pay the shot penalty (cs2_rewards.h).
+        sd = env._c_env.sd.contents
+        assert sd.reward_shot_penalty > 0
+        assert es.reward_shots == pytest.approx(-2 * sd.reward_shot_penalty)
         assert term.all()
         assert rew[0] == rew[5]
     finally:

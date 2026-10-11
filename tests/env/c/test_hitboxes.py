@@ -474,12 +474,14 @@ LEGACY_FINGERPRINTS = {
     ("--steps", "700", "--aim-mode", "track"):
     "b7adbbe2a2c9e81ef86624e3699c38d832e7f66220b5980e7e2579bd26f8c8f5",
 }
-# The bomb rows as simultaneous combat (#152 L2) moved them: its SIMULTANEOUS-COMBAT rows.
+# The bomb rows as #152 L2 moved them: its SIMULTANEOUS-COMBAT rows, the second pair. Simultaneous
+# combat moved them first (a dying CT fires); then the shot penalty charged a shooter dead at the
+# end of its firing tick, which changed only those agents' rewards on those steps.
 LEGACY_BOMB_FINGERPRINTS = {
     ("--steps", "5000", "--aim-mode", "bomb"):
-    "4c4a1d5d1d3cd819b634564c98387dba40c4ca890d45ec0f224020f5cfbb3cb7",
+    "1d00d994054e671d873df865562e8cc6052f29d6eadf4dff00f4a1c764544675",
     ("--steps", "5000", "--aim-mode", "bomb", "--n-active", "3"):
-    "3c4c13e4bedc59ab2db508bb70257de2168f3524e71fef2654919d38d11b966d",
+    "cbaa454b29ffeece96cb5c4f176f1b624c943ed6e53d27d8304d93adf27537d5",
 }
 
 

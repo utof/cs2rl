@@ -238,9 +238,12 @@ static void compute_rewards(Dust2Env* env,
         es->reward_bomb               += sd->reward_defuse;
     }
 
-    /* Small cost per shot fired — discourages infinite spray at walls */
+    /* Small cost per shot fired — discourages infinite spray at walls.
+     * No alive test: env_step clears fired_this_tick every tick and process_combat sets it
+     * only for shooters alive before combat, so a shooter killed on its firing tick (both
+     * sides of a same-tick trade, #152 L2) pays too. */
     for (int i = 0; i < N_AGENTS; i++) {
-        if (env->game.agents[i].alive && env->game.agents[i].fired_this_tick) {
+        if (env->game.agents[i].fired_this_tick) {
             env->rewards[i]  -= sd->reward_shot_penalty;
             ss->reward_shots -= sd->reward_shot_penalty;
             es->reward_shots -= sd->reward_shot_penalty;
