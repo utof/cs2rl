@@ -49,7 +49,8 @@ static inline float recoil_decay_punch(float prev, float dt) {
  * sim-v4 (enemy velocity): enemy stride 8 → 10 — slots +8/+9 are the enemy's
  * velocity relative to the observer, in the observer's facing frame, /250.
  * The global block shifted +10 (96 → 106). A checkpoint whose encoder reads the
- * 110-wide sim-v3 vector is widened on load by cs2rl.policy.widen_sim_v3_encoder. */
+ * 110-wide sim-v3 vector is widened at the RL load sites by
+ * cs2rl.policy.widen_sim_v3_encoder; train_bc --eval-only refuses it loudly. */
 #define OBS_SELF_BASE       0
 #define OBS_SELF_SIZE       28
 #define OBS_TEAMMATE_BASE   (OBS_SELF_BASE + OBS_SELF_SIZE)
