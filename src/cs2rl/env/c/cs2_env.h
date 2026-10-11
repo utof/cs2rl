@@ -513,6 +513,9 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
     if (!t_alive && !ct_alive && !g->round_over) {
         g->round_over = 1; /* both teams died on this tick (process_combat is simultaneous) */
         g->winner     = WINNER_DRAW;
+        /* KNOWN LIMIT: ReGameDLL (TeamExterminationCheck) scores a same-frame wipe of two
+         * populated teams a T win; this sim scores it a draw, bomb planted or not, so a trade
+         * pays neither side an outcome reward. */
     } else if (!t_alive && !g->round_over) {
         g->round_over = 1;
         g->winner     = 1;
