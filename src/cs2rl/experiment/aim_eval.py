@@ -322,7 +322,7 @@ def _cell(opponent, hero, aim, lstm, res, rec, horizon) -> dict:
     row.update((k, res[k])
                for k in ("episodes", "kills", "kill_rate", "ttk_median", "ttk_p90", "shots_fired",
                          "shots_hit", "shots_on_target", "opp_moving_frac", "per_episode",
-                         "accuracy", "shots_fired_fast", "cone_radius_sum"))
+                         "accuracy", "hitboxes", "shots_fired_fast", "cone_radius_sum"))
     row["hit_per_fired"] = res["shots_hit"] / max(res["shots_fired"], 1)
     # The share of fires at or above 0.34 x max speed (counted with the cone off too).
     row["fast_per_fired"] = res["shots_fired_fast"] / max(res["shots_fired"], 1)
@@ -336,11 +336,13 @@ def run_eval(policy,
              seed: int = 0,
              opponents=None,
              modes=MODES,
-             accuracy: bool | None = None) -> dict:
+             accuracy: bool | None = None,
+             hitboxes: bool | None = None) -> dict:
     """Every opponent x (reference heroes + every mode) on ``seed``; returns the JSON dict.
 
-    ``accuracy`` is oracle_statue.build_env's movement-inaccuracy cone switch for every cell
-    (None = the EnvConfig default); the result's ``accuracy`` is the value the cells ran.
+    ``accuracy`` and ``hitboxes`` are oracle_statue.build_env's movement-inaccuracy cone and
+    hit-model switches for every cell (None = the EnvConfig default); the result's
+    ``accuracy`` and ``hitboxes`` are the values the cells ran.
     """
     t0 = time.perf_counter()
     cells, refs = [], []
@@ -352,7 +354,8 @@ def run_eval(policy,
                                obs_only=obs_only,
                                opponent=make(seed),
                                on_step=rec,
-                               accuracy=accuracy)
+                               accuracy=accuracy,
+                               hitboxes=hitboxes)
             refs.append(_cell(name, hero, None, None, res, rec, bptt_horizon))
         oracle = next(r for r in refs[-len(REFERENCE_HEROES):] if r["hero"] == "oracle")
         for aim, lstm in modes:
@@ -366,7 +369,8 @@ def run_eval(policy,
                                    opponent=make(seed),
                                    hero=hero,
                                    on_step=rec,
-                                   accuracy=accuracy)
+                                   accuracy=accuracy,
+                                   hitboxes=hitboxes)
             row = _cell(name, "policy", aim, lstm, res, rec, bptt_horizon)
             # #152's gap = oracle - learner (TTK: learner - oracle): > 0 when the policy is worse.
             row["gap_to_oracle"] = {
@@ -379,6 +383,7 @@ def run_eval(policy,
         "episodes": episodes,
         "seed": seed,
         "accuracy": refs[0]["accuracy"],
+        "hitboxes": refs[0]["hitboxes"],
         "bptt_horizon": bptt_horizon,
         "references": refs,
         "cells": cells,
@@ -411,12 +416,22 @@ def trained_accuracy(cfg) -> bool:
     return bool(cfg.get("accuracy", False))
 
 
-def env_mismatches(cfg, accuracy: bool) -> list[str]:
+def trained_hitboxes(cfg) -> bool:
+    """The hit model a run trained with, from its config.json: True = the capsule hitboxes.
+
+    A config.json written before the ``hitboxes`` key existed (#391) trained on the legacy
+    ellipsoid, so a missing key reads False whatever EnvConfig's default is now.
+    """
+    return bool(cfg.get("hitboxes", False))
+
+
+def env_mismatches(cfg, accuracy: bool, hitboxes: bool) -> list[str]:
     """The config.json env keys that differ from the arena preset every cell plays: the map
     label, the agent count, the pitch, crouch and jump switches, the round length, the laser
-    range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves), and
-    the movement-inaccuracy cone (``accuracy``: the setting the harness ran, so the caller
-    passes it; the run's side is ``trained_accuracy``, so a missing key reads False).
+    range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves), the
+    movement-inaccuracy cone and the hit model (``accuracy`` and ``hitboxes``: the settings
+    the harness ran, so the caller passes them; the run's side is ``trained_accuracy`` and
+    ``trained_hitboxes``, so a missing key reads False).
 
     KNOWN LIMIT: recoil is not compared: config.json has no recoil key (no training flag sets it).
     """
@@ -431,8 +446,10 @@ def env_mismatches(cfg, accuracy: bool) -> list[str]:
         "laser_range": None,
         "max_turn_speed": None,
         "accuracy": bool(accuracy),
+        "hitboxes": bool(hitboxes),
     }
-    run = {k: trained_accuracy(cfg) if k == "accuracy" else cfg.get(k) for k in preset}
+    trained = {"accuracy": trained_accuracy, "hitboxes": trained_hitboxes}
+    run = {k: trained[k](cfg) if k in trained else cfg.get(k) for k in preset}
     return [f"{k}: run {run[k]} vs harness {v}" for k, v in preset.items() if run[k] != v]
 
 
@@ -445,11 +462,13 @@ def format_table(out: dict) -> str:
     rows = out["references"] + out["cells"]
     wo = max(len(r["opponent"]) for r in rows)
     source = f", from {out['accuracy_source']}" if out.get("accuracy_source") else ""
+    hb_source = f", from {out['hitboxes_source']}" if out.get("hitboxes_source") else ""
+    model = "capsule hitboxes" if out.get("hitboxes") else "legacy ellipsoid"
     lines = [
         f"aim_eval: {out['episodes']} episodes per cell, seed {out['seed']}, "
-        f"bptt_horizon {out['bptt_horizon']}; e in hit half-windows asin(16/d); movement-"
+        f"bptt_horizon {out['bptt_horizon']}; e in on-target half-windows asin(16/d); movement-"
         f"inaccuracy cone {'ON' if out.get('accuracy') else 'off'}{source} (fast = share of "
-        f"fires at >= 0.34 x max speed)",
+        f"fires at >= 0.34 x max speed); hit model {model}{hb_source}",
         f"{'opponent':<{wo}} {'hero':<10} {'aim':<6} {'lstm':<7} kills  ttk50 ttk90 hit/f "
         f" |e|50 |e|90 off   along across lag(t)  se   ticks  hit/f<=H hit/f>H gap_k  gap_ttk"
         f"  fast"
@@ -490,23 +509,37 @@ def main(argv=None) -> int:
                     "run without the key trained without the cone), so a re-read measures the "
                     "policy in the env it trained in. A value that differs from the run's "
                     "prints the env-mismatch warning.")
+    ap.add_argument("--hitboxes",
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="play every cell on the capsule hitboxes (1) or the legacy ellipsoid (0) "
+                    "(EnvConfig.hitboxes, #391). Default: the evaluated run's own config.json "
+                    "setting (a run without the key trained on the ellipsoid). A value that "
+                    "differs from the run's prints the env-mismatch warning.")
     args = ap.parse_args(argv)
     policy, cfg = load_checkpoint(args.checkpoint)
     if args.accuracy is None:
         accuracy, source = trained_accuracy(cfg), "the run's config.json"
     else:
         accuracy, source = bool(args.accuracy), "--accuracy"
+    if args.hitboxes is None:
+        hitboxes, hb_source = trained_hitboxes(cfg), "the run's config.json"
+    else:
+        hitboxes, hb_source = bool(args.hitboxes), "--hitboxes"
     out = run_eval(policy,
                    int(cfg["bptt_horizon"]),
                    episodes=args.episodes,
                    seed=args.seed,
-                   accuracy=accuracy)
+                   accuracy=accuracy,
+                   hitboxes=hitboxes)
     out["accuracy_source"] = source
+    out["hitboxes_source"] = hb_source
     # The aim log-sigma parameters by state_dict name, before forward()'s clamp: one
     # ``aim_log_std``, or ``aim_log_std_t`` and ``aim_log_std_ct`` with split heads.
     log_std = {k: v.tolist() for k, v in policy.state_dict().items() if "aim_log_std" in k}
     out.update(checkpoint=str(args.checkpoint),
-               env_mismatches=env_mismatches(cfg, out["accuracy"]),
+               env_mismatches=env_mismatches(cfg, out["accuracy"], out["hitboxes"]),
                aim_log_std=log_std)
     for m in out["env_mismatches"]:
         print(f"WARNING: the run trained a different env, {m}")

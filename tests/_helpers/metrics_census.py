@@ -202,9 +202,9 @@ NON_ISLAND_WRITES = (
         "reaches a training row. Hit only because `out` is also an island container name."),
     NonIslandWrite(
         "experiment/aim_eval.py", "main",
-        "The same OFFLINE eval report, whole: main records where the cone setting came from "
-        "(`accuracy_source`: the run's config.json or --accuracy) for the header it prints and "
-        "the --json file. It never reaches a training row. Hit only because `out` is also an "
+        "The same OFFLINE eval report, whole: main records where the cone and hit-model "
+        "settings came from (`accuracy_source`, `hitboxes_source`: the run's config.json or "
+        "the flag) for the header it prints and the --json file. It never reaches a training row. Hit only because `out` is also an "
         "island container name."),
 )
 

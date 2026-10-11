@@ -19,10 +19,11 @@ WHAT IS PINNED HERE
   Rung 1a checkpoint, which only the owner's checkouts have (outputs/ is not in git), so it
   skips without one. KNOWN LIMIT: that run's config.json has no ``accuracy`` key, so the pin
   covers the cone-off resolution only; cone-on parity was measured once (lane F review,
-  2026-10-11), not pinned.
+  2026-10-11), not pinned. Nor has it a ``hitboxes`` key, so it covers the legacy-ellipsoid
+  resolution only (#391).
 * The CLI's ``--accuracy``: a checkpoint plays its run's own cone unless the flag overrides it
   (then it warns), a scripted hero the flag, else the EnvConfig default; the .txt header
-  names the cone that ran.
+  names the cone that ran. ``--hitboxes`` follows the same rule for the hit model (#391).
 """
 import re
 import subprocess
@@ -158,7 +159,7 @@ def test_the_cli_plays_the_cone_switch(monkeypatch, tmp_path, capsys, hero, trai
     def fake_run_check(*args, **kw):
         seen.update(kw)
         ran = EnvConfig().accuracy if kw["accuracy"] is None else kw["accuracy"]
-        return {"per_episode": [], "accuracy": ran}
+        return {"per_episode": [], "accuracy": ran, "hitboxes": True}
 
     monkeypatch.setattr(L0, "run_check", fake_run_check)
     monkeypatch.setattr(aim_eval, "load_checkpoint", lambda path: (None, {
@@ -174,6 +175,50 @@ def test_the_cli_plays_the_cone_switch(monkeypatch, tmp_path, capsys, hero, trai
     assert len(warned) == (hero != "oracle" and want != trained_on), warned
     cone = "on" if (EnvConfig().accuracy if want is None else want) else "off"
     assert f"; movement-inaccuracy cone {cone}" in out.with_suffix(".txt").read_text()
+
+
+@pytest.mark.parametrize("hero,trained,argv,want", [
+    ("ckpt.pt", {}, [], False),
+    ("ckpt.pt", {
+        "hitboxes": True
+    }, [], True),
+    ("ckpt.pt", {
+        "hitboxes": True
+    }, ["--hitboxes", "0"], False),
+    ("ckpt.pt", {}, ["--hitboxes", "1"], True),
+    ("oracle", {}, [], None),
+    ("oracle", {}, ["--hitboxes", "0"], False),
+])
+def test_the_cli_plays_the_hit_model_switch(monkeypatch, tmp_path, capsys, hero, trained, argv,
+                                            want):
+    """A checkpoint plays its run's own hit model (a config.json without the key trained on
+    the legacy ellipsoid) unless --hitboxes says otherwise, and then warns; a scripted hero
+    follows --hitboxes, else the EnvConfig default (None). The .txt header names the model."""
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.experiment import aim_eval, replay
+    from cs2rl.experiment import oracle_statue as L0
+    seen = {}
+
+    def fake_run_check(*args, **kw):
+        seen.update(kw)
+        ran = EnvConfig().hitboxes if kw["hitboxes"] is None else kw["hitboxes"]
+        return {"per_episode": [], "accuracy": False, "hitboxes": ran}
+
+    monkeypatch.setattr(L0, "run_check", fake_run_check)
+    monkeypatch.setattr(aim_eval, "load_checkpoint", lambda path: (None, {
+        "bptt_horizon": 64,
+        **trained
+    }))
+    monkeypatch.setattr(aim_eval, "build_policy_hero", lambda *a: None)
+    out = tmp_path / "hitboxes.rrd"
+    assert replay.main([hero, "--out", str(out), *argv]) == 0
+    assert seen["hitboxes"] is want
+    warned = [ln for ln in capsys.readouterr().out.splitlines() if "hitboxes: run" in ln]
+    trained_on = aim_eval.trained_hitboxes(trained)
+    assert len(warned) == (hero != "oracle" and want != trained_on), warned
+    ran = EnvConfig().hitboxes if want is None else want
+    model = "capsule hitboxes" if ran else "legacy ellipsoid"
+    assert f"; hit model {model}" in out.with_suffix(".txt").read_text()
 
 
 def test_default_path_names_the_run():
@@ -216,7 +261,8 @@ def test_a_checkpoint_plays_aim_eval_policy_cell(tmp_path):
                                  seed=SEED,
                                  opponents={OPP: aim_eval.OPPONENTS[OPP]},
                                  modes=((aim, lstm), ),
-                                 accuracy=aim_eval.trained_accuracy(cfg))["cells"][0]
+                                 accuracy=aim_eval.trained_accuracy(cfg),
+                                 hitboxes=aim_eval.trained_hitboxes(cfg))["cells"][0]
         res = replay.save(str(ckpt), OPP, ROUNDS, SEED, tmp_path / f"{aim}.rrd", aim, lstm)
         assert res["per_episode"] == cell["per_episode"], (aim, lstm)
         assert res["warnings"] == []
