@@ -166,11 +166,11 @@ def widen_sim_v3_encoder(state_dict):
     other width, comes back unchanged with False (an older schema then fails loudly at
     the caller's load, as before).
 
-    WHY zero columns: the widened Linear computes exactly what the old one did on the old
-    features, whatever the new features hold, so a fine-tune starts from the checkpoint's
-    own behaviour and the velocity weights are learned from zero. Measured on CPU (lane H
-    H-Q1): bit-identical outputs for batches of 2 or more rows; a 1-row batch differs in
-    the last float bit (another summation order).
+    WHY zero columns: in exact arithmetic the widened Linear computes what the old one did
+    on the old features, whatever the new features hold, so a fine-tune starts from the
+    checkpoint's own behaviour and the velocity weights are learned from zero. Measured on
+    CPU with the F2x checkpoint's encoder (lane H H-Q1): bit-identical outputs for batches
+    of 2 to 2560 rows; a 1-row batch differs by up to 1.8e-7 (another summation order).
 
     PITFALLS:
       * Its callers are the sites that load an RL checkpoint into a policy built for the
