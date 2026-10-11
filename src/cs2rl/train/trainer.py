@@ -48,6 +48,7 @@ from cs2rl.eval.walker import H_MOVE, TRAIN_MIX, TRAIN_WEIGHTS, RandomWalker
 from cs2rl.policy import _MASK_HEAD_SLICES, _hybrid_sample_logits
 from cs2rl.spec.action import ACTION_HEAD_NAMES, ACTION_HEAD_SIZES, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.train.config import SCRIPTED_OPPONENT_MODES
+from cs2rl.train.duel_opponent import OUTCOMES as DUEL_OUTCOMES
 from cs2rl.train.duel_opponent import DuelOpponent, duel_rngs
 from cs2rl.train.entropy import WS_GRACE, WS_OFF, warmstart_entropy_state
 from cs2rl.train.resume import _atomic_save_state_dict, collect_train_state
@@ -1652,6 +1653,13 @@ class Cs2PuffeRL(PuffeRL):
             # environment/episodes. A one-element list: np.mean of it is the count.
             # `.get`: a defaultdict(list) read would insert [] and np.mean([]) is NaN.
             self.stats["episodes"] = [float(len(self.stats.get("kills_t", ())))]
+            # --opponent duel: the hero's rounds per mix level and outcome since the last
+            # logged row, as counts (one-element lists, like episodes).
+            if self._opponent_duel is not None:
+                counts = self._opponent_duel.pop_counts()
+                for level in range(len(counts)):
+                    for k, outcome in enumerate(DUEL_OUTCOMES):
+                        self.stats[f"duel/L{level}/{outcome}"] = [float(counts[level, k])]
             logs = self.mean_and_log()
             self.losses = losses
             self.print_dashboard()

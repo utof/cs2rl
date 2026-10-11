@@ -430,6 +430,14 @@ REGISTRY.update({
         "isinstance(v, (int, float)) persist filter drops it, so it never reaches "
         "metrics.jsonl. Registered because it IS written to the info dict — an "
         "unregistered write is exactly what this file exists to make impossible."),
+    "environment/duel/L*/*":
+    _f(
+        "last", "count", (), (),
+        "--opponent duel only (cs2rl.train.duel_opponent): the hero's finished rounds "
+        "against level i of config.json's duel_mix, by outcome win / loss / double (both "
+        "died on one tick) / timeout, since the last logged row. ONE-ELEMENT-LIST writes "
+        "in trainer.Cs2PuffeRL._log_and_checkpoint, so each is a COUNT, as "
+        "environment/episodes. OPEN: the number of levels is the run's mix length."),
 })
 
 # environment/action_* — per-bin action histograms, one f-string family per head.
