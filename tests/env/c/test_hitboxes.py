@@ -9,11 +9,13 @@ WHAT IS PINNED (T1-T10 of the #391 brief), and the knock-out each one caught:
     the head hits exactly where the reference says, and every hit counts as the head.
     Caught: the eye left at 48 under hitboxes; a head hit counted as the neck.
   * T3 pinned pitch, standing vs crouched: 0 hits and every shot stance-blocked; with the
-    pitch aimed at the crouched head's midpoint the shot hits the head.
+    pitch aimed at the crouched head's midpoint the shot hits the head, at five target facings.
     Caught: the stand pose used for a crouched target; the stand pose's z band in the
-    stance-blocked counter.
+    stance-blocked counter; the world-to-agent rotation reversed in C or in target_xyz (red at
+    the four facings other than pi).
   * T4 damage: a rifle head through a helmet kills from 100 hp at 200 u and leaves 1 hp at
-    360 u; a leg hit leaves armor untouched. Caught: legs armored; head multiplier 3.9.
+    360 u (at five target facings); a leg hit leaves armor untouched.
+    Caught: legs armored; head multiplier 3.9; the ray direction's rotation reversed in C.
   * T5 the helmet rule: without a helmet the head takes unarmored damage (a kill at 360 u,
     armor untouched); with one, armor applies. Caught: the head armored without the helmet
     check; the helmet check inverted.
@@ -22,7 +24,9 @@ WHAT IS PINNED (T1-T10 of the #391 brief), and the knock-out each one caught:
   * T7 the neck rule: a neck-first ray that goes on into the head is the head, one that does
     not stays the neck. Caught: the rule dropped; the rule applied without the head test.
   * T8 sum(hits_*) == shots_hit in both models, every counter reached under hitboxes and the
-    roll's four on the ellipsoid. Caught: a hit counted twice; the arm groups not counted.
+    roll's four on the ellipsoid; under hitboxes each shot's counter is the reference region's
+    group. Caught: a hit counted twice; the arm groups not counted; the world-to-agent
+    rotation reversed in C.
   * T9 the table's invariants: 2 poses x 18 regions, r > 0, the CS hit groups, the stand
     and crouch tops of the CS:GO hull, and both CS eyes inside their pose's head.
     Caught: the crouch eye moved below the head; a region's group set to generic (0).
@@ -63,6 +67,20 @@ TABLE = binding.hitbox_table()
 GROUP = dict(zip(TABLE["names"], TABLE["groups"], strict=True))
 HITGROUP_LEGS = {GROUP["thigh_l"], GROUP["thigh_r"]}
 HIT_COUNTERS = ("hits_head", "hits_neck", "hits_chest", "hits_stomach", "hits_arm", "hits_leg")
+COUNTER_OF_GROUP = {
+    GROUP["head"]: "hits_head",
+    GROUP["neck"]: "hits_neck",
+    GROUP["chest"]: "hits_chest",
+    GROUP["stomach"]: "hits_stomach",
+    GROUP["upper_arm_l"]: "hits_arm",
+    GROUP["upper_arm_r"]: "hits_arm",
+    GROUP["thigh_l"]: "hits_leg",
+    GROUP["thigh_r"]: "hits_leg"
+}
+# Target facings of the aimed-shot tests. At facing pi (_place's default) sin(facing) is 0 to
+# float32, so a world-to-agent rotation of the wrong sense is invisible there; T3's crouched-head
+# aim shows it at the others.
+TARGET_FACINGS = (math.pi, 0.5, 1.5, 2.5, 4.0)
 
 
 def _env(hitboxes=True, pin_pitch=0):
@@ -153,8 +171,10 @@ def _seeded_rays(n, seed):
     rd /= np.linalg.norm(rd, axis=1, keepdims=True)
     c, s = np.cos(-facing), np.sin(-facing)
     rel = ro - np.stack([d, np.zeros(n), np.zeros(n)], 1)
-    rot = lambda v: np.stack([v[:, 0] * c - v[:, 1] * s, v[:, 0] * s + v[:, 1] * c, v[:, 2]], 1
-                             )                                                                  # noqa: E731
+
+    def rot(v):
+        return np.stack([v[:, 0] * c - v[:, 1] * s, v[:, 0] * s + v[:, 1] * c, v[:, 2]], 1)
+
     return pose, rot(rel), rot(rd)
 
 
@@ -277,8 +297,9 @@ def test_t3_a_pinned_standing_shot_cannot_reach_a_crouched_target():
         env.close()
 
 
-def test_t3_a_shot_aimed_at_the_crouched_head_midpoint_hits_the_head(env):
-    _place(env, 360.0)
+@pytest.mark.parametrize("facing", TARGET_FACINGS)
+def test_t3_a_shot_aimed_at_the_crouched_head_midpoint_hits_the_head(env, facing):
+    _place(env, 360.0, facing)
     t = env._c_env.game.agents[5]
     point = hit_geometry(True).target_xyz(t.x, t.y, t.z, t.facing, True)
     ss = _shoot(env, *_aim(env, point), crouch_target=True)
@@ -288,8 +309,8 @@ def test_t3_a_shot_aimed_at_the_crouched_head_midpoint_hits_the_head(env):
 # ── T4, T5 ────────────────────────────────────────────────────────────────────────────────────
 
 
-def _head_shot(env, d, **kw):
-    _place(env, d)
+def _head_shot(env, d, facing=math.pi, **kw):
+    _place(env, d, facing)
     t = env._c_env.game.agents[5]
     ss = _shoot(env, *_aim(env,
                            hit_geometry(True).target_xyz(t.x, t.y, t.z, t.facing, False)), **kw)
@@ -297,12 +318,13 @@ def _head_shot(env, d, **kw):
     return t
 
 
-def test_t4_a_rifle_head_through_a_helmet_kills_at_200_and_leaves_1_hp_at_360(env):
+@pytest.mark.parametrize("facing", TARGET_FACINGS)
+def test_t4_a_rifle_head_through_a_helmet_kills_at_200_and_leaves_1_hp_at_360(env, facing):
     """#391 phase 1 5.4: 100.41 hp at 200 u and 99.60 at 360 u (34.5 x 4 x 0.975^(d/500)
     x 0.735 armor_pen). The entry distance is a few units under d, which raises both a little."""
-    t = _head_shot(env, 360.0)
+    t = _head_shot(env, 360.0, facing)
     assert (t.hp, t.alive) == (1, 1) and t.armor < 100
-    t = _head_shot(env, 200.0)
+    t = _head_shot(env, 200.0, facing)
     assert (t.hp, t.alive) == (0, 0)
 
 
@@ -383,11 +405,17 @@ def test_t7_a_neck_first_ray_counts_as_the_head_only_when_it_enters_the_head():
 def test_t8_the_group_counters_sum_to_shots_hit(hitboxes):
     """300 seeded shots at random body points (lateral [-20, 20] u, height [0, 75] u) of a
     target 300 to 500 u away at a random facing, standing or crouched. From 300 u no single
-    rifle hit kills a full-hp, helmeted target (a head through the helmet does 99.9 there)."""
+    rifle hit kills a full-hp, helmeted target (a head through the helmet does 99.9 there).
+    Under hitboxes each shot's counter is also checked against the numpy reference's region for
+    the same ray (rays at least 1e-2 u from a surface or a tie): this pins the C world-to-agent
+    rotation at the random facings, and the neck counter on every shot that enters the neck.
+    KNOWN LIMIT: the reached-all-six check below is seed-dependent (deterministic, not flaky): a
+    correct build hits the neck 0 times in 300 shots on 8 of seeds 0-19 (0 to 3 times on any),
+    so a new seed or a refitted table can turn it red without a defect."""
     env = _env(hitboxes=hitboxes)
     rng = np.random.default_rng(8)
     totals = dict.fromkeys(HIT_COUNTERS, 0)
-    hits = 0
+    hits = compared = 0
     try:
         for _ in range(300):
             _place(env, float(rng.uniform(300.0, 500.0)), float(rng.uniform(0.0, 2.0 * np.pi)))
@@ -397,13 +425,25 @@ def test_t8_the_group_counters_sum_to_shots_hit(hitboxes):
             hits += ss.shots_hit
             for k in HIT_COUNTERS:
                 totals[k] += getattr(ss, k)
+            if not hitboxes:
+                continue
+            o, dvec, pose = _local_ray(env, yaw, pitch)
+            region, _, margin = hitbox_ref.first_region(o[None], dvec[None], TABLE["caps"][pose],
+                                                        TABLE["head"], TABLE["neck"])
+            if margin[0] < 1e-2:
+                continue
+            compared += 1
+            want = [] if region[0] < 0 else [COUNTER_OF_GROUP[TABLE["groups"][region[0]]]]
+            got = [k for k in HIT_COUNTERS if getattr(ss, k)]
+            assert got == want, (got, want, t.facing, yaw, pitch)
     finally:
         env.close()
+    assert not hitboxes or compared > 250, compared    # known count: an emptied check cannot pass
     assert sum(totals.values()) == hits >= 60, (totals, hits)
     reached = {k for k, v in totals.items() if v}
     if hitboxes:
         assert reached == set(HIT_COUNTERS), totals
-    else:                              # the roll's four outcomes; no neck, no arm
+    else:                                              # the roll's four outcomes; no neck, no arm
         assert reached == {"hits_head", "hits_chest", "hits_stomach", "hits_leg"}, totals
 
 
