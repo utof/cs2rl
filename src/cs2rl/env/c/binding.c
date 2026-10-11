@@ -434,10 +434,10 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
                          (Py_ssize_t)offsetof(GameState, bomb),
                          "BombState_z_offset",
                          (Py_ssize_t)offsetof(BombState, z),
-                         "StepStats_reward_win_ct_offset",
-                         (Py_ssize_t)offsetof(StepStats, reward_win_ct),
-                         "Dust2Env_recoil_enabled_offset",
-                         (Py_ssize_t)offsetof(Dust2Env, recoil_enabled),
+                         "StepStats_cone_radius_sum_offset",
+                         (Py_ssize_t)offsetof(StepStats, cone_radius_sum),
+                         "Dust2Env_accuracy_rng_offset",
+                         (Py_ssize_t)offsetof(Dust2Env, accuracy_rng),
                          "Wall_kind_offset",
                          (Py_ssize_t)offsetof(Wall, kind),
                          "WallList_capacity_offset",
@@ -1018,7 +1018,9 @@ static PyObject* py_ground_at(PyObject* self, PyObject* args) {
  *      fails to compile here, but a NEW field is missing from the dict until
  *      it is added below.
  * KNOWN LIMIT: the scenario helpers' tests pin only type, mag_size, reserve_mags
- *      and cycle_ticks; the other five fields are exported but not pinned. */
+ *      and cycle_ticks; tests/env/c/test_accuracy.py pins every slot's four cone fields
+ *      and the rifle's move_speed. base_damage, armor_pen, reload_ticks, range_modifier
+ *      and the other slots' move_speed are exported but not pinned. */
 static PyObject* py_weapon_defs(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     (void)self;
     enum { N_WEAPON_DEFS = (int)(sizeof(WEAPON_DEFS) / sizeof(WEAPON_DEFS[0])) };
@@ -1026,26 +1028,34 @@ static PyObject* py_weapon_defs(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     if (!defs)
         return NULL;
     for (int s = 0; s < N_WEAPON_DEFS; s++) {
-        const WeaponDef* d   = &WEAPON_DEFS[s];
-        PyObject*        row = Py_BuildValue("{s:i,s:f,s:f,s:i,s:i,s:i,s:i,s:f,s:f}",
-                                             "type",
-                                             d->type,
-                                             "base_damage",
-                                             d->base_damage,
-                                             "armor_pen",
-                                             d->armor_pen,
-                                             "cycle_ticks",
-                                             (int)d->cycle_ticks,
-                                             "mag_size",
-                                             (int)d->mag_size,
-                                             "reserve_mags",
-                                             (int)d->reserve_mags,
-                                             "reload_ticks",
-                                             (int)d->reload_ticks,
-                                             "move_speed",
-                                             d->move_speed,
-                                             "range_modifier",
-                                             d->range_modifier);
+        const WeaponDef* d = &WEAPON_DEFS[s];
+        PyObject* row      = Py_BuildValue("{s:i,s:f,s:f,s:i,s:i,s:i,s:i,s:f,s:f,s:f,s:f,s:f,s:f}",
+                                           "type",
+                                           d->type,
+                                           "base_damage",
+                                           d->base_damage,
+                                           "armor_pen",
+                                           d->armor_pen,
+                                           "cycle_ticks",
+                                           (int)d->cycle_ticks,
+                                           "mag_size",
+                                           (int)d->mag_size,
+                                           "reserve_mags",
+                                           (int)d->reserve_mags,
+                                           "reload_ticks",
+                                           (int)d->reload_ticks,
+                                           "move_speed",
+                                           d->move_speed,
+                                           "range_modifier",
+                                           d->range_modifier,
+                                           "spread_mrad",
+                                           d->spread_mrad,
+                                           "inacc_stand_mrad",
+                                           d->inacc_stand_mrad,
+                                           "inacc_crouch_mrad",
+                                           d->inacc_crouch_mrad,
+                                           "inacc_move_mrad",
+                                           d->inacc_move_mrad);
         if (!row) {
             Py_DECREF(defs);
             return NULL;

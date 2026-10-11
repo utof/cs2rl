@@ -366,6 +366,16 @@ REGISTRY.update({
     _e("window-mean-pufferlib", "count", _GAME_METRICS),
     "environment/shots_stance_blocked":
     _e("window-mean-pufferlib", "count", _GAME_METRICS),
+    "environment/shots_fired_fast":
+    _e(
+        "window-mean-pufferlib", "count", (),
+        "Shots fired at or above 0.34 x the weapon's max speed (cs2_weapons.h "
+        "ACCURACY_RAMP_START_FRAC). Counted with the accuracy cone on or off."),
+    "environment/cone_radius_sum":
+    _e(
+        "window-mean-pufferlib", "radians", (),
+        "Sum of the accuracy cone's max radius over the episode's shots; 0 while "
+        "EnvConfig.accuracy is off. Divide by environment/shots_fired for the mean."),
     "environment/damage_dealt":
     _e("window-mean-pufferlib", "hp", _GAME_METRICS),
     "environment/mutual_vis_pair_ticks":

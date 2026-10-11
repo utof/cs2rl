@@ -168,6 +168,36 @@ static void build_vis_matrix(GameState* g, StaticData* sd, int8_t vis10[N_AGENTS
     }
 }
 
+/* accuracy_unit: one xorshift32 draw as a float in [0, 1), on 24 bits (exact in float). */
+static inline float accuracy_unit(uint32_t* rng) {
+    return (float)(xorshift32(rng) >> 8) * (1.0f / 16777216.0f);
+}
+
+/* accuracy_cone_ray — the movement-inaccuracy cone, applied to the unit ray d = (dx, dy, dz)
+ * that process_combat built from (yaw, pitch).
+ *
+ * WHAT: tilts d by an angle r in [0, R) toward an azimuth t uniform in [0, 2 pi):
+ *   d' = cos r d + sin r (cos t right + sin t up),
+ *   right = (sin yaw, -cos yaw, 0), up = (-sin pitch cos yaw, -sin pitch sin yaw, cos pitch),
+ * the two unit vectors perpendicular to d, so the angle between d' and d is exactly r and
+ * |d'| = 1. r = R u (ACCURACY_RADIUS_LAW 0) or R sqrt(u) (1), u uniform in [0, 1).
+ * Two draws from *rng per call, u first.
+ * WHY a rotation, not yaw += r cos t and pitch += r sin t: the angle offsets tilt the ray by
+ * less than r once pitch is non-zero; the rotation is the same cone at every pitch.
+ * PITFALL: *rng must be env->accuracy_rng. A draw from env->rng would also move every later
+ * hit-location roll and the next round's spawns. */
+static inline void
+accuracy_cone_ray(float* dx, float* dy, float* dz, float yaw, float pitch, float R, uint32_t* rng) {
+    float u  = accuracy_unit(rng);
+    float t  = 2.0f * (float)M_PI * accuracy_unit(rng);
+    float r  = R * (ACCURACY_RADIUS_LAW ? sqrtf(u) : u);
+    float cy = cosf(yaw), sy = sinf(yaw), cp = cosf(pitch), sp = sinf(pitch);
+    float ct = cosf(t), st = sinf(t), cr = cosf(r), sr = sinf(r);
+    *dx = cr * *dx + sr * (ct * sy - st * sp * cy);
+    *dy = cr * *dy + sr * (-ct * cy - st * sp * sy);
+    *dz = cr * *dz + sr * (st * cp);
+}
+
 static void process_combat(Dust2Env*      env,
                            const int32_t* actions,
                            int8_t         vis10[N_AGENTS][N_AGENTS],
@@ -292,12 +322,19 @@ static void process_combat(Dust2Env*      env,
         if (def->mag_size > 0)
             a->ammo_clip[a->weapon_slot]--; /* consume one round */
 
+        /* The shooter's planar speed at the shot: process_movement has already run this
+         * tick, so a counter-strafe pressed this tick has slowed it (env_step order). */
+        float shot_speed = sqrtf(a->vx * a->vx + a->vy * a->vy);
+        int   shot_fast  = shot_speed >= ACCURACY_RAMP_START_FRAC * def->move_speed;
+
         /* ── R0-A shooter-side counters (spec §3). Scored against the
          * pre-combat nearest visible participating enemy `tgt` (or none). ── */
         int tgt = nearest_vis_enemy[i];
         if (a->participating) {
             ss->shots_fired++;
             es->shots_fired++;
+            ss->shots_fired_fast += shot_fast;
+            es->shots_fired_fast += shot_fast;
             if (tgt >= 0) {
                 AgentState* en = &g->agents[tgt];
                 float       rx = en->x - a->x, ry = en->y - a->y;
@@ -354,6 +391,20 @@ static void process_combat(Dust2Env*      env,
         float dx    = cos_p * cosf(ray_yaw);
         float dy    = cos_p * sinf(ray_yaw);
         float dz    = sin_p;
+
+        /* Movement-inaccuracy cone: the shot leaves on a cone around the aimed ray (punch
+         * included) whose radius grows with the shooter's speed (cs2_weapons.h). Off: no
+         * draw at all, so every RNG stream and every ray is the pre-cone sim's. The R0-A
+         * counters above score the AIM (a->facing), not this ray, so under the cone
+         * shots_hit < shots_on_target is expected. */
+        if (env->accuracy_enabled) {
+            float cone_r = accuracy_cone_radius(def, a->is_crouching, shot_speed);
+            accuracy_cone_ray(&dx, &dy, &dz, ray_yaw, ray_pitch, cone_r, &env->accuracy_rng);
+            if (a->participating) {
+                ss->cone_radius_sum += cone_r;
+                es->cone_radius_sum += cone_r;
+            }
+        }
 
         if (env->recoil_enabled) {
             /* After d is built, before the enemy loop — misses still kick. */

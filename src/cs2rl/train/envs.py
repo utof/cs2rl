@@ -435,12 +435,12 @@ def assert_eval_env_agreement(eval_env, driver_env):
           reads the frozen config object. The two agreement checks above go
           through env._c_env.sd.contents; this one never touches ctypes.
       (b) every EnvConfig field except reward_symmetrize, read off the two
-          objects' `.config`. This is INTENT, and it covers the 27 scalars
+          objects' `.config`. This is INTENT, and it covers the 28 scalars
           (a) cannot see — the 23 reward weights (no attribute of the env
-          exposes them) plus the four knobs that are fields but not attributes
-          of the env. (EnvConfig has 11 fields; (b) compares 10 of them, and
-          the four non-attribute knobs are pbrs_gamma, recoil, laser_range and
-          max_turn_speed. 23 + 4 = 27; MEASURE this again if a field is ever
+          exposes them) plus the five knobs that are fields but not attributes
+          of the env. (EnvConfig has 12 fields; (b) compares 11 of them, and
+          the five non-attribute knobs are pbrs_gamma, recoil, accuracy,
+          laser_range and max_turn_speed. 23 + 5 = 28; MEASURE this again if a field is ever
           added, and do not write a number here you have not counted off
           dataclasses.fields.)
 
@@ -494,10 +494,10 @@ def assert_eval_env_agreement(eval_env, driver_env):
     handles that by demanding the MESSAGE rather than just a raise: it differs
     EVERY EnvConfig field, one per parametrized case, and requires `on <knob>`
     (which is (a)'s spelling, and which (b)'s `on config.<knob>` does not contain)
-    for the five names below, `on config.<field>` for the five fields that are
+    for the five names below, `on config.<field>` for the six fields that are
     outside the tuple and still compared by (b) — rewards, pbrs_gamma, recoil,
-    laser_range, max_turn_speed — and NO raise for reward_symmetrize, the sixth
-    field outside the tuple and the one (b) skips. Those five are the only cases
+    accuracy, laser_range, max_turn_speed — and NO raise for reward_symmetrize, the
+    seventh field outside the tuple and the one (b) skips. Those six are the only cases
     that can come from (b) alone, so they are what makes a widened skip list
     above visible. Before that parametrization the test differed two fields, and
     widening the skip list to nine left it green (re-measured 2026-09-04 against

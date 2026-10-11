@@ -118,10 +118,16 @@ def play(hero: str,
     import torch
     policy, cfg = aim_eval.load_checkpoint(hero)
     actor = aim_eval.build_policy_hero(policy, aim, lstm, int(cfg["bptt_horizon"]))
+    accuracy = aim_eval.trained_accuracy(cfg)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
-        res = L0.run_check(rounds, seed, opponent=make_opp(seed), hero=actor, on_step=on_step)
-    return res, aim_eval.env_mismatches(cfg)
+        res = L0.run_check(rounds,
+                           seed,
+                           opponent=make_opp(seed),
+                           hero=actor,
+                           on_step=on_step,
+                           accuracy=accuracy)
+    return res, aim_eval.env_mismatches(cfg, accuracy)
 
 
 def save(hero: str,

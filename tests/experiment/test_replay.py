@@ -167,7 +167,8 @@ def test_a_checkpoint_plays_aim_eval_policy_cell(tmp_path):
                                  episodes=ROUNDS,
                                  seed=SEED,
                                  opponents={OPP: aim_eval.OPPONENTS[OPP]},
-                                 modes=((aim, lstm), ))["cells"][0]
+                                 modes=((aim, lstm), ),
+                                 accuracy=aim_eval.trained_accuracy(cfg))["cells"][0]
         res = replay.save(str(ckpt), OPP, ROUNDS, SEED, tmp_path / f"{aim}.rrd", aim, lstm)
         assert res["per_episode"] == cell["per_episode"], (aim, lstm)
         assert res["warnings"] == []

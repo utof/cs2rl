@@ -140,7 +140,7 @@ EMITTER_SITES = (
 # otherwise gets redone from scratch by every reviewer — three of the six
 # pre-#204 entries look exactly like emitters to a grep (`metrics[...]`,
 # `summary = {...}`, `stats = {...}` with the same bare key names cs2_env uses)
-# and are not. The last three are experiment and BC-demo code in src/cs2rl/ (#204 moved
+# and are not. The last four are experiment and BC-demo code in src/cs2rl/ (#204 moved
 # the first two there; aim_eval was written there), which puts them inside this sweep: each
 # writes into a container that shares a NAME with an island container (`stats`, `out`), and
 # none is a row.
@@ -200,6 +200,12 @@ NON_ISLAND_WRITES = (
         "An OFFLINE eval report: one cell's miss summary, which aim_eval prints and writes "
         "to the --json file its caller names, from scripted rounds it plays itself. It never "
         "reaches a training row. Hit only because `out` is also an island container name."),
+    NonIslandWrite(
+        "experiment/aim_eval.py", "main",
+        "The same OFFLINE eval report, whole: main records where the cone setting came from "
+        "(`accuracy_source`: the run's config.json or --accuracy) for the header it prints and "
+        "the --json file. It never reaches a training row. Hit only because `out` is also an "
+        "island container name."),
 )
 
 # Non-literal dicts merged into an island container that resolve, one hop back, to
