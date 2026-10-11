@@ -21,7 +21,9 @@
 /* bomb_carrier / bomb_on_ground / bomb_planted — the bomb lifecycle queries. */
 #include "cs2_bomb.h"
 
-#define PLAYER_EYE_HEIGHT 64.0f  /* eye height above agent.z in world units */
+/* The camera and sound heights take the sim's eye, agent_eye_height (cs2_combat.h): 64 / 46
+ * under the hitbox model, 48 / 24 on the legacy ellipsoid, the height the agent shoots from
+ * (#391; this file had its own 64 for both stances until then). */
 #define WALL_HEIGHT       128.0f /* wall extrusion height                   */
 #define WALL_DEPTH        8.0f   /* wall thickness                          */
 #define MOUSE_SENSITIVITY 0.002f /* rad/px — tuned with raw per-frame pixel deltas */
@@ -246,9 +248,10 @@ static void _demo_load_voices(Client* cl, const char* resource_dir) {
  * Listener is cl->camera. Event is sim (x,y,z) → raylib (x, z, y).
  * max_dist is scaled to this map (~2000 u); the official sample uses 1.0
  * because its scene is a 10-unit grid. */
-static void _demo_set_spatial(Client* cl, Sound snd, float sx, float sy, float sz, float max_dist) {
+static void _demo_set_spatial(
+    Client* cl, const Dust2Env* env, Sound snd, float sx, float sy, float sz, float max_dist) {
     float px   = sx;
-    float py   = sz + PLAYER_EYE_HEIGHT;
+    float py   = sz + agent_eye_height(env, 0); /* events carry no stance: standing */
     float pz   = sy;
     float dx   = px - cl->camera.position.x;
     float dy   = py - cl->camera.position.y;
@@ -300,7 +303,8 @@ static void _demo_set_spatial(Client* cl, Sound snd, float sx, float sy, float s
 }
 
 /* Play one voice at a sim-space point via the next alias slot. */
-static void _demo_play_at(Client* cl, int voice, float x, float y, float z, float max_dist) {
+static void _demo_play_at(
+    Client* cl, const Dust2Env* env, int voice, float x, float y, float z, float max_dist) {
     int i;
     if (!cl->audio_ok || voice < 0 || voice >= DEMO_VOICE_N || !cl->snd_ok[voice])
         return;
@@ -312,7 +316,7 @@ static void _demo_play_at(Client* cl, int voice, float x, float y, float z, floa
     cl->alias_cursor  = (i + 1) % DEMO_ALIAS_N;
     if (!IsSoundValid(cl->alias_pool[i]))
         return;
-    _demo_set_spatial(cl, cl->alias_pool[i], x, y, z, max_dist);
+    _demo_set_spatial(cl, env, cl->alias_pool[i], x, y, z, max_dist);
     PlaySound(cl->alias_pool[i]);
 }
 
@@ -357,8 +361,8 @@ Client* make_client(Dust2Env*    env,
     cl->camera.fovy       = 70.0f;
     cl->camera.projection = CAMERA_PERSPECTIVE;
     /* position/target updated each frame in update_camera() */
-    cl->camera.position = (Vector3){0.0f, PLAYER_EYE_HEIGHT, 0.0f};
-    cl->camera.target   = (Vector3){1.0f, PLAYER_EYE_HEIGHT, 0.0f};
+    cl->camera.position = (Vector3){0.0f, agent_eye_height(env, 0), 0.0f};
+    cl->camera.target   = (Vector3){1.0f, agent_eye_height(env, 0), 0.0f};
 
     /* Bake the solid faces. build_solids_from_rooms reads sd->area_bounds,
      * which is why the assignment above must come first; it is the one and
@@ -511,8 +515,8 @@ static void update_camera(Client* cl, Dust2Env* env, float alpha) {
 
     /* Map sim(x,y,z) → Raylib(x,z_rl,y_rl) */
     float eye_x = px;
-    float eye_y = pz + PLAYER_EYE_HEIGHT; /* Raylib Y = height */
-    float eye_z = py;                     /* Raylib Z = sim Y  */
+    float eye_y = pz + agent_eye_height(env, env->game.agents[idx].is_crouching); /* Raylib Y */
+    float eye_z = py; /* Raylib Z = sim Y  */
 
     /* Look dir = aim + sim punch. Clamp the *look* pitch only. */
     float look_yaw   = cl->yaw + env->game.agents[idx].punch_yaw;

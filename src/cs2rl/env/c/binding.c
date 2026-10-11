@@ -386,7 +386,7 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     (void)self;
     return Py_BuildValue("{s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,s:n,"
                          "s:n,s:i,s:i,s:i,s:i,"
-                         "s:i,s:i,s:i,s:i,s:i}",
+                         "s:i,s:i,s:i,s:i,s:i,s:i,s:i}",
                          "AgentState",
                          (Py_ssize_t)sizeof(AgentState),
                          "BombState",
@@ -434,10 +434,10 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
                          (Py_ssize_t)offsetof(GameState, bomb),
                          "BombState_z_offset",
                          (Py_ssize_t)offsetof(BombState, z),
-                         "StepStats_cone_radius_sum_offset",
-                         (Py_ssize_t)offsetof(StepStats, cone_radius_sum),
-                         "Dust2Env_accuracy_rng_offset",
-                         (Py_ssize_t)offsetof(Dust2Env, accuracy_rng),
+                         "StepStats_hits_leg_offset",
+                         (Py_ssize_t)offsetof(StepStats, hits_leg),
+                         "Dust2Env_hit_model_offset",
+                         (Py_ssize_t)offsetof(Dust2Env, hit_model),
                          "Wall_kind_offset",
                          (Py_ssize_t)offsetof(Wall, kind),
                          "WallList_capacity_offset",
@@ -460,7 +460,12 @@ static PyObject* py_struct_sizes(PyObject* self, PyObject* Py_UNUSED(ignored)) {
                          "BOMB_DEFUSED",
                          BOMB_DEFUSED,
                          "BOMB_DETONATED",
-                         BOMB_DETONATED);
+                         BOMB_DETONATED,
+                         /* Dust2Env.hit_model values, mirrored in cs2_env.py. */
+                         "HIT_MODEL_HITBOXES",
+                         HIT_MODEL_HITBOXES,
+                         "HIT_MODEL_ELLIPSOID",
+                         HIT_MODEL_ELLIPSOID);
 }
 
 /* ── binding.static_data_layout() -> dict ──
@@ -1065,6 +1070,117 @@ static PyObject* py_weapon_defs(PyObject* self, PyObject* Py_UNUSED(ignored)) {
     return defs;
 }
 
+/* ── binding.hitbox_table() -> dict ──
+ * The hit models' geometry as the sim holds it: cs2_hitbox_table.h's capsules and cs2_hitboxes.h's
+ * eye heights, plus the legacy model's eye and torso heights (cs2_combat.h).
+ * Keys: "caps" (HB_N_POSES x HB_N_REGIONS rows of (ax, ay, az, bx, by, bz, r), agent-local
+ * (fwd, left, up), feet at the origin), "groups" (the CS HitGroup_t id per region), "names",
+ * "head" and "neck" (region indices), "bound_r", "bound_z0", "bound_z1" (per pose), "eye"
+ * ((stand, crouch), hitbox model), "legacy_eye" and "legacy_torso" ((stand, crouch)).
+ * WHY: Python aimers (eval.baselines' oracle, the harnesses, sim_fingerprint) need the eye and
+ *      the target point of whichever model the env runs. Reading them here means no Python
+ *      copy of a C number exists to drift (cs2rl.env.c.hit_model).
+ * PITFALL: floats go through Py_BuildValue's "f" (a C double of the float): the values are the
+ *      float32 table entries exactly, not their 4-decimal source text. */
+static PyObject* py_hitbox_table(PyObject* self, PyObject* Py_UNUSED(ignored)) {
+    (void)self;
+    PyObject* caps   = PyTuple_New(HB_N_POSES);
+    PyObject* groups = PyTuple_New(HB_N_REGIONS);
+    PyObject* names  = PyTuple_New(HB_N_REGIONS);
+    if (!caps || !groups || !names)
+        goto fail;
+    for (int p = 0; p < HB_N_POSES; p++) {
+        PyObject* rows = PyTuple_New(HB_N_REGIONS);
+        if (!rows)
+            goto fail;
+        PyTuple_SET_ITEM(caps, p, rows);
+        for (int i = 0; i < HB_N_REGIONS; i++) {
+            const float* c   = HB_CAPS[p][i];
+            PyObject*    row = Py_BuildValue("(fffffff)", c[0], c[1], c[2], c[3], c[4], c[5], c[6]);
+            if (!row)
+                goto fail;
+            PyTuple_SET_ITEM(rows, i, row);
+        }
+    }
+    for (int i = 0; i < HB_N_REGIONS; i++) {
+        PyObject* g = PyLong_FromLong(HB_GROUP[i]);
+        PyObject* n = PyUnicode_FromString(HB_REGION_NAMES[i]);
+        if (!g || !n) {
+            Py_XDECREF(g);
+            Py_XDECREF(n);
+            goto fail;
+        }
+        PyTuple_SET_ITEM(groups, i, g);
+        PyTuple_SET_ITEM(names, i, n);
+    }
+    /* "N" hands caps, groups and names to the dict without a new reference. */
+    return Py_BuildValue("{s:N,s:N,s:N,s:i,s:i,s:(ff),s:(ff),s:(ff),s:(ff),s:(ff),s:(ff)}",
+                         "caps",
+                         caps,
+                         "groups",
+                         groups,
+                         "names",
+                         names,
+                         "head",
+                         HB_REGION_HEAD,
+                         "neck",
+                         HB_REGION_NECK,
+                         "bound_r",
+                         HB_BOUND_R[HB_POSE_STAND],
+                         HB_BOUND_R[HB_POSE_CROUCH],
+                         "bound_z0",
+                         HB_BOUND_Z0[HB_POSE_STAND],
+                         HB_BOUND_Z0[HB_POSE_CROUCH],
+                         "bound_z1",
+                         HB_BOUND_Z1[HB_POSE_STAND],
+                         HB_BOUND_Z1[HB_POSE_CROUCH],
+                         "eye",
+                         HB_EYE_STAND,
+                         HB_EYE_CROUCH,
+                         "legacy_eye",
+                         EYE_HEIGHT_STAND,
+                         EYE_HEIGHT_CROUCH,
+                         "legacy_torso",
+                         TORSO_OFFSET_STAND,
+                         TORSO_OFFSET_CROUCH);
+fail:
+    Py_XDECREF(caps);
+    Py_XDECREF(groups);
+    Py_XDECREF(names);
+    return NULL;
+}
+
+/* ── binding.hitbox_first_region(pose, ox, oy, oz, dx, dy, dz) -> (region, t) ──
+ * cs2_hitboxes.h hb_local_region on an agent-local ray (the table's frame, feet at the
+ * origin): the region index the hit model gives the ray, neck rule and early-out included, and
+ * its entry distance; (-1, None) for a miss. d is normalised here, as process_combat's is by
+ * construction.
+ * WHY: the hit test is static inline C; tests/env/c/test_hitboxes.py compares this, the code
+ *      process_combat runs, against a numpy reference on seeded rays.
+ * PITFALL: pose must be HB_POSE_STAND or HB_POSE_CROUCH (ValueError otherwise), and a zero
+ *      direction is a ValueError, not a miss. */
+static PyObject* py_hitbox_first_region(PyObject* self, PyObject* args) {
+    (void)self;
+    int   pose;
+    float ox, oy, oz, dx, dy, dz;
+    if (!PyArg_ParseTuple(args, "iffffff", &pose, &ox, &oy, &oz, &dx, &dy, &dz))
+        return NULL;
+    if (pose < 0 || pose >= HB_N_POSES) {
+        PyErr_Format(PyExc_ValueError, "pose %d is not in [0, %d)", pose, HB_N_POSES);
+        return NULL;
+    }
+    float n = sqrtf(dx * dx + dy * dy + dz * dz);
+    if (!(n > 0.0f)) {
+        PyErr_SetString(PyExc_ValueError, "the ray direction has zero length");
+        return NULL;
+    }
+    float t      = 0.0f;
+    int   region = hb_local_region(pose, ox, oy, oz, dx / n, dy / n, dz / n, &t);
+    if (region < 0)
+        return Py_BuildValue("(iO)", region, Py_None);
+    return Py_BuildValue("(if)", region, t);
+}
+
 static PyMethodDef binding_methods[] = {
     {"init", py_init, METH_VARARGS, "Init env, return capsule"},
     {"reset", py_reset, METH_VARARGS, "Reset env"},
@@ -1095,6 +1211,14 @@ static PyMethodDef binding_methods[] = {
      METH_VARARGS,
      "(area_idx, surface z) the sim resolves for (x, y); (-1, None) off the mesh"},
     {"weapon_defs", py_weapon_defs, METH_NOARGS, "WEAPON_DEFS as one dict per weapon slot"},
+    {"hitbox_table",
+     py_hitbox_table,
+     METH_NOARGS,
+     "The hit models' geometry: the capsule table, groups, names, bounds and eye heights"},
+    {"hitbox_first_region",
+     py_hitbox_first_region,
+     METH_VARARGS,
+     "(region, t) the hitbox model gives an agent-local ray on a pose; (-1, None) on a miss"},
     {NULL, NULL, 0, NULL},
 };
 

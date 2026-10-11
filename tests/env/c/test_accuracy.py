@@ -6,7 +6,7 @@ WHAT IS PINNED, and the knock-out each one catches:
     off shot draws nothing from either RNG stream (the explicit-off identity: every pre-cone
     pin and reproduction that passes accuracy=False depends on it);
   * an on shot draws exactly two values from env->accuracy_rng and none from env->rng (the
-    shared stream also rolls hit locations and spawns);
+    shared stream places spawns and, on the legacy ellipsoid, rolls hit locations);
   * the units: the rifle row is the averaged AK-47/M4A4 research row, and C's per-shot radius
     is 0.001 x the mrad sum (rad), standing and at full speed;
   * the 0.34 x move_speed threshold, from both sides, and the crouch term;
@@ -19,7 +19,9 @@ WHAT IS PINNED, and the knock-out each one catches:
     The CLI flag itself is tests/train/test_train_cli.py::test_env_knob_cli_overrides_round_trip
     (its accuracy-off and accuracy-on rows) and test_env_knob_cli_defaults.
 
-SETUP: the arena duel map, one agent a side (rows 0 and 5), rifle drawn. The shooter is placed
+SETUP: the arena duel map, one agent a side (rows 0 and 5), rifle drawn, the LEGACY hit model
+(hitboxes=False, #391): the hit-rate integral and the pitched gate below are the ellipsoid's.
+The cone itself does not depend on the hit model. The shooter is placed
 so that AFTER this tick's ground friction it moves along -x at the wanted speed and is `dist`
 from the target, facing +x with pitch 0; the target's hp is reset to 1000 so it never dies.
 PITFALL: _pre_speed inverts cs2_movement.h's ground friction (friction 5.2, stopspeed 80) by
@@ -39,7 +41,7 @@ from tests._helpers.scenario import place_agent, ready_to_fire, set_clip, weapon
 
 DT = 1.0 / 16.0
 TARGET_X, LANE_Y = 560.0, 200.0
-HALF_W, HALF_H = 16.0, 36.0            # cs2_combat.h's standing hit ellipsoid semi-axes
+HALF_W, HALF_H = 16.0, 36.0            # cs2_combat.h's standing hit ellipsoid semi-axes (legacy)
 RAMP_START = 0.34
                                        # research-1c Q1 (CS:GO items_game, mrad): spread, inaccuracy_stand, _crouch, _move.
 AK47, M4A4 = (0.6, 6.41, 4.81, 175.06), (0.6, 4.9, 4.1, 137.88)
@@ -61,7 +63,8 @@ def _env(accuracy):
                                      crouch_enabled=1,
                                      jump_enabled=0,
                                      round_time=1_000_000,
-                                     accuracy=accuracy),
+                                     accuracy=accuracy,
+                                     hitboxes=False),
                     map_data=make_arena_duel_map(),
                     auto_reset=False,
                     seed=0)
@@ -244,7 +247,7 @@ def test_a_run_from_before_the_key_cannot_resume(tmp_path):
 # The pitched-tilt scene, make_simple_map: the shooter ends the step at area 5's centroid
 # (floor 0), the target stands on area 6 (floor 64), and the two see each other
 # (test_pitch.py's elevated-target pair). Eye and torso are both 48 u above the floor
-# (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND, cs2_combat.h).
+# (EYE_HEIGHT_STAND = TORSO_OFFSET_STAND, cs2_combat.h's legacy model, which this scene runs).
 PITCH_SHOOTER_XY, PITCH_TARGET_XY, EYE_TORSO_Z = (575.0, 352.0), (960.0, 304.0), 48.0
 
 
@@ -319,7 +322,8 @@ def test_a_pitched_shot_tilts_by_the_exact_rotation():
                                     crouch_enabled=1,
                                     jump_enabled=0,
                                     round_time=1_000_000,
-                                    accuracy=True),
+                                    accuracy=True,
+                                    hitboxes=False),
                    map_data=make_simple_map(),
                    auto_reset=False,
                    seed=0)

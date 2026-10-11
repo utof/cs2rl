@@ -44,7 +44,8 @@ KNOB_DEFAULTS = {
     "pbrs_gamma": 0.999,
     "reward_symmetrize": False,
     "recoil": False,
-    "accuracy": True,                                                                # owner decision 2026-10-09: on by default, closer to CS
+    "accuracy": True,                                                                            # owner decision 2026-10-09: on by default, closer to CS
+    "hitboxes": True,                                                                            # #391: the capsule hit model by default
     "n_active_per_team": 5,
     "pin_pitch": 0,
     "crouch_enabled": 1,
@@ -54,7 +55,7 @@ KNOB_DEFAULTS = {
     "max_turn_speed": None,
 }
 CONFIG_DICT_KEYS = sorted(DEFAULTS_AT_139a3a3) + sorted([
-    "pbrs_gamma", "reward_symmetrize", "accuracy", "n_active_per_team", "pin_pitch",
+    "pbrs_gamma", "reward_symmetrize", "accuracy", "hitboxes", "n_active_per_team", "pin_pitch",
     "crouch_enabled", "jump_enabled"
 ])
 
@@ -73,8 +74,8 @@ def test_defaults_equal_the_139a3a3_values():
     assert cfg.n_active_per_team == TEAM_SIZE == 5
 
 
-def test_knob_field_order_is_the_documented_eleven():
-    """Both sides are spellings of the eleven knobs; KNOB_FIELDS is derived from
+def test_knob_field_order_is_the_documented_twelve():
+    """Both sides are spellings of the twelve knobs; KNOB_FIELDS is derived from
     EnvConfig's fields, so this pins the ORDER and the names against a literal.
     """
     assert env_config.KNOB_FIELDS == tuple(KNOB_DEFAULTS)

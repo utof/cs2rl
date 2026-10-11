@@ -742,10 +742,22 @@ typedef struct {
      * both structs, cs2_combat.h). shots_fired_fast: shots fired at a planar speed >= 0.34 x
      * the weapon's move_speed (ACCURACY_RAMP_START_FRAC), counted whether or not
      * accuracy_enabled is set. cone_radius_sum: the summed cone radius (rad) the shots left on,
-     * 0 while accuracy_enabled is 0. Appended; cone_radius_sum is the struct tail
-     * (binding.c py_struct_sizes() and cs2_env.py _C_OFFSET_FIELDS anchor on it). */
+     * 0 while accuracy_enabled is 0. Appended; cone_radius_sum was the struct tail until the
+     * hit-group counters below were appended after it. */
     int32_t shots_fired_fast;
     float   cone_radius_sum;
+    /* Hits per CS hit group (#391), counted with shots_hit (participating shooters, both
+     * structs, cs2_combat.h through cs2_hitboxes.h hb_count_group), so the six sum to
+     * shots_hit. Under the hitbox model the group is the region the ray entered first; under
+     * the legacy ellipsoid it is the random roll's outcome (head, chest, stomach or leg; neck
+     * and arm stay 0). Appended; hits_leg is the struct tail (binding.c py_struct_sizes() and
+     * cs2_env.py _C_OFFSET_FIELDS anchor on it). */
+    int32_t hits_head;
+    int32_t hits_neck;
+    int32_t hits_chest;
+    int32_t hits_stomach;
+    int32_t hits_arm;
+    int32_t hits_leg;
 } StepStats;
 
 /* ── Full environment (one per parallel instance) ── */
@@ -778,13 +790,25 @@ typedef struct {
      * (Cs2Env writes it from EnvConfig.accuracy). 0 = today's exact ray, and no RNG draw;
      * 1 = every shot leaves on a cone around the ray (cs2_combat.h process_combat).
      * accuracy_rng is the cone's OWN xorshift32 stream, seeded by env_init. The shared
-     * env->rng also rolls hit locations and spawns, so a cone draw from it would move both
-     * on every shot. PITFALL: a C caller that skips env_init (cs2_demo.c memsets Dust2Env)
-     * leaves the stream at 0, where xorshift32 stays 0 and every cone draw is r = 0.
-     * Appended; accuracy_rng is the struct tail (the offsetof anchor). */
+     * env->rng also places spawns (and, under the legacy hit model, rolls hit locations), so
+     * a cone draw from it would move them on every shot. PITFALL: a C caller that skips env_init
+     * (cs2_demo.c memsets Dust2Env) leaves the stream at 0, where xorshift32 stays 0 and every cone
+     * draw is r = 0. Appended; accuracy_rng was the struct tail until hit_model was appended after
+     * it. */
     int32_t  accuracy_enabled;
     uint32_t accuracy_rng;
+    /* The hit model (#391): HIT_MODEL_HITBOXES, cs2_hitboxes.h's capsules at CS eye heights
+     * with no random draw, or HIT_MODEL_ELLIPSOID, the pre-#391 ellipsoid and hit-location
+     * roll at the legacy eye heights, kept for reproduction (cs2_combat.h process_combat,
+     * agent_eye_height). Set and kept like recoil_enabled: Cs2Env writes it from
+     * EnvConfig.hitboxes. HIT_MODEL_HITBOXES is 0, so a caller that memsets Dust2Env
+     * (cs2_demo.c) gets the hitboxes. Appended; hit_model is the struct tail (the offsetof
+     * anchor). */
+    int32_t hit_model;
 } Dust2Env;
+
+#define HIT_MODEL_HITBOXES  0
+#define HIT_MODEL_ELLIPSOID 1
 
 /* ── Angle utilities ────────────────────────────────────────────────────── */
 /* Batch 3: wrap a radian value into [-π, +π].

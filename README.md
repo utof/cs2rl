@@ -81,8 +81,10 @@ uv run rerun outputs/recordings/<the name it printed>.rrd
 - The hero is a checkpoint with its run's `config.json` beside it, `oracle` or `obs-oracle`.
   `--vs` is `statue`, `walker-4-16`, `walker-2-8-stop` or `heldout-24-48`.
 - Optional: `--rounds` (default 5), `--seed`, `--aim` (`sample` or `mean`), `--lstm`
-  (`carried` or `zeroed`), `--accuracy` (`0` or `1`: the movement-inaccuracy cone; default: a
-  checkpoint plays its run's own setting, a scripted hero the env default, on) and `--out`.
+  (`carried` or `zeroed`), `--accuracy` (`0` or `1`: the movement-inaccuracy cone),
+  `--hitboxes` (`0` or `1`: the legacy ellipsoid or the capsule hitboxes, #391) and `--out`. For
+  both switches a checkpoint plays its run's own setting and a scripted hero the env default
+  (cone on, capsule hitboxes).
 - Files go to `outputs/recordings/` (gitignored), with a per-tick text dump (`.txt`) beside each
   replay.
 - `python -m cs2rl.train --record` writes one episode of the run's map with the same recorder,
@@ -101,7 +103,8 @@ switching workspaces; there, press Ctrl+P and run "Next recording".
   `rerun --bind 127.0.0.1 FILE` keeps it local.
 
 Without a screen (agents): read the `.txt` dump (one block per round, then per tick both
-agents' positions, the hero's yaw error against the hit half-window, fired/hit and the
+agents' positions, the hero's yaw error against the on-target half-window (asin(16/d): a level
+shot's hit window on the legacy ellipsoid, wider than a hit under hitboxes), fired/hit and the
 opponent's hp), or render one frame with
 `uv run rerun --window-size 1280x720 --screenshot-to OUT.png FILE.rrd` and open the PNG. That
 command exits 102 after "Screenshot saved"; the PNG is still written.

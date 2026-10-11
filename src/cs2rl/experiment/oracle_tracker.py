@@ -33,7 +33,7 @@ read off the C state:
     walker's spawn to its last live position.
 
 WHY the motion checks: the oracle kills a statue and the walker alike (200/200 at
-median TTK 10 against both, 2026-10-09), so kills alone would pass a walker that never
+median TTK 10 against both on the legacy ellipsoid, 2026-10-09), so kills alone would pass a walker that never
 moves. A statue reads 0 on both checks, and so does a walker whose move bins are all
 0. The displacement floor also fails a walker that redraws its direction every tick:
 it moves on every tick but jitters in place (median 21 u against the walker's 94 u).
@@ -48,9 +48,11 @@ episode.
 
 WHAT IT DOES NOT CERTIFY
 ------------------------
-* LEAD. The walker is too slow to need it. Its p90 speed is 220 u/s, about 14 u per
-  tick, less than HIT_HALF_WIDTH (16 u, cs2_combat.h), so a shot aimed where the walker
-  was still hits. Measured on 2026-10-09: ``OracleActor`` with its velocity lead
+* LEAD. On the legacy ellipsoid (``--hitboxes 0``) the walker is too slow to need it. Its
+  p90 speed is 220 u/s, about 14 u per tick, less than HIT_HALF_WIDTH (16 u,
+  cs2_combat.h), so a shot aimed where the walker was still hits. The standing head a
+  hitbox shot aims at is 7.75 u wide front-on (#391), so under hitboxes that argument
+  does not hold. Measured on 2026-10-09, on the ellipsoid: ``OracleActor`` with its velocity lead
   switched off (``eval.baselines.TICK_DT = 0``) fired and hit exactly as often as
   with it (703 shots, 685 hits; the 18 misses match the statue run's 18), and
   ``ObsOracleActor``, which has no lead, matched it in every episode. A PASS here says
@@ -58,6 +60,14 @@ WHAT IT DOES NOT CERTIFY
   misses.
 * Occlusion, the last-known-position memory, a target that shoots back, crouching,
   jumping: the arena has permanent 2D LoS and the walker does none of the rest.
+
+UNDER THE HITBOX MODEL (the EnvConfig default since #391), measured at 200 episodes, seed 0,
+cone off: the ground-truth hero kills every walker at median TTK 4 (head shots) and hits
+0.772 of its shots; the obs-only hero, which has no lead, hits 0.264. Both FAIL the
+displacement floor (net_disp median 22.6 u and 0.0 u), because the walker dies before it
+walks 50 u. KNOWN LIMIT: MIN_NET_DISP_MEDIAN was calibrated on the ellipsoid (TTK 10);
+``--hitboxes 0`` is the L1 gate as calibrated, and re-deriving the floor for the hitbox
+model is open.
 * Anything about a POLICY. Like L0, this is a precondition on the env and the obs.
 
 PITFALLS
@@ -95,11 +105,12 @@ def run_tracker(episodes: int = 200,
                 seed: int = 0,
                 obs_only: bool = False,
                 opponent=None,
-                accuracy: bool | None = None) -> dict:
+                accuracy: bool | None = None,
+                hitboxes: bool | None = None) -> dict:
     """``oracle_statue.run_check`` against the walker (or ``opponent``, for knock-outs).
 
-    ``accuracy`` is run_check's movement-inaccuracy cone switch (None = the EnvConfig
-    default), so a pinned capture can say off explicitly.
+    ``accuracy`` and ``hitboxes`` are run_check's movement-inaccuracy cone and hit-model
+    switches (None = the EnvConfig default), so a pinned capture can say which explicitly.
     """
     if opponent is None:
         opponent = build_walker(seed)
@@ -107,7 +118,8 @@ def run_tracker(episodes: int = 200,
                         seed=seed,
                         obs_only=obs_only,
                         opponent=opponent,
-                        accuracy=accuracy)
+                        accuracy=accuracy,
+                        hitboxes=hitboxes)
 
 
 def verdict(res: dict) -> tuple[bool, list[tuple[str, bool, str]]]:
@@ -157,6 +169,10 @@ def format_report(res: dict) -> str:
         f"net_disp median {res['opp_net_disp_median']:.1f} u",
         f"unmatched vis slots      {res['unmatched_vis_slots']}",
     ]
+    # As in oracle_statue's report: printed only with hitboxes, so --hitboxes 0 reads as before.
+    if res.get("hitboxes"):
+        lines.append("hit model                capsule hitboxes (#391; --hitboxes 0 is the "
+                     "legacy ellipsoid)")
     if res["obs_only"]:
         lines += [
             f"obs blind ticks          {res['obs_blind_ticks']}",
@@ -191,11 +207,18 @@ def main(argv=None) -> int:
                     default=None,
                     help="the movement-inaccuracy cone (EnvConfig.accuracy): 1 on, 0 off. "
                     "Default: EnvConfig.accuracy.")
+    ap.add_argument("--hitboxes",
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="the hit model (EnvConfig.hitboxes): 1 the capsule hitboxes, 0 the legacy "
+                    "ellipsoid. Default: EnvConfig.hitboxes.")
     args = ap.parse_args(argv)
     res = run_tracker(episodes=args.episodes,
                       seed=args.seed,
                       obs_only=args.obs_only,
-                      accuracy=None if args.accuracy is None else bool(args.accuracy))
+                      accuracy=None if args.accuracy is None else bool(args.accuracy),
+                      hitboxes=None if args.hitboxes is None else bool(args.hitboxes))
     print(format_report(res))
     return 0 if verdict(res)[0] else 1
 

@@ -111,8 +111,15 @@ static void compute_masks(Dust2Env* env) {
          * v1c (gh #150) the hitbox is an ellipsoid with a 27u crouched / 36u
          * standing vertical semi-axis, so 24 ≤ 27 CONNECTS and the mismatch is
          * a margin cost, not a wall (tests/train/test_pitch_pin.py asserts exactly
-         * that). The mask STAYS anyway: Rung 1 deliberately keeps the action
-         * space minimal, and stance still eats parity margin the policy cannot
+         * that). That is the LEGACY hit model (HIT_MODEL_ELLIPSOID, which
+         * test_pitch_pin runs). KNOWN LIMIT (#391, #393): under the hitbox model,
+         * the default, the mismatch is a wall again. A level ray from a standing
+         * eye (64 u) passes above every capsule of a crouched target (its z band
+         * tops out at 55.2 u): 0 of 200000 random-yaw rays hit. So crouch must
+         * stay disabled while pitch is pinned, and this mask plus
+         * process_movement's guard are what keep it so. The mask STAYS anyway:
+         * Rung 1 deliberately keeps the action space minimal, and stance still
+         * eats parity margin the policy cannot
          * see. 5v5 keeps crouch (crouch_enabled defaults to 1, cs2_demo.c
          * forces 1 for the human player). Bin 0 (stand) stays valid so the head
          * keeps its per-head no-op invariant (see header comment).
@@ -389,8 +396,11 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
                 es->aim_delta_pitch_count  += 1;
             } else {
                 /* R0-E.2 (#131): flat maps — continuous_actions[i*AIM_DIM+1] is
-                 * IGNORED and pitch is held at 0 so the 3D hit test reduces to
-                 * yaw (rz = 0 for same-stance shots; see cs2_combat.h). The
+                 * IGNORED and pitch is held at 0, so every shot is a level ray
+                 * from the eye. On the legacy ellipsoid the 3D hit test then
+                 * reduces to yaw (rz = 0 for same-stance shots); under hitboxes
+                 * a same-stance level ray reaches only the head and neck
+                 * capsules (#391; see cs2_combat.h). The
                  * Welford pitch counters stay at 0 on purpose: a "pitch σ" of
                  * a dimension nobody consumes would read as a live signal in
                  * the metrics. Trainer side masks the pitch dim out of
@@ -398,9 +408,11 @@ static void env_step(Dust2Env* env, const int32_t* actions, const float* continu
                  * assert_pin_pitch_agreement() refuses a mismatch at startup.
                  * PITFALL: Rung 1 still runs crouch_enabled=0. The PRE-v1c
                  * reason ("a crouched target is |rz| = 24 > HIT_HALF_WIDTH =
-                 * 16, an unconditional miss") no longer holds — v1c (gh #150)
-                 * gives a crouched target a 27u vertical semi-axis, so 24
-                 * connects. The restriction survives to keep the Rung 1 action
+                 * 16, an unconditional miss") no longer holds on the legacy
+                 * ellipsoid — v1c (gh #150) gives a crouched target a 27u
+                 * vertical semi-axis, so 24 connects — but holds again under
+                 * hitboxes for a standing shooter (compute_masks' KNOWN LIMIT,
+                 * #393). The restriction survives to keep the Rung 1 action
                  * space minimal and because stance still costs parity margin
                  * the policy cannot observe. W5 (#156) went further: with
                  * crouch_enabled=0 the sim itself drops the press

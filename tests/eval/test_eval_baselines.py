@@ -313,29 +313,47 @@ def test_eval_interval_cli_config_and_modal_mirror():
     assert request.LIVE_TRAIN_OPTION_ARITY.get("--eval-interval") == 1
 
 
-def test_hit_geometry_constants_match_cs2_combat_h():
-    """F16 tripwire: eval.baselines vendors the C hit geometry (eye heights,
-    torso offsets) as Python literals — the oracle's LoS/aim math
-    silently diverges from the sim if either side is edited alone. Regex the
-    `static const float NAME = X.Yf;` declarations out of cs2_combat.h and
-    compare; a missing name is a failure too (renamed constant = same drift).
-    PITFALL: the header is the source of truth; fix eval/baselines.py, not the
-    regex, when this trips."""
-    import re
-
+def test_hit_geometry_is_read_from_the_c_table():
+    """F16, re-solved (#391): eval.baselines used to vendor the C eye heights and torso
+    offsets as Python literals, pinned by a regex over cs2_combat.h. The aimers now take
+    them from cs2rl.env.c.hit_model, which reads binding.hitbox_table(), so no mirror is
+    left to drift. Pinned: eval.baselines defines no EYE_*/TORSO_* name; both models'
+    numbers are the table's; the legacy ones are the pre-#391 48 / 24 (the reproduction
+    contract of --hitboxes 0); the hitbox aim point is the head capsule's axis midpoint."""
+    from cs2rl.env.c import binding
+    from cs2rl.env.c.hit_model import hit_geometry
     from cs2rl.eval import baselines as eb
 
-    header = (REPO_ROOT / "src" / "cs2rl" / "env" / "c" / "cs2_combat.h").read_text()
-    pattern = re.compile(r"static const float\s+(EYE_HEIGHT_STAND|EYE_HEIGHT_CROUCH|"
-                         r"TORSO_OFFSET_STAND|TORSO_OFFSET_CROUCH)\s*=\s*([0-9.]+)f")
-    found = {name: float(val) for name, val in pattern.findall(header)}
-    expected = {
-        "EYE_HEIGHT_STAND": eb.EYE_STAND,
-        "EYE_HEIGHT_CROUCH": eb.EYE_CROUCH,
-        "TORSO_OFFSET_STAND": eb.TORSO_STAND,
-        "TORSO_OFFSET_CROUCH": eb.TORSO_CROUCH,
-    }
-    missing = sorted(set(expected) - set(found))
-    assert not missing, f"not found as `static const float` in cs2_combat.h: {missing}"
-    for name, py_val in expected.items():
-        assert found[name] == py_val, f"{name}: cs2_combat.h={found[name]} eval.baselines={py_val}"
+    assert not [n for n in vars(eb) if n.startswith(("EYE_", "TORSO_"))]
+    table = binding.hitbox_table()
+    legacy, hb = hit_geometry(False), hit_geometry(True)
+    assert legacy.eye == tuple(table["legacy_eye"]) == (48.0, 24.0)
+    assert legacy.target == ((0.0, 0.0, 48.0), (0.0, 0.0, 24.0)) == tuple(
+        (0.0, 0.0, z) for z in table["legacy_torso"])
+    assert hb.eye == tuple(table["eye"])
+    for pose in (0, 1):
+        ax, ay, az, bx, by, bz, _r = table["caps"][pose][table["head"]]
+        assert hb.target[pose] == ((ax + bx) / 2, (ay + by) / 2, (az + bz) / 2)
+
+
+@pytest.mark.parametrize("hitboxes", [True, False])
+def test_snapshot_carries_the_c_hit_model(hitboxes):
+    """StateReader snapshots carry ``hitboxes`` read from Dust2Env.hit_model (not the
+    EnvConfig), the switch every aimer's hit_geometry takes. Overwriting the C field after
+    construction must show up: that is what "read live" means."""
+    from cs2rl.env.c.cs2_env import HIT_MODEL_ELLIPSOID, HIT_MODEL_HITBOXES, make_env
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.env.map import make_arena_duel_map
+    from cs2rl.eval.baselines import StateReader
+    env = make_env(map_data=make_arena_duel_map(),
+                   config=EnvConfig(hitboxes=hitboxes),
+                   auto_reset=False,
+                   seed=0)
+    try:
+        env.reset()
+        reader = StateReader(env)
+        assert reader.read().snapshot()["hitboxes"] is hitboxes
+        env._c_env.hit_model = HIT_MODEL_ELLIPSOID if hitboxes else HIT_MODEL_HITBOXES
+        assert reader.read().snapshot()["hitboxes"] is (not hitboxes)
+    finally:
+        env.close()

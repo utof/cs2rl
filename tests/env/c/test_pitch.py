@@ -4,6 +4,9 @@ Historical design: Batch 3.5, gh#24; current contract:
 docs/formats.md#observation-and-action
 Tests are split across T1 (constants + AgentState), T2 (consumption + Welford),
 T4 (obs slots), T5 (3D combat). Each test_X is tagged with the task that owns it.
+The T5 scenarios pin the LEGACY hit model (``EnvConfig(hitboxes=False)``, #391): their
+eye / torso arithmetic is cs2_combat.h's 48 / 48 and the ellipsoid. The hitbox model's
+3D shots are tests/env/c/test_hitboxes.py's.
 """
 
 import numpy as np
@@ -275,7 +278,7 @@ def test_3d_hit_at_correct_pitch_elevated_target():
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     from cs2rl.spec import action as spec
-    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(hitboxes=False), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # Area 5 (T-side, z=0) → area 6 (elevated z=64): vis[5][6]=True
@@ -316,7 +319,7 @@ def test_3d_miss_at_zero_pitch_elevated_target():
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     from cs2rl.spec import action as spec
-    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(hitboxes=False), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # Same area 5→6 geometry, but pitch=0 (wrong — horizontal, not upward)
@@ -383,7 +386,7 @@ def test_3d_hit_pitch_down_from_ramp():
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     from cs2rl.spec import action as spec
-    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(hitboxes=False), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # T-ramp → T-corridor (flat z=0); adj[13][5]=1 (ramp connection).
@@ -440,7 +443,7 @@ def test_3d_perp_perfectly_aligned_no_nan():
     from cs2rl.env.config import EnvConfig
     from cs2rl.env.map import make_simple_map
     from cs2rl.spec import action as spec
-    env = Cs2Env(config=EnvConfig(), map_data=make_simple_map())
+    env = Cs2Env(config=EnvConfig(hitboxes=False), map_data=make_simple_map())
     try:
         env.reset(seed=42)
         # Area 5→6: same geometry as the hit test — perfectly aimed

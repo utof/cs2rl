@@ -263,6 +263,12 @@ class BombPhase(IntEnum):
     DETONATED = 6
 
 
+# Dust2Env.hit_model's two values (cs2_types.h), pinned to the header through _C_MACROS:
+# the capsule hit model (#391, the default) and the legacy ellipsoid with its random roll.
+HIT_MODEL_HITBOXES = 0
+HIT_MODEL_ELLIPSOID = 1
+
+
 class BombStateC(ctypes.Structure):
     # Mirror of C BombState: phase plus the agent/progress/position that phase needs.
     # Write it through Cs2Env.give_bomb or by stepping the sim; binding.step raises on a
@@ -385,9 +391,16 @@ class StepStatsC(ctypes.Structure):
         ("reward_win_t", ctypes.c_float),
         ("reward_win_ct", ctypes.c_float),
                                                                        # Movement-inaccuracy diagnostics, appended (cs2_types.h).
-                                                                       # cone_radius_sum is the tail anchor (_C_OFFSET_FIELDS).
         ("shots_fired_fast", ctypes.c_int32),
         ("cone_radius_sum", ctypes.c_float),
+                                                                       # Hits per CS hit group (#391), appended (cs2_types.h); they
+                                                                       # sum to shots_hit. hits_leg is the tail anchor (_C_OFFSET_FIELDS).
+        ("hits_head", ctypes.c_int32),
+        ("hits_neck", ctypes.c_int32),
+        ("hits_chest", ctypes.c_int32),
+        ("hits_stomach", ctypes.c_int32),
+        ("hits_arm", ctypes.c_int32),
+        ("hits_leg", ctypes.c_int32),
     ]
 
 
@@ -439,6 +452,9 @@ class Dust2EnvC(ctypes.Structure):
                                                                        # make_env writes the switch the way it writes recoil_enabled.
         ("accuracy_enabled", ctypes.c_int32),
         ("accuracy_rng", ctypes.c_uint32),
+                                                                       # The hit model (#391): 0 = HIT_MODEL_HITBOXES, 1 = the legacy
+                                                                       # ellipsoid (cs2_types.h). make_env writes it like recoil_enabled.
+        ("hit_model", ctypes.c_int32),
     ]
 
 
@@ -527,13 +543,13 @@ _C_OFFSET_FIELDS = (
     # and sizeof are both blind to the bomb struct moving within GameStateC.
     (GameStateC, "bomb", "GameState_bomb_offset"),
     (BombStateC, "z", "BombState_z_offset"),
-    (StepStatsC, "cone_radius_sum", "StepStats_cone_radius_sum_offset"),
-    (Dust2EnvC, "accuracy_rng", "Dust2Env_accuracy_rng_offset"),
+    (StepStatsC, "hits_leg", "StepStats_hits_leg_offset"),
+    (Dust2EnvC, "hit_model", "Dust2Env_hit_model_offset"),
     (WallC, "kind", "Wall_kind_offset"),
     (WallListC, "capacity", "WallList_capacity_offset"),
 )
 # (struct_sizes() key -> Python value) — bare macros env/nav.py re-declares in
-# Python, and the BombPhase values (#164). Pin them to the header: the reward
+# Python, the BombPhase values (#164) and the two hit models (#391). Pin them to the header: the reward
 # views below slice rewards[:TEAM_SIZE], so a drift would mis-attribute every
 # team-spirit term rather than crash, and a renumbered phase would make every
 # BombPhase comparison read the wrong phase.
@@ -541,6 +557,8 @@ _C_MACROS = (
     ("TEAM_SIZE", TEAM_SIZE),
     ("N_AGENTS", N_AGENTS),
     *((f"BOMB_{_phase.name}", int(_phase)) for _phase in BombPhase),
+    ("HIT_MODEL_HITBOXES", HIT_MODEL_HITBOXES),
+    ("HIT_MODEL_ELLIPSOID", HIT_MODEL_ELLIPSOID),
 )
 # fmt: on
 
@@ -1203,6 +1221,9 @@ class Cs2Env(pufferlib.PufferEnv):
         # The movement-inaccuracy cone, the same way and for the same reason. Unlike recoil
         # it has a training flag (--accuracy, recorded as config.json "accuracy").
         self._c_env.accuracy_enabled = 1 if config.accuracy else 0
+        # The hit model (#391), the same way: cs2_hitboxes.h's capsules, or the legacy
+        # ellipsoid with its random hit-location roll (--hitboxes 0, config.json "hitboxes").
+        self._c_env.hit_model = HIT_MODEL_HITBOXES if config.hitboxes else HIT_MODEL_ELLIPSOID
         self._attach_area_bounds(map_data)
         self._bind_buffer_views()
         self._init_step_scratch(include_step_stats_in_info)
@@ -1774,6 +1795,13 @@ class Cs2Env(pufferlib.PufferEnv):
                                                                                          # radius in rad (0 with it off). Per-shot mean = sum / shots_fired.
             "shots_fired_fast": int(stats.shots_fired_fast),
             "cone_radius_sum": float(stats.cone_radius_sum),
+                                                                                         # Hits per CS hit group (#391); the six sum to shots_hit.
+            "hits_head": int(stats.hits_head),
+            "hits_neck": int(stats.hits_neck),
+            "hits_chest": int(stats.hits_chest),
+            "hits_stomach": int(stats.hits_stomach),
+            "hits_arm": int(stats.hits_arm),
+            "hits_leg": int(stats.hits_leg),
         })
         return summary
 

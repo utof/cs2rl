@@ -20,6 +20,11 @@ WHAT IS PINNED HERE
 * ``main``'s exit code follows the verdict.
 * ``--accuracy`` (unset, 1, 0) reaches oracle_statue.run_check through run_tracker as
   None, True, False, so a pinned capture can say off.
+* The observed-rate pins above (every kill, TTK 10 / 13, obs-only = ground truth, the
+  lead changing nothing, the CLI's PASS) were observed on the LEGACY ellipsoid and run it
+  (``hitboxes=False``, #391). Under the hitbox model the oracle kills faster (head shots)
+  and an unled shot misses more, so each of those moves (oracle_tracker's docstring has the
+  hitbox-model numbers).
 """
 import numpy as np
 import pytest
@@ -33,7 +38,7 @@ def _failing(checks):
 
 def test_the_oracle_kills_the_walker_in_every_episode():
     from cs2rl.experiment.oracle_tracker import run_tracker, verdict
-    res = run_tracker(episodes=200, seed=0)
+    res = run_tracker(episodes=200, seed=0, hitboxes=False)
     missed = [p for p in res["per_episode"] if p["ttk"] is None]
     assert not missed, f"seed 0 misses (replay with --episodes ep+1): {missed}"
     passed, checks = verdict(res)
@@ -74,8 +79,8 @@ def test_a_walker_that_redraws_every_tick_fails_the_displacement_floor():
 
 def test_obs_only_matches_ground_truth_in_every_episode():
     from cs2rl.experiment.oracle_tracker import run_tracker, verdict
-    truth = run_tracker(episodes=200, seed=0)
-    obs = run_tracker(episodes=200, seed=0, obs_only=True)
+    truth = run_tracker(episodes=200, seed=0, hitboxes=False)
+    obs = run_tracker(episodes=200, seed=0, obs_only=True, hitboxes=False)
     assert obs["obs_blind_ticks"] == 0
     keys = ("ttk", "shots_fired", "shots_hit")
     assert [[p[k] for k in keys] for p in obs["per_episode"]] == \
@@ -86,9 +91,9 @@ def test_obs_only_matches_ground_truth_in_every_episode():
 def test_switching_the_oracle_lead_off_changes_no_episode(monkeypatch):
     import cs2rl.eval.baselines as baselines
     from cs2rl.experiment.oracle_tracker import run_tracker
-    led = run_tracker(episodes=200, seed=0)
+    led = run_tracker(episodes=200, seed=0, hitboxes=False)
     monkeypatch.setattr(baselines, "TICK_DT", 0.0)
-    unled = run_tracker(episodes=200, seed=0)
+    unled = run_tracker(episodes=200, seed=0, hitboxes=False)
     assert unled["per_episode"] == led["per_episode"]
 
 
@@ -109,7 +114,7 @@ def test_the_table_logs_seed_episode_and_spawn_and_a_rerun_reproduces_it():
 def test_main_exit_code_follows_the_verdict(capsys, monkeypatch):
     from cs2rl.eval.baselines import IdleActor
     from cs2rl.experiment import oracle_tracker
-    assert oracle_tracker.main(["--episodes", "20"]) == 0
+    assert oracle_tracker.main(["--episodes", "20", "--hitboxes", "0"]) == 0
     assert capsys.readouterr().out.rstrip().splitlines()[-1].startswith("PASS")
     monkeypatch.setattr(oracle_tracker, "build_walker", lambda seed: IdleActor())
     assert oracle_tracker.main(["--episodes", "20", "--obs-only"]) == 1

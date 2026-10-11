@@ -30,13 +30,13 @@ The block between the two ``# ── vendored`` markers is copied from
 file's module docstring for the sim conventions it relies on: Δyaw relative /
 pitch absolute, env_step ordering, obs after reset() is all zeros (no longer
 true: since #157 env_reset computes the obs), a killed enemy reads invisible on
-its death tick). Edits after vendoring are limited to ``PolicyActor`` taking a
-live policy (+ ``from_policy``).
+its death tick). Edits after vendoring include ``PolicyActor`` taking a live policy
+(+ ``from_policy``), ``vis_from_obs``'s POST-VENDORING EDIT, and ``OracleActor``'s
+eye and aim point (``hit_geometry``, #391).
 
-* Geometry constants below MIRROR cs2_combat.h; the header is not exported
-  through the binding. If EYE_* / TORSO_* change there, the
-  oracle silently drifts — ``tests/eval/test_eval_baselines.py::test_oracle_never_blind``
-  and ``test_oracle_beats_random`` are the tripwires.
+* The eye heights and the aim point are the env's hit model's, read from C through
+  ``cs2rl.env.c.hit_model.hit_geometry(st["hitboxes"])`` (#391). Until #391 this module
+  held mirrors of cs2_combat.h's EYE_HEIGHT_* / TORSO_OFFSET_*, pinned by a regex test.
 * ``vis_from_obs`` MUST be threaded tick-to-tick (``vis_prev``): the oracle
   only fires when the target was visible on the previous tick's obs. Feeding
   None every tick degrades it to a walking, non-firing actor.
@@ -50,7 +50,8 @@ import math
 import numpy as np
 import torch
 
-from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl.env.c.cs2_env import HIT_MODEL_ELLIPSOID, N_AGENTS, TEAM_SIZE
+from cs2rl.env.c.hit_model import hit_geometry
 
 # The eval/* analysis contract, RE-EXPORTED. It used to be DEFINED in this file;
 # W4 moved it to the metrics registry so there is one authority for every key.
@@ -75,11 +76,6 @@ H_MOVE = ACTION_HEAD_NAMES.index("move")
 H_SHOOT = ACTION_HEAD_NAMES.index("shoot")
 H_RELOAD = ACTION_HEAD_NAMES.index("reload")
 
-# Geometry MIRRORS of cs2_combat.h's EYE_HEIGHT_* / TORSO_OFFSET_* (silent-drift
-# hazard): tests/eval/test_eval_baselines.py::test_hit_geometry_constants_match_cs2_combat_h
-# pins them equal.
-EYE_STAND, EYE_CROUCH = 48.0, 24.0
-TORSO_STAND, TORSO_CROUCH = 48.0, 24.0
 TICK_DT = 1.0 / 16.0
 
 
@@ -107,6 +103,7 @@ class StateReader:
                 "switch_ticks", "weapon_slot", "area_idx", "armor")
 
     def __init__(self, env):
+        self._c_env = env._c_env
         self._agents = env._c_env.game.agents
         self._game = env._c_env.game
         self.f = {k: np.zeros(N_AGENTS, dtype=np.float64) for k in self.FIELDS_F}
@@ -131,6 +128,8 @@ class StateReader:
         """Deep copy of the mutable arrays (the read buffers are reused).
 
         ``bomb_carrier`` (row, -1 for nobody) and ``bomb_pos`` are for cs2rl.viz.render's replays.
+        ``hitboxes`` is the hit model the C env runs (Dust2Env.hit_model, read live, not the
+        EnvConfig it was built from), for ``hit_geometry``: the aimers' eye and aim point.
         """
         return {
             **{
@@ -150,6 +149,7 @@ class StateReader:
             "bomb_carrier": self._game.bomb_carrier,
             "bomb_pos":
             (float(self._game.bomb.x), float(self._game.bomb.y), float(self._game.bomb.z)),
+            "hitboxes": int(self._c_env.hit_model) != HIT_MODEL_ELLIPSOID,
         }
 
 
@@ -411,18 +411,24 @@ class OracleActor:
         distance, approached along the nav graph.
       * Δyaw = wrap_pi(bearing_to_target − current facing), clamped to
         ±max_turn_speed exactly as C will clamp it.
-      * pitch = the absolute pitch that puts the ray on the target's torso
-        (given the full ±π/2 the C clamp permits — the ±max_turn_speed bound
-        on pitch is a property of the policy's tanh, not of the env).
+      * pitch = the absolute pitch that puts the ray on the hit model's aim point
+        (``hit_geometry``: the torso centre on the legacy ellipsoid, the head
+        capsule's midpoint in the target's pose and facing under hitboxes), given
+        the full ±π/2 the C clamp permits — the ±max_turn_speed bound on pitch is a
+        property of the policy's tanh, not of the env.
       * fire whenever the target is visible, in range, and the weapon is
         actually ready (fire_cd / reload / switch / ammo); reload when dry.
 
     One-tick velocity lead: the aim command is applied AFTER movement in
     env_step, so the target has already moved by the time process_combat
     runs. Positions are extrapolated by v·dt (dt = 1/16 s). Without it, a
-    target crossing at 220 u/s moves ~14 u per tick, most of the 16 u hit
-    half-width: an unled shot still connects, with little margin. Against the
-    #152 L1 walker (p90 speed 220 u/s) switching the lead off lost no hit.
+    target crossing at 220 u/s moves ~14 u per tick, most of the legacy
+    ellipsoid's 16 u hit half-width: an unled shot still connects, with little
+    margin. Against the #152 L1 walker (p90 speed 220 u/s) switching the lead off
+    lost no hit (measured on the ellipsoid; the standing head a hitbox shot aims
+    at is 7.75 u wide front-on, #391). The target's facing is not led: a turn this
+    tick swings the head point around the target's axis on a circle of radius
+    2.3 u standing, 6.2 u crouched (cs2_hitbox_table.h).
 
     Movement is coupled to aim by the sim (process_movement rotates the
     facing-local bin by a->facing), so "walk to the waypoint" necessarily
@@ -449,21 +455,21 @@ class OracleActor:
         x, y, z = st["x"], st["y"], st["z"]
         vx, vy = st["vx"], st["vy"]
         alive, team, crouch = st["alive"], st["team"], st["is_crouching"]
+        geo = hit_geometry(st["hitboxes"])
         area = st["area_idx"]
         vis = vis_prev if vis_prev is not None else np.zeros((N_AGENTS, N_AGENTS), dtype=bool)
 
         for i in range(N_AGENTS):
             if not alive[i]:
                 continue
-            eye_z = z[i] + (EYE_CROUCH if crouch[i] else EYE_STAND)
+            eye_z = geo.eye_z(z[i], crouch[i])
             best_j, best_d, best_vis = -1, 1e30, False
             for j in enemy_range(int(team[i])):
                 if not alive[j]:
                     continue
                 # 1-tick lead: where the target will be when combat runs.
-                tx = x[j] + vx[j] * TICK_DT
-                ty = y[j] + vy[j] * TICK_DT
-                tz = z[j] + (TORSO_CROUCH if crouch[j] else TORSO_STAND)
+                tx, ty, tz = geo.target_xyz(x[j] + vx[j] * TICK_DT, y[j] + vy[j] * TICK_DT, z[j],
+                                            st["facing"][j], crouch[j])
                 d = math.sqrt((tx - x[i])**2 + (ty - y[i])**2 + (tz - eye_z)**2)
                 seen = bool(vis[i, j])
                 # Prefer any visible enemy over any invisible one; break ties
@@ -478,9 +484,8 @@ class OracleActor:
             j = best_j
             engage = best_vis and best_d <= self.laser_range
             if engage:
-                aim_x = x[j] + vx[j] * TICK_DT
-                aim_y = y[j] + vy[j] * TICK_DT
-                aim_z = z[j] + (TORSO_CROUCH if crouch[j] else TORSO_STAND)
+                aim_x, aim_y, aim_z = geo.target_xyz(x[j] + vx[j] * TICK_DT, y[j] + vy[j] * TICK_DT,
+                                                     z[j], st["facing"][j], crouch[j])
             else:
                 hop = self.nav.next_hop_xy(int(area[i]), int(area[j]))
                 if hop is None:

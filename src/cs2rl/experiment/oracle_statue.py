@@ -5,9 +5,11 @@ WHAT
 ----
 Drives the EXACT Rung 1a environment (ARENA_DUEL_V1, ``n_active_per_team=1``,
 ``round_time=160``, ``pin_pitch=1``, ``crouch_enabled=0``, ``jump_enabled=0``) with two scripted
-actors and no learning anywhere in the loop. One exception: the movement-inaccuracy cone,
+actors and no learning anywhere in the loop. Two exceptions: the movement-inaccuracy cone,
 which the Rung 1a smoke ran without, follows EnvConfig.accuracy (on by default since the
-owner's decision of 2026-10-09), so ``--accuracy 0`` is the exact Rung 1a env:
+owner's decision of 2026-10-09), and the hit model follows EnvConfig.hitboxes (the capsule
+hitboxes by default since #391; the smoke shot the legacy ellipsoid), so
+``--accuracy 0 --hitboxes 0`` is the exact Rung 1a env:
 
   * hero   — agent 0 (T): ``eval.baselines.OracleActor``. Per tick it reads the
              enemy's position from the live C state, turns the continuous Δyaw
@@ -22,9 +24,11 @@ prints one PASS/FAIL line. Exit status 0 = PASS, 1 = FAIL.
 
 KNOWN LIMIT: a capture does not pin the cone. The hero never moves, so every shot carries
 the standing cone (6.255 mrad), and with the cone on no hit or kill changed against the
-statue or oracle_tracker's walker (200 episodes, seed 0, measured 2026-10-11): this report
-only gains its cone line, and the tracker's is identical. tests/env/c/test_accuracy.py pins
-the cone itself.
+statue or oracle_tracker's walker (200 episodes, seed 0, measured 2026-10-11, on the legacy
+ellipsoid): this report only gains its cone line, and the tracker's is identical. Under
+hitboxes the head is a smaller target and the cone does move shots: against the statue
+248 fired / 224 hit became 256 / 232, kills and TTK unchanged (#391).
+tests/env/c/test_accuracy.py pins the cone itself.
 
     UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue
     UV_NO_SYNC=1 uv run python -m cs2rl.experiment.oracle_statue --statue-z 24
@@ -110,6 +114,11 @@ Rung 1a action space and this variant deliberately does not fake one. Read a
 pass as "the ellipsoid's vertical extent works in the live sim at |rz| ≈ 22",
 never as "crouched targets are killable".
 
+This paragraph is the legacy model (``--hitboxes 0``), which
+tests/experiment/test_oracle_statue.py pins. Under hitboxes the level ray from the
+eye at 64 meets the lifted statue about 41.6 u above its feet, in the stomach
+capsule, so the variant then tests a body shot, not a head.
+
 One tick of leapfrog gravity runs between the hold and ``process_combat``, so
 the |rz| the ray actually sees is ``OFF − 1.5625`` (g = 800, dt = 1/16). The
 summary prints the MEASURED offset rather than assuming it.
@@ -159,15 +168,13 @@ import math
 import numpy as np
 
 from cs2rl.env.c.cs2_env import N_AGENTS, TEAM_SIZE
+from cs2rl.env.c.hit_model import hit_geometry
 from cs2rl.eval.baselines import (
     ACTION_DIM,
     AIM_DIM,
-    EYE_CROUCH,
-    EYE_STAND,
     H_MOVE,
     H_RELOAD,
     H_SHOOT,
-    TORSO_STAND,
     BaselineEvaluator,
     IdleActor,
     OracleActor,
@@ -260,7 +267,10 @@ FAIL_DETAIL_LIMIT = 10
 OPP_MOVING_SPEED = 1.0
 
 
-def build_env(seed: int, round_time: int = ROUND_TIME, accuracy: bool | None = None):
+def build_env(seed: int,
+              round_time: int = ROUND_TIME,
+              accuracy: bool | None = None,
+              hitboxes: bool | None = None):
     """The Rung 1a arena env, built for instrument use (auto_reset off).
 
     WHY the knobs are hard-coded rather than passed through: the whole point of
@@ -269,6 +279,10 @@ def build_env(seed: int, round_time: int = ROUND_TIME, accuracy: bool | None = N
     ``accuracy`` is that question asked in code: True turns on the movement-inaccuracy
     cone (EnvConfig.accuracy), which the Rung 1a smoke ran without. None leaves the field at
     its EnvConfig default, which is on since 2026-10-09, so the smoke's exact env is False.
+    ``hitboxes`` is the hit model the same way (EnvConfig.hitboxes, #391): True the capsule
+    hitboxes, False the legacy ellipsoid every Rung 1 run before #391 trained on, None the
+    EnvConfig default (hitboxes). The smoke's exact env is therefore accuracy and hitboxes
+    both False.
     """
     from cs2rl.env.c.cs2_env import make_env
     from cs2rl.env.config import EnvConfig
@@ -280,6 +294,8 @@ def build_env(seed: int, round_time: int = ROUND_TIME, accuracy: bool | None = N
                        round_time=round_time)
     if accuracy is not None:
         config = config.replace(accuracy=accuracy)
+    if hitboxes is not None:
+        config = config.replace(hitboxes=hitboxes)
     return make_env(config=config, map_data=make_arena_duel_map(), auto_reset=False, seed=seed)
 
 
@@ -314,16 +330,23 @@ class ObsOracleActor:
       * One-tick velocity lead is GONE. ``OracleActor`` extrapolates the target
         by v·dt because the aim command lands after movement; obs carries no
         enemy velocity, so this actor aims where the enemy WAS. Harmless against
-        the statue, and against the #152 L1 walker too: oracle_tracker measured
-        the same TTK and shot count per episode in both hero modes (2026-10-09),
-        because one tick of the walker's motion stays inside the hit half-width.
+        the statue, and against the #152 L1 walker too on the legacy ellipsoid:
+        oracle_tracker measured the same TTK and shot count per episode in both
+        hero modes (2026-10-09), because one tick of the walker's motion stays
+        inside the 16 u hit half-width.
         A real handicap against a target fast enough to leave it: do not use
         this actor as the oracle for one.
       * ``obs[b + EN_DZ]`` is visibility-gated in C: 0 means "invisible", not
         "same height". Only the ``can_see`` branch below reads it.
-      * Enemy stance is NOT in the obs, so the target's torso offset is assumed
-        standing (``TORSO_STAND``). True for Rung 1a (``crouch_enabled=0``);
-        revisit before reusing this with the crouch head unmasked.
+      * Enemy stance is NOT in the obs, so the aim point's height is the
+        standing one (``hit_geometry(st["hitboxes"]).target_z``: the torso centre
+        on the legacy ellipsoid, the head capsule's midpoint under hitboxes).
+        True for Rung 1a (``crouch_enabled=0``); revisit before reusing this
+        with the crouch head unmasked. Nor is the enemy's facing, so under
+        hitboxes the actor aims on the target's axis: exact in height for a
+        standing target, but a crouched head sits 6.2 u behind the axis, and
+        that aim hit 0.4579 of free-pitch rays from a standing shooter (KNOWN
+        LIMIT, #391).
       * The decoded height offset does NOT influence whether a shot lands.
         ``pin_pitch=1`` makes the env ignore the pitch command, and the range
         test never binds at ``laser_range`` 3000 on a 360 u arena, so a WRONG
@@ -347,7 +370,7 @@ class ObsOracleActor:
         self.rows = list(rows)
         self.blind_ticks = 0
         self.inconsistent_slots = 0
-        # Range of the eye-to-torso rz DECODED from enemy slot +2, over the
+        # Range of the eye-to-aim-point rz DECODED from enemy slot +2, over the
         # targets actually engaged. Reported next to the same quantity measured
         # off the C state, which is the only way this mode says anything about
         # the z encoding — see the pitfall about pin_pitch above.
@@ -363,16 +386,17 @@ class ObsOracleActor:
         the last episode's.
         """
 
-    def _decode_slot(self, o, s, eye_z_offset):
+    def _decode_slot(self, o, s, eye_z_offset, target_z_offset):
         """One enemy slot → ``(seen, dist3d, rel_bearing, dist2d, rz)`` or None.
 
         None means "this slot carries no usable target": a dead/empty slot, or
         an invisible enemy the agent has no memory of (the C writer leaves such
         a slot at its memset zeros, so an all-zero rel-pos IS the sentinel).
 
-        ``rz`` is the eye-to-torso vertical offset the combat ray will see:
-        ``(enemy_z - self_z) + TORSO_STAND - eye``, the same quantity
-        ``OracleActor`` builds from ground truth. It is 0 on the memory branch
+        ``rz`` is the eye-to-aim-point vertical offset:
+        ``(enemy_z - self_z) + target_z_offset - eye``, with the aim point's height
+        above the enemy's feet (standing) and the eye's above ours, the same
+        quantity ``OracleActor`` builds from ground truth. It is 0 on the memory branch
         because the C writer leaves +2 unwritten there — the actor is only
         walking then, and walks level.
         """
@@ -388,7 +412,7 @@ class ObsOracleActor:
             return False, d2, math.atan2(ry, rx), d2, 0.0
         dist2d = float(o[b + EN_DIST]) * self.map_diag
         rel = math.atan2(float(o[b + EN_SIN]), float(o[b + EN_COS]))
-        rz = float(o[b + EN_DZ]) * OBS_Z_SCALE + TORSO_STAND - eye_z_offset
+        rz = float(o[b + EN_DZ]) * OBS_Z_SCALE + target_z_offset - eye_z_offset
         self._cross_check(rx, ry, dist2d, rel)
         return True, math.hypot(dist2d, rz), rel, dist2d, rz
 
@@ -409,19 +433,23 @@ class ObsOracleActor:
 
         ``vis_prev`` and ``env`` are accepted and ignored: visibility here comes
         from the obs slot's own ``can_see`` flag, which is the point of the mode.
-        ``st`` is used ONLY for this agent's own weapon state (see class doc).
+        ``st`` is used ONLY for this agent's own weapon state (see class doc) and
+        the env's hit model, ``st["hitboxes"]`` (a setting of the env, not of the
+        target, so reading it imports no ground truth about the enemy).
         """
         act = np.zeros((N_AGENTS, ACTION_DIM), dtype=np.int32)
         cont = np.zeros((N_AGENTS, AIM_DIM), dtype=np.float32)
+        geo = hit_geometry(st["hitboxes"])
+        target_up = geo.target_z(0.0, False)           # enemy stance unobserved: standing
 
         for i in self.rows:
             if not st["alive"][i]:
                 continue
             o = obs[i]
-            eye = EYE_CROUCH if o[OBS_SELF_CROUCH] >= 0.5 else EYE_STAND
+            eye = geo.eye_z(0.0, o[OBS_SELF_CROUCH] >= 0.5)
             best = None
             for s in range(OBS_ENEMY_COUNT):
-                cand = self._decode_slot(o, s, eye)
+                cand = self._decode_slot(o, s, eye, target_up)
                 if cand is None:
                     continue
                 # Same preference as OracleActor: any visible enemy beats any
@@ -515,6 +543,10 @@ def _episode(env, ev, oracle, statue, statue_z, round_time, on_step=None):
     survived the round. Per-episode shot counters are left in the env's
     ``episode_stats`` for the caller to read before the next reset clears them.
 
+    rz is the vertical offset from the hero's eye to the aim point on the statue
+    (``hit_geometry``; both stand, the arena runs crouch off): the z difference plus
+    the model's standing aim height minus its standing eye, 0 on the legacy ellipsoid
+    and 2.37 u under hitboxes (head midpoint 66.37 against the eye at 64).
     Two rz sample lists, from different states on purpose:
       * ``rz_samples``: the C state AFTER each step, i.e. what the combat ray
         saw (the "realised rz at combat" of the summary);
@@ -542,6 +574,8 @@ def _episode(env, ev, oracle, statue, statue_z, round_time, on_step=None):
     statue.reset()
     ground_z = float(env._c_env.game.agents[STATUE].z)
     st = ev.reader.read().snapshot()
+    geo = hit_geometry(st["hitboxes"])
+    aim_dz = geo.target_z(0.0, False) - geo.eye_z(0.0, False)
     spawn_dx = float(st["x"][STATUE] - st["x"][HERO])
     spawn_dy = float(st["y"][STATUE] - st["y"][HERO])
     geometry = {
@@ -570,7 +604,7 @@ def _episode(env, ev, oracle, statue, statue_z, round_time, on_step=None):
         if st["alive"][HERO] and st["alive"][STATUE]:
             # `st` is the snapshot taken with this tick's obs (reset, or the
             # previous step), so this is the rz an obs-decoded rz must match.
-            observed_rz_samples.append(float(st["z"][STATUE] - st["z"][HERO]))
+            observed_rz_samples.append(float(st["z"][STATUE] - st["z"][HERO]) + aim_dz)
         if statue_z:
             _hold_statue_above_ground(env, ground_z, statue_z)
 
@@ -586,9 +620,10 @@ def _episode(env, ev, oracle, statue, statue_z, round_time, on_step=None):
             on_step(tick, st_prev, st)
 
         if st["alive"][HERO] and st["alive"][STATUE]:
-            # Both standing, so rz reduces to the plain z difference: this is
-            # exactly the `tgt_rz` cs2_combat.h computed on this tick.
-            rz_samples.append(float(st["z"][STATUE] - st["z"][HERO]))
+            # Both standing, so rz is the z difference plus aim_dz. On the legacy
+            # ellipsoid aim_dz is 0 and this is exactly the `tgt_rz` cs2_combat.h
+            # computed on this tick; the hitbox model computes no rz in C.
+            rz_samples.append(float(st["z"][STATUE] - st["z"][HERO]) + aim_dz)
         if st["alive"][STATUE]:
             opp_alive_ticks += 1
             opp_moving_ticks += bool(
@@ -621,7 +656,8 @@ def run_check(episodes: int = 200,
               opponent=None,
               hero=None,
               on_step=None,
-              accuracy: bool | None = None) -> dict:
+              accuracy: bool | None = None,
+              hitboxes: bool | None = None) -> dict:
     """Play ``episodes`` oracle-vs-statue rounds; return the summary dict.
 
     ``obs_only`` swaps the ground-truth ``OracleActor`` for ``ObsOracleActor``
@@ -635,9 +671,10 @@ def run_check(episodes: int = 200,
     Everything else stays the same, the ``statue`` names included.
 
     ``hero`` replaces the oracle on the T row the same way (``obs_only`` is then
-    ignored), and ``on_step`` is ``_episode``'s per-step callback. ``accuracy`` is
-    ``build_env``'s (the movement-inaccuracy cone; None = the EnvConfig default), and the
-    result's ``accuracy`` is the value the env actually ran.
+    ignored), and ``on_step`` is ``_episode``'s per-step callback. ``accuracy`` and
+    ``hitboxes`` are ``build_env``'s (the movement-inaccuracy cone and the hit model;
+    None = the EnvConfig default), and the result's ``accuracy`` and ``hitboxes`` are
+    the values the env actually ran.
     cs2rl.experiment.aim_eval passes a ``PolicyActor``, or an ``LstmZeroedEvery`` around
     one, and its ``MissRecorder``.
 
@@ -665,7 +702,7 @@ def run_check(episodes: int = 200,
     """
     if episodes < 1:
         raise ValueError(f"episodes must be >= 1, got {episodes}")
-    env = build_env(seed, round_time, accuracy)
+    env = build_env(seed, round_time, accuracy, hitboxes)
     try:
         ev = BaselineEvaluator(env, episodes=2, seed=seed)             # constants only, see docstring
         oracle = _build_hero_actor(ev, seed, obs_only) if hero is None else hero
@@ -757,6 +794,7 @@ def run_check(episodes: int = 200,
                                                                                                    # above 0.34 x max speed (counted with the cone off too) and the summed cone
                                                                                                    # radius in rad (0 with it off). Env-wide, like the shot counters above.
         "accuracy": bool(env.config.accuracy),
+        "hitboxes": bool(env.config.hitboxes),
         "shots_fired_fast": shots_fired_fast,
         "cone_radius_sum": cone_radius_sum,
         **totals,
@@ -806,7 +844,8 @@ def verdict(res: dict) -> tuple[bool, list[tuple[str, bool, str]]]:
     Three checks in ground-truth mode. The first two are the brief's gate. The
     third (``shots_stance_blocked == 0``) is trivially true on flat ground and is
     the entire content of the ``--statue-z`` variant: it says the vertical offset
-    the shots were taken against stayed inside the target's vertical semi-axis,
+    the shots were taken against stayed inside the target's vertical semi-axis
+    (under hitboxes: the eye stayed inside the z band of the target's capsules),
     so a kill there is the v1c ellipsoid working and not the offset quietly being
     ignored.
 
@@ -922,6 +961,10 @@ def format_summary(res: dict) -> str:
         f"unmatched vis slots      {res['unmatched_vis_slots']}"
         f"{'   <-- WARNING: visibility recovery is broken, oracle targeting is suspect' if res['unmatched_vis_slots'] else ''}",
     ]
+    # Printed only with hitboxes, so a --hitboxes 0 report stays the pre-#391 report.
+    if res.get("hitboxes"):
+        lines.append("hit model                capsule hitboxes (#391; --hitboxes 0 is the "
+                     "legacy ellipsoid)")
     # Printed only with the cone on, so the default report stays the pre-cone report.
     if res.get("accuracy"):
         lines += [
@@ -970,8 +1013,8 @@ def main(argv=None) -> int:
                     default=0.0,
                     help="hold the statue this many world units above its spawn surface every "
                     "tick (default 0 = on the ground). 24 reproduces the |rz| of a crouched "
-                    "target against a STANDING hitbox — see the module docstring for exactly "
-                    "what that does and does not prove.")
+                    "target against a STANDING hitbox on the legacy ellipsoid (--hitboxes 0) — "
+                    "see the module docstring for exactly what that does and does not prove.")
     ap.add_argument("--round-time",
                     type=int,
                     default=ROUND_TIME,
@@ -989,6 +1032,14 @@ def main(argv=None) -> int:
                     help="the movement-inaccuracy cone (EnvConfig.accuracy): 1 on, 0 off. "
                     "Default: EnvConfig.accuracy. The Rung 1a smoke ran without it, so a run "
                     "with it is a different env, and the PASS bar is the same one.")
+    ap.add_argument("--hitboxes",
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="the hit model (EnvConfig.hitboxes): 1 the capsule hitboxes, 0 the legacy "
+                    "ellipsoid. Default: EnvConfig.hitboxes. The Rung 1a smoke shot the "
+                    "ellipsoid, so a run with hitboxes is a different env, and the PASS bar is "
+                    "the same one.")
     args = ap.parse_args(argv)
 
     res = run_check(episodes=args.episodes,
@@ -996,7 +1047,8 @@ def main(argv=None) -> int:
                     statue_z=args.statue_z,
                     round_time=args.round_time,
                     obs_only=args.obs_only,
-                    accuracy=None if args.accuracy is None else bool(args.accuracy))
+                    accuracy=None if args.accuracy is None else bool(args.accuracy),
+                    hitboxes=None if args.hitboxes is None else bool(args.hitboxes))
     print(format_summary(res))
     return 0 if verdict(res)[0] else 1
 

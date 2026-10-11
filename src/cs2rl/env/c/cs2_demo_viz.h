@@ -30,8 +30,9 @@ static inline void demo_aim_dir_sim(float yaw, float pitch, float* dx, float* dy
  * What: start = (x, z+108, y); end = start + length * (dx, dz, dy).
  * Why:  other agents' sticks must tilt with pitch. Sim XY is Raylib XZ
  *       and sim Z is Raylib Y; the draw rig puts the head 108 above feet.
- * Pitfalls: 108 is the draw-rig head, not EYE_HEIGHT_STAND (48). Forgetting
- *           the dy/dz swap keeps the stick flat in Raylib Y.
+ * Pitfalls: 108 is the draw-rig head, not the sim eye (cs2_combat.h
+ *           agent_eye_height: 64 standing under hitboxes, 48 on the legacy
+ *           ellipsoid). Forgetting the dy/dz swap keeps the stick flat in Raylib Y.
  */
 static inline void demo_aim_stick_rl(float x,
                                      float y,

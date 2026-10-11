@@ -22,10 +22,14 @@ WHAT IS PINNED HERE
   seed it returns the sampled mode's discrete actions tick after tick, and cont = mu.
 * ``LstmZeroedEvery`` zeroes before forward ``period``, ``2 * period``, ... counted across
   rounds, as ``Cs2PuffeRL.evaluate`` zeroes at every rollout start.
-* ``env_mismatches`` flags a run trained on another map, laser range or turn speed.
+* ``env_mismatches`` flags a run trained on another map, laser range, turn speed, cone
+  setting or hit model.
 * The movement-inaccuracy switch reaches C in every reference and policy cell, on and off.
   The CLI plays the cone the run trained with (its config.json key; a missing key = off)
   unless ``--accuracy`` says otherwise, names the source, and warns on a difference.
+* The hit-model switch reaches every cell's env config, both ways, and the CLI plays the hit
+  model the run trained with (a missing key = the legacy ellipsoid) unless ``--hitboxes`` says
+  otherwise, names the source, and warns on a difference (#391).
 * The CLI on the Rung 1a checkpoint, 5 episodes per cell. It needs the checkpoint, which only
   the owner's checkouts have (outputs/ is not in git), so it skips without one.
 """
@@ -44,7 +48,9 @@ RUNG1A_CKPT = "outputs/checkpoints/rung1a/s0/rung1a-s0.pt"
 
 
 def _state(xy, facing=0.0, z=(0.0, 0.0), hp=(100, 100), fired=0):
-    """A two-agent snapshot (row 0 = hero, row 1 = opponent) with the keys the recorder reads."""
+    """A two-agent snapshot (row 0 = hero, row 1 = opponent) with the keys the recorder reads.
+
+    The legacy hit model (eye and torso both 48 u), which the geometry pins below assume."""
     return {
         "x": np.array([0.0, xy[0]]),
         "y": np.array([0.0, xy[1]]),
@@ -55,6 +61,7 @@ def _state(xy, facing=0.0, z=(0.0, 0.0), hp=(100, 100), fired=0):
         "alive": np.array([1, int(hp[1] > 0)]),
         "hp": np.array(hp),
         "fired_this_tick": np.array([fired, 0]),
+        "hitboxes": False,
     }
 
 
@@ -123,6 +130,9 @@ def test_the_summary_splits_fires_at_the_horizon_and_by_the_window():
 
 
 def test_lag_reads_one_tick_without_lead_and_zero_with_it():
+    """On the LEGACY ellipsoid (hitboxes=False, #391), where the oracle aims at the target's
+    axis, the point the bearing is measured to. Under hitboxes it aims at the head, off the
+    axis, and its lag reads 0.33 here (aim_eval's docstring)."""
     from cs2rl.experiment import aim_eval
     from cs2rl.experiment.oracle_statue import run_check
     out = {}
@@ -132,7 +142,8 @@ def test_lag_reads_one_tick_without_lead_and_zero_with_it():
                         0,
                         obs_only=obs_only,
                         opponent=aim_eval.OPPONENTS["walker-4-16"](0),
-                        on_step=rec)
+                        on_step=rec,
+                        hitboxes=False)
         s = rec.summary(64)
         assert (s["fires"], s["on_target_recount"], s["hit_recount"]) == \
             (res["shots_fired"], res["shots_on_target"], res["shots_hit"]), hero
@@ -334,7 +345,7 @@ def test_a_run_on_another_map_or_turn_speed_is_flagged():
         "env": "cs2-dust2",
         "laser_range": 1500.0,
         "max_turn_speed": 0.5
-    }, False)
+    }, False, False)
     assert {
         "env: run cs2-dust2 vs harness cs2-arena-duel", "laser_range: run 1500.0 vs harness None",
         "max_turn_speed: run 0.5 vs harness None"
@@ -344,11 +355,27 @@ def test_a_run_on_another_map_or_turn_speed_is_flagged():
 def test_a_run_trained_with_the_other_cone_setting_is_flagged():
     """A config.json without the ``accuracy`` key predates the cone, so it reads False."""
     from cs2rl.experiment.aim_eval import env_mismatches
-    cone = [m for m in env_mismatches({}, True) if m.startswith("accuracy:")]
+    cone = [m for m in env_mismatches({}, True, False) if m.startswith("accuracy:")]
     assert cone == ["accuracy: run False vs harness True"], cone
-    assert not [m for m in env_mismatches({"accuracy": True}, True) if m.startswith("accuracy:")]
-    assert [m for m in env_mismatches({"accuracy": True}, False)
-            if m.startswith("accuracy:")] == ["accuracy: run True vs harness False"]
+    assert not [
+        m for m in env_mismatches({"accuracy": True}, True, False) if m.startswith("accuracy:")
+    ]
+    assert [
+        m for m in env_mismatches({"accuracy": True}, False, False) if m.startswith("accuracy:")
+    ] == ["accuracy: run True vs harness False"]
+
+
+def test_a_run_trained_on_the_other_hit_model_is_flagged():
+    """A config.json without the ``hitboxes`` key predates #391, so it reads the ellipsoid."""
+    from cs2rl.experiment.aim_eval import env_mismatches
+    model = [m for m in env_mismatches({}, False, True) if m.startswith("hitboxes:")]
+    assert model == ["hitboxes: run False vs harness True"], model
+    assert not [
+        m for m in env_mismatches({"hitboxes": True}, False, True) if m.startswith("hitboxes:")
+    ]
+    assert [
+        m for m in env_mismatches({"hitboxes": True}, False, False) if m.startswith("hitboxes:")
+    ] == ["hitboxes: run True vs harness False"]
 
 
 def test_the_cone_switch_reaches_every_cell():
@@ -367,6 +394,23 @@ def test_the_cone_switch_reaches_every_cell():
         for r in out["references"] + out["cells"]:
             assert r["accuracy"] is accuracy and r["shots_fired"] > 0, (accuracy, r["hero"])
             assert (r["cone_radius_sum"] > 0) is accuracy, (accuracy, r["hero"])
+
+
+def test_the_hit_model_switch_reaches_every_cell():
+    from cs2rl.experiment import aim_eval
+    policy = _random_policy()
+    walker = {"walker-4-16": aim_eval.OPPONENTS["walker-4-16"]}
+    for hitboxes in (True, False):
+        out = aim_eval.run_eval(policy,
+                                64,
+                                episodes=1,
+                                seed=0,
+                                opponents=walker,
+                                modes=(("sample", "carried"), ),
+                                hitboxes=hitboxes)
+        assert out["hitboxes"] is hitboxes
+        for r in out["references"] + out["cells"]:
+            assert r["hitboxes"] is hitboxes and r["shots_fired"] > 0, (hitboxes, r["hero"])
 
 
 @pytest.mark.parametrize("trained,argv,want,source", [
@@ -388,6 +432,41 @@ def test_the_cone_switch_reaches_every_cell():
 def test_the_cli_plays_the_cone_the_run_trained_with(monkeypatch, capsys, trained, argv, want,
                                                      source):
     from cs2rl.experiment import aim_eval
+    seen = _run_cli(monkeypatch, trained, argv)
+    assert seen["accuracy"] is want and seen["out"]["accuracy_source"] == source
+    warned = [ln for ln in capsys.readouterr().out.splitlines() if "accuracy: run" in ln]
+    assert len(warned) == (want != aim_eval.trained_accuracy(trained)), warned
+
+
+@pytest.mark.parametrize("trained,argv,want,source", [
+    ({
+        "hitboxes": True
+    }, [], True, "the run's config.json"),
+    ({
+        "hitboxes": False
+    }, [], False, "the run's config.json"),
+    ({}, [], False, "the run's config.json"),
+    ({
+        "hitboxes": False
+    }, ["--hitboxes", "1"], True, "--hitboxes"),
+    ({
+        "hitboxes": True
+    }, ["--hitboxes", "0"], False, "--hitboxes"),
+],
+                         ids=["key-on", "key-off", "key-missing", "flag-on", "flag-off"])
+def test_the_cli_plays_the_hit_model_the_run_trained_with(monkeypatch, capsys, trained, argv, want,
+                                                          source):
+    from cs2rl.experiment import aim_eval
+    seen = _run_cli(monkeypatch, trained, argv)
+    assert seen["hitboxes"] is want and seen["out"]["hitboxes_source"] == source
+    warned = [ln for ln in capsys.readouterr().out.splitlines() if "hitboxes: run" in ln]
+    assert len(warned) == (want != aim_eval.trained_hitboxes(trained)), warned
+
+
+def _run_cli(monkeypatch, trained, argv) -> dict:
+    """aim_eval.main on a stub checkpoint whose config.json holds ``trained``; returns the
+    switches run_eval received and, under "out", the dict format_table was given."""
+    from cs2rl.experiment import aim_eval
     seen = {}
 
     class _Policy:
@@ -397,7 +476,7 @@ def test_the_cli_plays_the_cone_the_run_trained_with(monkeypatch, capsys, traine
 
     def fake_run_eval(policy, bptt_horizon, **kw):
         seen.update(kw)
-        return {"accuracy": kw["accuracy"]}
+        return {"accuracy": kw["accuracy"], "hitboxes": kw["hitboxes"]}
 
     def fake_format_table(out):
         seen["out"] = out
@@ -410,9 +489,7 @@ def test_the_cli_plays_the_cone_the_run_trained_with(monkeypatch, capsys, traine
     monkeypatch.setattr(aim_eval, "run_eval", fake_run_eval)
     monkeypatch.setattr(aim_eval, "format_table", fake_format_table)
     assert aim_eval.main(["ckpt.pt", *argv]) == 0
-    assert seen["accuracy"] is want and seen["out"]["accuracy_source"] == source
-    warned = [ln for ln in capsys.readouterr().out.splitlines() if "accuracy: run" in ln]
-    assert len(warned) == (want != aim_eval.trained_accuracy(trained)), warned
+    return seen
 
 
 def _rung1a_checkpoint():
@@ -447,3 +524,4 @@ def test_the_cli_plays_every_cell_on_the_rung1a_checkpoint(tmp_path, capsys):
     printed = capsys.readouterr().out
     assert "WARNING" not in printed
     assert "inaccuracy cone off, from the run's config.json" in printed, printed
+    assert "hit model legacy ellipsoid, from the run's config.json" in printed, printed

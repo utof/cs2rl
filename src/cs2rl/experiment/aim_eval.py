@@ -35,13 +35,19 @@ THE MISS DECOMPOSITION
 ----------------------
 Read off the C state after each step: positions and facing as ``process_combat`` used them.
   * e: the aim error (bearing - facing, elevation - pitch) from the hero's eye to the
-    opponent's torso, in units of the hit half-window ``asin(16/d)`` (d = the 2D distance; the
-    test cs2_combat.h's ``shots_on_target`` applies), so ``|e_yaw| < 1`` is on target.
+    opponent, in units of the hit half-window ``asin(16/d)`` (d = the 2D distance; the
+    test cs2_combat.h's ``shots_on_target`` applies), so ``|e_yaw| < 1`` is on target. The
+    bearing is to the opponent's axis in both hit models, as ``shots_on_target`` measures
+    it; the elevation is to ``hit_geometry``'s aim height (the torso centre on the legacy
+    ellipsoid, the head capsule midpoint's height under hitboxes). Under hitboxes on_target
+    is looser than what a shot can hit: the standing head is 7.75 u wide front-on (#391).
   * w: the line of sight's angular velocity over the tick (rad/tick): the change of
     (bearing, elevation) from the state before the step to the one after it.
   * along = e . w/|w|: + means the crosshair trails the target (lag), - that it leads.
-    across = the signed perpendicular component. With pitch pinned on flat ground every
-    elevation term is 0, so across is 0 and along is +-e_yaw. Below ``MIN_ANGULAR_SPEED``
+    across = the signed perpendicular component. With pitch pinned on flat ground the legacy
+    model's elevation terms are 0 (eye and torso both 48 u), so across is 0 and along is
+    +-e_yaw. Under hitboxes e_pitch is the head midpoint's 2.37 u above the eye seen from d,
+    not 0, so across is small but not 0. Below ``MIN_ANGULAR_SPEED``
     the motion has no direction and a sample has no along/across.
   * per fire: |e_yaw| median and p90, the share fired outside the window, along and across
     means, and hit/fired for fires up to and after episode tick ``bptt_horizon`` (C4);
@@ -49,7 +55,9 @@ Read off the C state after each step: positions and facing as ``process_combat``
     i.e. how many ticks of the line of sight's motion the crosshair trails by; its standard
     error comes from resampling whole episodes. Aiming at where the target was one tick ago
     reads exactly 1 (ObsOracleActor); a one-tick velocity lead reads near 0 (OracleActor: 0.08
-    to 0.16 against the three walkers on 2026-10-09).
+    to 0.16 against the three walkers on 2026-10-09, on the legacy ellipsoid). Under hitboxes
+    OracleActor aims at the head, up to 2.3 u off the axis the bearing is measured to, and its
+    lag read 0.33 against walker-4-16 (20 rounds, seed 0, #391).
     ``lag_by_speed`` gives the same ratio per quintile of |w|: flat means the trailing error is
     proportional to the angular speed. Tracking starts at the round's first on-target tick:
     the opening turn is acquisition, and its errors are tens of half-windows wide.
@@ -73,9 +81,12 @@ PITFALLS
 * Every tick of the arena has 2D line of sight, so nothing here is gated on visibility.
   KNOWN LIMIT: on a map with occlusion, gate on the pre-step visibility (the obs reads a target
   killed this tick as unseen, which would drop every killing shot).
-* Spawns are not paired across cells: the env's one RNG also rolls hit locations
-  (cs2_combat.h), so two cells on one seed share their first few spawns and then diverge (2 to
-  9 shared with the oracle's cell on 2026-10-09). Compare cells as samples.
+* On the legacy ellipsoid spawns are not paired across cells: the env's one RNG also rolls
+  hit locations (cs2_combat.h), so two cells on one seed share their first few spawns and then
+  diverge (2 to 9 shared with the oracle's cell on 2026-10-09). Compare cells as samples. The
+  hitbox model draws no RNG on a hit (tests/env/c/test_hitboxes.py), so there the spawns stay
+  paired: an oracle cell and a never-firing cell on seed 0 had equal spawns in 200 of 200
+  rounds, against 11 of 200 on the ellipsoid (#391).
 * ``HIT_HALF_WIDTH`` mirrors cs2_combat.h; tests/experiment/test_aim_eval.py pins it.
 * KNOWN LIMIT: ``run_check`` reads the env-wide shot counters (cs2_combat.h counts every
   participating agent's shots), so an opponent that shoots would mix its shots into
@@ -94,13 +105,10 @@ from pathlib import Path
 import numpy as np
 import torch
 
+from cs2rl.env.c.hit_model import hit_geometry
 from cs2rl.eval.baselines import (
     ACTION_DIM,
     AIM_DIM,
-    EYE_CROUCH,
-    EYE_STAND,
-    TORSO_CROUCH,
-    TORSO_STAND,
     IdleActor,
     PolicyActor,
     wrap_pi,
@@ -189,14 +197,19 @@ def build_policy_hero(policy, aim: str, lstm: str, bptt_horizon: int):
 def aim_geometry(st_prev, st, hero, opp):
     """``(e, w, d)``: the aim error and the line of sight's angular velocity, both (yaw, pitch)
     in rad, and the 2D distance, for ``hero`` aiming at ``opp`` in the post-step state ``st``.
+
+    The bearing is to ``opp``'s axis (cs2_combat.h's ``shots_on_target`` test, so the
+    recount tripwire holds in both hit models); the elevation is to the aim height of
+    ``hit_geometry(st["hitboxes"])``.
     """
+    geo = hit_geometry(st["hitboxes"])
 
     def los(s):
         dx, dy = s["x"][opp] - s["x"][hero], s["y"][opp] - s["y"][hero]
-        eye = s["z"][hero] + (EYE_CROUCH if s["is_crouching"][hero] else EYE_STAND)
-        torso = s["z"][opp] + (TORSO_CROUCH if s["is_crouching"][opp] else TORSO_STAND)
+        eye = geo.eye_z(s["z"][hero], s["is_crouching"][hero])
+        target = geo.target_z(s["z"][opp], s["is_crouching"][opp])
         d = math.hypot(dx, dy)
-        return math.atan2(dy, dx), math.atan2(torso - eye, d), d
+        return math.atan2(dy, dx), math.atan2(target - eye, d), d
 
     bearing0, elev0, _ = los(st_prev)
     bearing, elev, d = los(st)
@@ -309,7 +322,7 @@ def _cell(opponent, hero, aim, lstm, res, rec, horizon) -> dict:
     row.update((k, res[k])
                for k in ("episodes", "kills", "kill_rate", "ttk_median", "ttk_p90", "shots_fired",
                          "shots_hit", "shots_on_target", "opp_moving_frac", "per_episode",
-                         "accuracy", "shots_fired_fast", "cone_radius_sum"))
+                         "accuracy", "hitboxes", "shots_fired_fast", "cone_radius_sum"))
     row["hit_per_fired"] = res["shots_hit"] / max(res["shots_fired"], 1)
     # The share of fires at or above 0.34 x max speed (counted with the cone off too).
     row["fast_per_fired"] = res["shots_fired_fast"] / max(res["shots_fired"], 1)
@@ -323,11 +336,13 @@ def run_eval(policy,
              seed: int = 0,
              opponents=None,
              modes=MODES,
-             accuracy: bool | None = None) -> dict:
+             accuracy: bool | None = None,
+             hitboxes: bool | None = None) -> dict:
     """Every opponent x (reference heroes + every mode) on ``seed``; returns the JSON dict.
 
-    ``accuracy`` is oracle_statue.build_env's movement-inaccuracy cone switch for every cell
-    (None = the EnvConfig default); the result's ``accuracy`` is the value the cells ran.
+    ``accuracy`` and ``hitboxes`` are oracle_statue.build_env's movement-inaccuracy cone and
+    hit-model switches for every cell (None = the EnvConfig default); the result's
+    ``accuracy`` and ``hitboxes`` are the values the cells ran.
     """
     t0 = time.perf_counter()
     cells, refs = [], []
@@ -339,7 +354,8 @@ def run_eval(policy,
                                obs_only=obs_only,
                                opponent=make(seed),
                                on_step=rec,
-                               accuracy=accuracy)
+                               accuracy=accuracy,
+                               hitboxes=hitboxes)
             refs.append(_cell(name, hero, None, None, res, rec, bptt_horizon))
         oracle = next(r for r in refs[-len(REFERENCE_HEROES):] if r["hero"] == "oracle")
         for aim, lstm in modes:
@@ -353,7 +369,8 @@ def run_eval(policy,
                                    opponent=make(seed),
                                    hero=hero,
                                    on_step=rec,
-                                   accuracy=accuracy)
+                                   accuracy=accuracy,
+                                   hitboxes=hitboxes)
             row = _cell(name, "policy", aim, lstm, res, rec, bptt_horizon)
             # #152's gap = oracle - learner (TTK: learner - oracle): > 0 when the policy is worse.
             row["gap_to_oracle"] = {
@@ -366,6 +383,7 @@ def run_eval(policy,
         "episodes": episodes,
         "seed": seed,
         "accuracy": refs[0]["accuracy"],
+        "hitboxes": refs[0]["hitboxes"],
         "bptt_horizon": bptt_horizon,
         "references": refs,
         "cells": cells,
@@ -398,12 +416,22 @@ def trained_accuracy(cfg) -> bool:
     return bool(cfg.get("accuracy", False))
 
 
-def env_mismatches(cfg, accuracy: bool) -> list[str]:
+def trained_hitboxes(cfg) -> bool:
+    """The hit model a run trained with, from its config.json: True = the capsule hitboxes.
+
+    A config.json written before the ``hitboxes`` key existed (#391) trained on the legacy
+    ellipsoid, so a missing key reads False whatever EnvConfig's default is now.
+    """
+    return bool(cfg.get("hitboxes", False))
+
+
+def env_mismatches(cfg, accuracy: bool, hitboxes: bool) -> list[str]:
     """The config.json env keys that differ from the arena preset every cell plays: the map
     label, the agent count, the pitch, crouch and jump switches, the round length, the laser
-    range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves), and
-    the movement-inaccuracy cone (``accuracy``: the setting the harness ran, so the caller
-    passes it; the run's side is ``trained_accuracy``, so a missing key reads False).
+    range and the turn speed (None: the EnvConfig default, which ``build_env`` leaves), the
+    movement-inaccuracy cone and the hit model (``accuracy`` and ``hitboxes``: the settings
+    the harness ran, so the caller passes them; the run's side is ``trained_accuracy`` and
+    ``trained_hitboxes``, so a missing key reads False).
 
     KNOWN LIMIT: recoil is not compared: config.json has no recoil key (no training flag sets it).
     """
@@ -418,8 +446,10 @@ def env_mismatches(cfg, accuracy: bool) -> list[str]:
         "laser_range": None,
         "max_turn_speed": None,
         "accuracy": bool(accuracy),
+        "hitboxes": bool(hitboxes),
     }
-    run = {k: trained_accuracy(cfg) if k == "accuracy" else cfg.get(k) for k in preset}
+    trained = {"accuracy": trained_accuracy, "hitboxes": trained_hitboxes}
+    run = {k: trained[k](cfg) if k in trained else cfg.get(k) for k in preset}
     return [f"{k}: run {run[k]} vs harness {v}" for k, v in preset.items() if run[k] != v]
 
 
@@ -432,11 +462,13 @@ def format_table(out: dict) -> str:
     rows = out["references"] + out["cells"]
     wo = max(len(r["opponent"]) for r in rows)
     source = f", from {out['accuracy_source']}" if out.get("accuracy_source") else ""
+    hb_source = f", from {out['hitboxes_source']}" if out.get("hitboxes_source") else ""
+    model = "capsule hitboxes" if out.get("hitboxes") else "legacy ellipsoid"
     lines = [
         f"aim_eval: {out['episodes']} episodes per cell, seed {out['seed']}, "
-        f"bptt_horizon {out['bptt_horizon']}; e in hit half-windows asin(16/d); movement-"
+        f"bptt_horizon {out['bptt_horizon']}; e in on-target half-windows asin(16/d); movement-"
         f"inaccuracy cone {'ON' if out.get('accuracy') else 'off'}{source} (fast = share of "
-        f"fires at >= 0.34 x max speed)",
+        f"fires at >= 0.34 x max speed); hit model {model}{hb_source}",
         f"{'opponent':<{wo}} {'hero':<10} {'aim':<6} {'lstm':<7} kills  ttk50 ttk90 hit/f "
         f" |e|50 |e|90 off   along across lag(t)  se   ticks  hit/f<=H hit/f>H gap_k  gap_ttk"
         f"  fast"
@@ -477,23 +509,37 @@ def main(argv=None) -> int:
                     "run without the key trained without the cone), so a re-read measures the "
                     "policy in the env it trained in. A value that differs from the run's "
                     "prints the env-mismatch warning.")
+    ap.add_argument("--hitboxes",
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="play every cell on the capsule hitboxes (1) or the legacy ellipsoid (0) "
+                    "(EnvConfig.hitboxes, #391). Default: the evaluated run's own config.json "
+                    "setting (a run without the key trained on the ellipsoid). A value that "
+                    "differs from the run's prints the env-mismatch warning.")
     args = ap.parse_args(argv)
     policy, cfg = load_checkpoint(args.checkpoint)
     if args.accuracy is None:
         accuracy, source = trained_accuracy(cfg), "the run's config.json"
     else:
         accuracy, source = bool(args.accuracy), "--accuracy"
+    if args.hitboxes is None:
+        hitboxes, hb_source = trained_hitboxes(cfg), "the run's config.json"
+    else:
+        hitboxes, hb_source = bool(args.hitboxes), "--hitboxes"
     out = run_eval(policy,
                    int(cfg["bptt_horizon"]),
                    episodes=args.episodes,
                    seed=args.seed,
-                   accuracy=accuracy)
+                   accuracy=accuracy,
+                   hitboxes=hitboxes)
     out["accuracy_source"] = source
+    out["hitboxes_source"] = hb_source
     # The aim log-sigma parameters by state_dict name, before forward()'s clamp: one
     # ``aim_log_std``, or ``aim_log_std_t`` and ``aim_log_std_ct`` with split heads.
     log_std = {k: v.tolist() for k, v in policy.state_dict().items() if "aim_log_std" in k}
     out.update(checkpoint=str(args.checkpoint),
-               env_mismatches=env_mismatches(cfg, out["accuracy"]),
+               env_mismatches=env_mismatches(cfg, out["accuracy"], out["hitboxes"]),
                aim_log_std=log_std)
     for m in out["env_mismatches"]:
         print(f"WARNING: the run trained a different env, {m}")

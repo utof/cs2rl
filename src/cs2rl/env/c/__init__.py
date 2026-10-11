@@ -3,7 +3,9 @@
 Members:
   binding -- the extension module, built from binding.c by setup.py's ZigBuild (or
              `zig build`) into this directory. Untracked: a fresh clone has none;
-  cs2_env -- Cs2Env and make_env, the Python side over binding.
+  cs2_env -- Cs2Env and make_env, the Python side over binding;
+  hit_model -- hit_geometry(hitboxes): the eye heights and aim point of either hit model,
+               read from binding.hitbox_table() (#391).
 
 Exports two paths and nothing else:
   SOURCE_DIR -- this directory: the C sources, build.zig, the baked nav_data.h and the
