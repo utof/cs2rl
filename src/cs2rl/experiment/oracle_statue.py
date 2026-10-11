@@ -328,20 +328,24 @@ class ObsOracleActor:
     whole value of this actor is that a divergence from the ground-truth mode
     can only be the enemy encoding.
 
-    NOT AN EVAL BASELINE. Like ``IdleActor`` this is instrument code; it is a
-    strictly worse fighter than ``OracleActor`` (no velocity lead, no nav) and
-    exists to test the obs, not to score a policy against.
+    NOT AN EVAL BASELINE. Like ``IdleActor`` this is instrument code; by
+    default (lead=False) it is a worse fighter than ``OracleActor`` (no
+    velocity lead, no nav) and exists to test the obs, not to score a policy
+    against.
 
     PITFALLS
-      * One-tick velocity lead is GONE. ``OracleActor`` extrapolates the target
-        by v·dt because the aim command lands after movement; obs carries no
-        enemy velocity, so this actor aims where the enemy WAS. Harmless against
-        the statue, and against the #152 L1 walker too on the legacy ellipsoid:
+      * One-tick velocity lead is OFF by default. ``OracleActor`` extrapolates
+        the target by v·dt because the aim command lands after movement; with
+        lead=False this actor aims where the enemy WAS (the "obs-oracle"
+        reference rows of aim_eval and oracle_tracker). lead=True adds the
+        one-tick lead from the slot's relative velocity (+8/+9, sim-v4).
+        Harmless against the statue, and against the #152 L1 walker too on the
+        legacy ellipsoid:
         oracle_tracker measured the same TTK and shot count per episode in both
         hero modes (2026-10-09), because one tick of the walker's motion stays
         inside the 16 u hit half-width.
         A real handicap against a target fast enough to leave it: do not use
-        this actor as the oracle for one.
+        this actor with lead=False as the oracle for one.
       * ``obs[b + EN_DZ]`` is visibility-gated in C: 0 means "invisible", not
         "same height". Only the ``can_see`` branch below reads it.
       * Enemy stance is NOT in the obs, so the aim point's height is the
@@ -368,8 +372,10 @@ class ObsOracleActor:
     def __init__(self, max_turn_speed, laser_range, map_diag, rows, lead=False):
         self.mts = max_turn_speed
         # lead=True aims one tick ahead along the slot's relative velocity (+8/+9, sim-v4):
-        # the obs-only twin of OracleActor's v * dt lead. Off by default, so the
-        # "obs-oracle" reference (aim_eval, oracle_tracker) stays the one-tick-lag aimer.
+        # the obs-only counterpart of OracleActor's v * dt lead, with v relative to the
+        # hero (OracleActor uses the enemy's own v; the two agree while the hero stands
+        # still). Off by default, so the "obs-oracle" reference (aim_eval,
+        # oracle_tracker) stays the one-tick-lag aimer.
         self.lead = bool(lead)
         self.laser_range = laser_range
         self.map_diag = map_diag
