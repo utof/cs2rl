@@ -282,9 +282,9 @@ def test_round_rollover_reparks_the_same_slots(simple_map):
 def test_oracle_episode_kills_and_credits_rewards():
     """Spec §8: the vendored oracle on the T row through env.step() ends in a kill; reward_kill
     on the shooter's row; elimination win on the terminal tick; parked rows zero throughout.
-    The CT row stands still: with the oracle on both rows every seed ends in a same-tick double
-    kill, a draw, since combat resolves a tick's shots simultaneously (#152 L2; that path is
-    tests/env/c/test_simultaneous_combat.py)."""
+    The CT row stands still: with the oracle on both rows, seeds 0-9 each ended in a same-tick
+    double kill, a draw (#152 L2 measurement), since combat resolves a tick's shots
+    simultaneously (that path is tests/env/c/test_simultaneous_combat.py)."""
     from cs2rl.env.map import make_arena_duel_map
     from cs2rl.eval.baselines import BaselineEvaluator, OracleActor, StateReader, vis_from_obs
     env = make_env(map_data=make_arena_duel_map(),
