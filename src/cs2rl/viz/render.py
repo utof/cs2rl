@@ -47,9 +47,10 @@ PITFALLS
   A tracer is drawn from the post-step pose for that reason.
 * The tracer colour reads "an enemy of the shooter lost hp this tick". With several
   shooters on a side (dust2) it cannot say whose bullet it was (KNOWN LIMIT).
-* The tracer runs along facing / pitch. With ``EnvConfig.recoil`` on (off by default, no
-  CLI flag) the combat ray is also turned by a recoil punch the snapshot does not carry
-  (KNOWN LIMIT).
+* The tracer runs along facing / pitch, the aimed ray. The combat ray is also turned by the
+  movement-inaccuracy cone (``EnvConfig.accuracy``, on by default) and, with
+  ``EnvConfig.recoil`` on (off by default, no CLI flag), by a recoil punch. The snapshot
+  carries neither offset, so a missed shot's tracer can run through the target (KNOWN LIMIT).
 * Rerun stores positions and the eye quaternion as float32. The C positions are float32
   too, so they are exact; the aim direction is within float32 rounding.
 * The file is opened at the first round's end, then written round by round: a crash

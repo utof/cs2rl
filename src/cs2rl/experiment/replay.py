@@ -8,8 +8,9 @@
 WHAT
 ----
 Plays ``--rounds`` rounds of oracle_statue's arena harness (``run_check``: the Rung 1a env,
-jump off) with the hero on the T row and an opponent from ``aim_eval.OPPONENTS`` on the CT
-row, and records every tick with ``cs2rl.viz.render.ReplayRecorder``. The hero is a
+jump off, the movement-inaccuracy cone as ``--accuracy`` says) with the hero on the T row
+and an opponent from ``aim_eval.OPPONENTS`` on the CT row, and records every tick with
+``cs2rl.viz.render.ReplayRecorder``. The hero is a
 checkpoint (``aim_eval.load_checkpoint``: its run's config.json must sit beside it) played
 like aim_eval's policy cells (``--aim``, ``--lstm``), or ``oracle`` / ``obs-oracle``,
 oracle_statue's two scripted heroes. It prints one row per round, writes the replay (one
@@ -23,9 +24,9 @@ opponent's hp. An agent can read it, or name a round and tick for the owner to w
 
 FIDELITY
 --------
-Round k is episode k of the ``run_check`` call aim_eval makes for the same cell and seed:
-the same opponent factory, the same hero, the same torch seeding for a policy hero, and
-episodes do not depend on how many follow. Recording only reads the snapshots run_check
+Round k is episode k of the ``run_check`` call aim_eval makes for the same cell, seed and
+cone setting: the same opponent factory, the same hero, the same torch seeding for a policy
+hero, and episodes do not depend on how many follow. Recording only reads the snapshots run_check
 already takes, and draws no random numbers. tests/experiment/test_replay.py pins both (the
 aim_eval cell only where the Rung 1a checkpoint is present).
 
@@ -33,6 +34,10 @@ PITFALLS
 --------
 * A checkpoint trained on another env prints the same WARNING lines aim_eval prints
   (``aim_eval.env_mismatches``); the replay still plays the harness's env.
+* The cone (``EnvConfig.accuracy``): without ``--accuracy`` a checkpoint plays its run's own
+  config.json setting (``aim_eval.trained_accuracy``: a run from before the key trained
+  without it), as aim_eval does, and a scripted hero the EnvConfig default (on). The .txt
+  header names the setting the rounds ran.
 * Writes under ``outputs/recordings/`` (gitignored) unless ``--out`` says otherwise.
 """
 from __future__ import annotations
@@ -100,12 +105,14 @@ def play(hero: str,
          seed: int,
          on_step,
          aim: str = "sample",
-         lstm: str = "carried") -> tuple[dict, list[str]]:
+         lstm: str = "carried",
+         accuracy: bool | None = None) -> tuple[dict, list[str]]:
     """``(run_check summary, warnings)``: ``rounds`` rounds of ``hero`` against ``opponent``.
 
     The run_check call aim_eval.run_eval makes for this cell: a scripted hero runs as a
     reference row does, a checkpoint as a policy cell does, inside its own torch stream
-    seeded with ``seed``.
+    seeded with ``seed``. ``accuracy`` is run_check's cone switch; None plays a checkpoint's
+    own config.json setting and, for a scripted hero, the EnvConfig default.
     """
     make_opp = aim_eval.OPPONENTS[opponent]
     if hero in SCRIPTED_HEROES:
@@ -113,12 +120,14 @@ def play(hero: str,
                            seed,
                            obs_only=SCRIPTED_HEROES[hero],
                            opponent=make_opp(seed),
-                           on_step=on_step)
+                           on_step=on_step,
+                           accuracy=accuracy)
         return res, []
     import torch
     policy, cfg = aim_eval.load_checkpoint(hero)
     actor = aim_eval.build_policy_hero(policy, aim, lstm, int(cfg["bptt_horizon"]))
-    accuracy = aim_eval.trained_accuracy(cfg)
+    if accuracy is None:
+        accuracy = aim_eval.trained_accuracy(cfg)
     with torch.random.fork_rng(devices=[]):
         torch.manual_seed(seed)
         res = L0.run_check(rounds,
@@ -137,7 +146,8 @@ def save(hero: str,
          out: Path,
          aim: str = "sample",
          lstm: str = "carried",
-         command: str = "") -> dict:
+         command: str = "",
+         accuracy: bool | None = None) -> dict:
     """Play and record; write ``out`` (.rrd) and ``out`` with suffix .txt. Returns the summary
     with ``warnings``, ``replay`` and ``text`` added."""
     from cs2rl.env.map import make_arena_duel_map
@@ -150,11 +160,12 @@ def save(hero: str,
             rec(tick, st_prev, st)
             table(tick, st_prev, st)
 
-        res, warnings = play(hero, opponent, rounds, seed, on_step, aim, lstm)
+        res, warnings = play(hero, opponent, rounds, seed, on_step, aim, lstm, accuracy)
     hero_desc = hero if hero in SCRIPTED_HEROES else f"{hero} (aim {aim}, lstm {lstm})"
     lines = [
         f"# {command}" if command else "#",
-        f"# hero T{L0.HERO} = {hero_desc}; opponent CT{L0.STATUE} = {opponent}; seed {seed}",
+        f"# hero T{L0.HERO} = {hero_desc}; opponent CT{L0.STATUE} = {opponent}; seed {seed}"
+        f"; movement-inaccuracy cone {'on' if res['accuracy'] else 'off'}",
         "# aim_err: hero's yaw error to the opponent (bearing - facing), deg; window: the hit"
         " half-window asin(16/d), deg; F fired, H the opponent lost hp"
     ]
@@ -193,6 +204,14 @@ def main(argv=None) -> int:
                     default="carried",
                     help="a policy hero's LSTM state: carried all round, or zeroed every "
                     "bptt_horizon ticks as in training (default carried)")
+    ap.add_argument("--accuracy",
+                    type=int,
+                    choices=(0, 1),
+                    default=None,
+                    help="the movement-inaccuracy cone (EnvConfig.accuracy): 1 on, 0 off. "
+                    "Default: a checkpoint's run's own config.json setting (a run without the "
+                    "key trained without the cone), as aim_eval plays it; EnvConfig.accuracy "
+                    "for a scripted hero")
     ap.add_argument("--out",
                     type=Path,
                     help="the .rrd to write (default under outputs/recordings/)")
@@ -210,7 +229,8 @@ def main(argv=None) -> int:
                args.aim,
                args.lstm,
                command="python -m cs2rl.experiment.replay " +
-               " ".join(sys.argv[1:] if argv is None else argv))
+               " ".join(sys.argv[1:] if argv is None else argv),
+               accuracy=None if args.accuracy is None else bool(args.accuracy))
     for w in res["warnings"]:
         print(f"WARNING: the run trained a different env, {w}")
     for k, ep in enumerate(res["per_episode"], start=1):

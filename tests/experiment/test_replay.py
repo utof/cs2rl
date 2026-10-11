@@ -128,6 +128,48 @@ def test_the_cli_saves_and_prints_the_view_command(tmp_path, capsys):
             for r in load_archive(out).all_recordings()] == ["statue-round-1", "statue-round-2"]
 
 
+@pytest.mark.parametrize("hero,trained,argv,want", [
+    ("ckpt.pt", {}, [], False),
+    ("ckpt.pt", {
+        "accuracy": True
+    }, [], True),
+    ("ckpt.pt", {
+        "accuracy": True
+    }, ["--accuracy", "0"], False),
+    ("ckpt.pt", {}, ["--accuracy", "1"], True),
+    ("oracle", {}, [], None),
+    ("oracle", {}, ["--accuracy", "0"], False),
+])
+def test_the_cli_plays_the_cone_switch(monkeypatch, tmp_path, capsys, hero, trained, argv, want):
+    """A checkpoint plays its run's own cone setting (a config.json without the key trained
+    without it) unless --accuracy says otherwise, and then warns; a scripted hero follows
+    --accuracy, else the EnvConfig default (None). The .txt header names the cone it ran."""
+    from cs2rl.env.config import EnvConfig
+    from cs2rl.experiment import aim_eval, replay
+    from cs2rl.experiment import oracle_statue as L0
+    seen = {}
+
+    def fake_run_check(*args, **kw):
+        seen.update(kw)
+        ran = EnvConfig().accuracy if kw["accuracy"] is None else kw["accuracy"]
+        return {"per_episode": [], "accuracy": ran}
+
+    monkeypatch.setattr(L0, "run_check", fake_run_check)
+    monkeypatch.setattr(aim_eval, "load_checkpoint", lambda path: (None, {
+        "bptt_horizon": 64,
+        **trained
+    }))
+    monkeypatch.setattr(aim_eval, "build_policy_hero", lambda *a: None)
+    out = tmp_path / "cone.rrd"
+    assert replay.main([hero, "--out", str(out), *argv]) == 0
+    assert seen["accuracy"] is want
+    warned = [ln for ln in capsys.readouterr().out.splitlines() if "accuracy: run" in ln]
+    trained_on = aim_eval.trained_accuracy(trained)
+    assert len(warned) == (hero != "oracle" and want != trained_on), warned
+    cone = "on" if (EnvConfig().accuracy if want is None else want) else "off"
+    assert f"; movement-inaccuracy cone {cone}" in out.with_suffix(".txt").read_text()
+
+
 def test_default_path_names_the_run():
     from cs2rl.experiment.replay import default_path
     from cs2rl.spec.paths import RECORDINGS_DIR

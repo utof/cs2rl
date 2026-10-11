@@ -81,7 +81,8 @@ uv run rerun outputs/recordings/<the name it printed>.rrd
 - The hero is a checkpoint with its run's `config.json` beside it, `oracle` or `obs-oracle`.
   `--vs` is `statue`, `walker-4-16`, `walker-2-8-stop` or `heldout-24-48`.
 - Optional: `--rounds` (default 5), `--seed`, `--aim` (`sample` or `mean`), `--lstm`
-  (`carried` or `zeroed`) and `--out`.
+  (`carried` or `zeroed`), `--accuracy` (`0` or `1`: the movement-inaccuracy cone; default: a
+  checkpoint plays its run's own setting, a scripted hero the env default, on) and `--out`.
 - Files go to `outputs/recordings/` (gitignored), with a per-tick text dump (`.txt`) beside each
   replay.
 - `python -m cs2rl.train --record` writes one episode of the run's map with the same recorder,
