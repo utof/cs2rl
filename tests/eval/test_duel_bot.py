@@ -24,7 +24,9 @@ WHAT IS PINNED
   so it reaches the per-row acquisition and attack-delay clock. That is what a trainer
   needs (per-row state, per-row dials through ``configure``).
 * DuelBotActor fills only its own rows.
-* Importing the module pulls none of the HEAVY modules of tests/train/test_w1_modules.py.
+* Importing the module pulls none of the HEAVY modules of tests/train/test_w1_modules.py,
+  and no cs2rl module outside cs2rl.spec and cs2rl.eval (the cs2rl half of the module
+  docstring's "numpy and cs2rl.spec only").
 
 The duels themselves (symmetry, obs-only = ground truth, accounting, floors) are
 pinned in tests/experiment/test_oracle_duel.py.
@@ -291,5 +293,8 @@ def test_importing_the_module_pulls_no_heavy_module():
 import cs2rl.eval.duel_bot
 heavy = [m for m in {HEAVY!r} if m in sys.modules]
 assert not heavy, f"cs2rl.eval.duel_bot's module scope pulled {{heavy}}"
+extra = [m for m in sys.modules
+         if m.startswith("cs2rl.") and m.split(".")[1] not in ("spec", "eval")]
+assert not extra, f"cs2rl.eval.duel_bot's module scope pulled {{extra}}"
 """)
     assert r.returncode == 0, f"STDOUT:\n{r.stdout}\nSTDERR:\n{r.stderr}"
