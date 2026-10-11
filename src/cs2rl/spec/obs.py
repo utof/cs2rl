@@ -1,7 +1,7 @@
 # Auto-generated from cs2_types.h — do not edit manually.
 # Regenerate: uv run python scripts/sync_action_spec.py
 
-OBS_DIM = 110
+OBS_DIM = 120
 
 # Per-agent observation block layout, mirrored from the OBS_* macros in
 # cs2_types.h. Each value is a (start, stop) half-open slice usable
@@ -10,8 +10,8 @@ OBS_DIM = 110
 OBS_BLOCKS = {
     'self': (0, 28),
     'teammate': (28, 56),
-    'enemy': (56, 96),
-    'global': (96, 110),
+    'enemy': (56, 106),
+    'global': (106, 120),
 }
 
 # Per-entity sub-structure of the teammate / enemy blocks (count × stride).
@@ -19,4 +19,4 @@ OBS_BLOCKS = {
 OBS_TEAMMATE_COUNT = 4
 OBS_TEAMMATE_STRIDE = 7
 OBS_ENEMY_COUNT = 5
-OBS_ENEMY_STRIDE = 8
+OBS_ENEMY_STRIDE = 10

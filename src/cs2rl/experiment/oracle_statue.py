@@ -214,16 +214,18 @@ PASS_MAX_MEDIAN_TTK = 120.0
 OBS_ENEMY_BASE = OBS_BLOCKS["enemy"][0]
 
 # Sub-slot field order inside ONE enemy slot, mirroring the writer in
-# cs2_observations.h ("Enemies (OBS_ENEMY_BASE ..): 5 × 8"):
+# cs2_observations.h ("Enemies (OBS_ENEMY_BASE ..): 5 × 10"):
 #   +0/+1  (rx, ry) / map_diag, rotated by -facing  (+x ahead, +y left)
 #   +2     (enemy z - self z) / 128            [written only when can_see]
 #   +3     can_see (alive-gated vis10)   +4  alive
 #   +5/+6  sin/cos of the facing-relative bearing  [only when can_see]
 #   +7     2D distance / map_diag                  [only when can_see]
+#   +8/+9  (enemy v - self v) / 250, rotated by -facing  [only when can_see; sim-v4]
 # No generated constant exists for the field order, so this is the mirror that
 # can drift. That is the point: --obs-only is its tripwire, because the
 # ground-truth mode would keep passing 200/200 with every one of these wrong.
-EN_RX, EN_RY, EN_DZ, EN_SEE, EN_ALIVE, EN_SIN, EN_COS, EN_DIST = range(OBS_ENEMY_STRIDE)
+(EN_RX, EN_RY, EN_DZ, EN_SEE, EN_ALIVE, EN_SIN, EN_COS, EN_DIST, EN_VX,
+ EN_VY) = range(OBS_ENEMY_STRIDE)
 
 # Self-block slot the obs actor needs: obs[13] = is_crouching (cs2_observations.h).
 # crouch_enabled=0 pins it to 0 in this env; decoded anyway so the eye height is

@@ -395,7 +395,7 @@ def _hybrid_ppo_loss(policy,
 def _tag_param_groups(policy):
     """Partition policy params into the TAG groups (spec 2026-08-13 §4.2).
 
-    trunk        — encoder.* + lstm.* (620,544 of 626,971 trainable params,
+    trunk        — encoder.* + lstm.* (623,104 of 629,531 trainable params at the 120-wide obs,
                    99.0%, LSTM alone 526,336; this is why no 'total' group
                    exists — it would replicate trunk while reading as
                    independent signal). Trunk-split (spec 2026-08-15 §3.4):

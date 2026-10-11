@@ -31,10 +31,10 @@ static inline float recoil_decay_punch(float prev, float dt) {
  * The per-agent obs vector is four contiguous blocks:
  *   self     [0  .. 28)  OBS_SELF_SIZE                       scalar self-state
  *   teammate [28 .. 56)  OBS_TEAMMATE_COUNT × _STRIDE (4×7)  nearest teammates
- *   enemy    [56 .. 96)  OBS_ENEMY_COUNT    × _STRIDE (5×8)  dist-sorted enemies
- *   global   [96 .. 110) OBS_GLOBAL_SIZE                     round/bomb scalars
+ *   enemy    [56 .. 106) OBS_ENEMY_COUNT    × _STRIDE (5×10) dist-sorted enemies
+ *   global   [106 .. 120) OBS_GLOBAL_SIZE                    round/bomb scalars
  * Each block base is DERIVED from the preceding block's width, so the block
- * boundaries (28/56/96) live in exactly ONE place. Consumers:
+ * boundaries (28/56/106) live in exactly ONE place. Consumers:
  *   - cs2_observations.h writes every slot through these bases (never bare ints);
  *   - env_init() in cs2_env.h asserts the blocks tile OBS_DIM exactly;
  *   - scripts/sync_action_spec.py parses the *_SIZE/*_STRIDE/*_COUNT literals
@@ -45,18 +45,22 @@ static inline float recoil_decay_punch(float prev, float dt) {
  * startup and the generator raises at codegen time.
  * Batch 6 Task 2.5 (spec R9/D4): self block 25 → 28 — appended goal-direction
  * slots [sin(rel_bearing), cos(rel_bearing), dist/map_diag] to the nearest
- * bombsite, written in cs2_observations.h. Downstream bases shifted +3. */
+ * bombsite, written in cs2_observations.h. Downstream bases shifted +3.
+ * sim-v4 (enemy velocity): enemy stride 8 → 10 — slots +8/+9 are the enemy's
+ * velocity relative to the observer, in the observer's facing frame, /250.
+ * The global block shifted +10 (96 → 106). A checkpoint whose encoder reads the
+ * 110-wide sim-v3 vector is widened on load by cs2rl.policy.widen_sim_v3_encoder. */
 #define OBS_SELF_BASE       0
 #define OBS_SELF_SIZE       28
 #define OBS_TEAMMATE_BASE   (OBS_SELF_BASE + OBS_SELF_SIZE)
 #define OBS_TEAMMATE_STRIDE 7
 #define OBS_TEAMMATE_COUNT  4
 #define OBS_ENEMY_BASE      (OBS_TEAMMATE_BASE + OBS_TEAMMATE_STRIDE * OBS_TEAMMATE_COUNT)
-#define OBS_ENEMY_STRIDE    8
+#define OBS_ENEMY_STRIDE    10
 #define OBS_ENEMY_COUNT     5
 #define OBS_GLOBAL_BASE     (OBS_ENEMY_BASE + OBS_ENEMY_STRIDE * OBS_ENEMY_COUNT)
 #define OBS_GLOBAL_SIZE     14
-#define OBS_DIM             110
+#define OBS_DIM             120
 #define ACTION_DIM                                                                                 \
     7  /* Batch 3: HEAD_AIM removed; aim is now a continuous head, see AIM_DIM below */
 #define ACTION_MASK_DIM                                                                            \
@@ -76,8 +80,10 @@ static inline float recoil_decay_punch(float prev, float dt) {
  * sim-v3 (R0-E.1, #130): enemy slots +0/+1 (rel-pos) and +5/+6 (bearing) are
  * FACING-RELATIVE (rotated by -facing; memory fallback too). Same dim count.
  * Deploy OBS_VERSION untouched — the deploy sidecar is still absolute, so
- * policies trained after this bump must NOT be exported. */
-#define SIM_OBS_VERSION       "sim-v3-110dim"
+ * policies trained after this bump must NOT be exported.
+ * sim-v4: each enemy slot gains +8/+9, the enemy's velocity relative to the
+ * observer in its facing frame (/250, visibility-gated); OBS_DIM 110 → 120. */
+#define SIM_OBS_VERSION       "sim-v4-120dim"
 #define WEAPON_SWITCH_TICKS   8 /* ~0.5s at 16 Hz */
 #define CROUCH_COOLDOWN_TICKS 7 /* ~0.4s at 16 Hz */
 #define INVALID_AREA_IDX      (-1)
@@ -635,10 +641,10 @@ typedef struct {
      * field is set by env_reset (and by setup_bomb_carrier right after a reset; never
      * reassigned mid-round) and is the round's stable identity
      * signal. Consumed by compute_observations to emit the role bit at
-     * obs[OBS_GLOBAL_BASE+13] (=109 since the Batch 6 bearing slots; was 106,
-     * and 104 before the T4 pitch insertion). Pitfall: must stay in the int32_t block
-     * before bombsite_entered to keep ctypes alignment in sync — see GameStateC mirror in
-     * cs2_env.py. */
+     * obs[OBS_GLOBAL_BASE+13] (=119 since the sim-v4 enemy velocity slots; was 109,
+     * 106 before the Batch 6 bearing slots, and 104 before the T4 pitch insertion). Pitfall: must
+     * stay in the int32_t block before bombsite_entered to keep ctypes alignment in sync — see
+     * GameStateC mirror in cs2_env.py. */
     int32_t round_designated_carrier_id;
     int8_t  bombsite_entered[5]; /* per-T-agent flag: 1 if entered bombsite this round */
     int8_t  _pad_gs[3];          /* pad to 4-byte boundary */

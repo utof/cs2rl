@@ -6,7 +6,7 @@ import pytest
 
 from cs2rl.env.c.cs2_env import make_env
 from cs2rl.env.config import EnvConfig
-from cs2rl.spec.obs import OBS_BLOCKS
+from cs2rl.spec.obs import OBS_BLOCKS, OBS_ENEMY_STRIDE
 from tests._helpers.scenario import kill_agent, place_agent
 
 ENEMY_BASE = OBS_BLOCKS["enemy"][0]    # 56; agent 0's enemy slot 0 = agent 5
@@ -55,26 +55,27 @@ def test_memory_fallback_is_rotated(simple_map):
         env.reset()
         a0 = env._c_env.game.agents[0]
         a0.facing = 1.2
-        kill_agent(env, 5)                                                                         # agent 5 invisible ⇒ memory path
+        kill_agent(env, 5)                                                                           # agent 5 invisible ⇒ memory path
         sd = env._c_env.sd.contents
-                                                                                                   # spawn_team puts a0 EXACTLY on its area centroid, so the memory area
-                                                                                                   # must be a different one — pick the first centroid > 1u away.
+                                                                                                     # spawn_team puts a0 EXACTLY on its area centroid, so the memory area
+                                                                                                     # must be a different one — pick the first centroid > 1u away.
         mem_area = next(k for k in range(len(simple_map.centroids))
                         if abs(sd.centroid_xy[k * 2] - a0.x) +
                         abs(sd.centroid_xy[k * 2 + 1] - a0.y) > 1.0)
-        a0.enemy_mem_idx[0] = mem_area                                                             # indexed by team-relative enemy idx (agent 5)
+        a0.enemy_mem_idx[0] = mem_area                                                               # indexed by team-relative enemy idx (agent 5)
         cx, cy = sd.centroid_xy[mem_area * 2], sd.centroid_xy[mem_area * 2 + 1]
         map_diag = math.sqrt((1.0 / sd.inv_x_range)**2 + (1.0 / sd.inv_y_range)**2)
         obs, *_ = env.step(np.zeros((N_AGENTS, ACTION_DIM), np.int32),
                            np.zeros((N_AGENTS, AIM_DIM), np.float32))
         o = obs[0]
-                                                                                                   # Enemy slots are sorted by KNOWN distance, so agent 5 is not necessarily
-                                                                                                   # slot 0 (agent 6 is alive) — find the slot that is dead + not visible +
-                                                                                                   # has a nonzero memory position.
+                                                                                                     # Enemy slots are sorted by KNOWN distance, so agent 5 is not necessarily
+                                                                                                     # slot 0 (agent 6 is alive) — find the slot that is dead + not visible +
+                                                                                                     # has a nonzero memory position.
+        st = OBS_ENEMY_STRIDE
         slot = next(s for s in range(5)
-                    if o[ENEMY_BASE + s * 8 + 4] == 0.0 and o[ENEMY_BASE + s * 8 + 3] == 0.0 and (
-                        o[ENEMY_BASE + s * 8 + 0] != 0.0 or o[ENEMY_BASE + s * 8 + 1] != 0.0))
-        b = ENEMY_BASE + slot * 8
+                    if o[ENEMY_BASE + s * st + 4] == 0.0 and o[ENEMY_BASE + s * st + 3] == 0.0 and (
+                        o[ENEMY_BASE + s * st + 0] != 0.0 or o[ENEMY_BASE + s * st + 1] != 0.0))
+        b = ENEMY_BASE + slot * st
         mx, my = cx - a0.x, cy - a0.y
         cf, sf = math.cos(a0.facing), math.sin(a0.facing)
         rx, ry = mx * cf + my * sf, -mx * sf + my * cf
