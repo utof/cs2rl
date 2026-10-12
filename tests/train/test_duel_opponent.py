@@ -9,6 +9,7 @@ per-level outcome counts), the trainer override ``Cs2PuffeRL._duel_scripted_oppo
 (checked against a twin ``DuelOpponent`` here, and against a reference ``DuelBot`` on a
 real rollout in the training tier), and the per-level counters in the logged row.
 """
+import copy
 import types
 from typing import Any
 
@@ -201,14 +202,17 @@ def _done(n_envs, ended):
 
 def test_rounds_count_against_the_level_of_the_env_that_ended():
     opp = _opponent()
-    opp.level[:] = [0, 1, 1]
+    peek = copy.deepcopy(opp.rng).choice(2, size=2, p=opp.weights)     # envs 0 and 2's next levels
+    pre = np.array([1 - peek[0], 1, 1 - peek[1]])
+    opp.level[:] = pre
     obs, mask = _tick(15)
-    # Per-tick infos without a winner (the harness's) sit between the terminal ones.
+                                                                       # Per-tick infos without a winner (the harness's) sit between the terminal ones.
     infos = [{"winner": 0}, {"kills_t": 1}, {"winner": -2}]
     opp.step(obs, mask, _done(3, [0, 2]), infos)
     want = np.zeros((2, len(OUTCOMES)), dtype=np.int64)
-    want[0, OUTCOMES.index("win")] = 1                 # env 0, level 0, T (the hero) won
-    want[1, OUTCOMES.index("double")] = 1              # env 2, level 1, both died
+    want[pre[0], OUTCOMES.index("win")] += 1                           # env 0, T (the hero) won
+    want[pre[2], OUTCOMES.index("double")] += 1                        # env 2, both died
+    assert np.array_equal(opp.level[[0, 2]], peek)                     # the redraw is the other level
     assert np.array_equal(opp.pop_counts(), want)
     assert not opp.pop_counts().any(), "pop_counts must reset the counts"
 
