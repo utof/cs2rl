@@ -6,8 +6,8 @@ WHAT
 Two ``eval.duel_bot`` bots duel in oracle_statue's arena (``run_check``: the Rung 1a env, one
 agent a side, pin_pitch, crouch and jump off, the cone and the hit model as ``--accuracy`` and
 ``--hitboxes`` say). The hero plays ``--rounds`` rounds on the T row, then ``--rounds`` on the
-CT row against the same opponent, so a side advantage cancels in the hero's share and shows in
-the T share. It prints one row per round, the per-side totals and one PASS/FAIL line. Exit
+CT row against the same opponent (under ``--stop``, see STOP), so a side advantage cancels in the
+hero's share and shows in the T share. It prints one row per round, the per-side totals and one PASS/FAIL line. Exit
 status 0 = PASS, 1 = FAIL.
 
     env UV_NO_SYNC=1 PYTHONPATH=<checkout>/src .venv/bin/python -m cs2rl.experiment.oracle_duel
@@ -34,6 +34,17 @@ THE VERDICT
     interval contains 0.5; ``hero`` / ``opponent``: it lies above / below 0.5; ``any``: no check.
 A decided round has one survivor; a double kill and a time-out are draws.
 
+STOP (#417)
+-----------
+``--stop sign`` or ``--stop precision`` makes ``--rounds`` the cap per side: the two
+arrangements stay open (``_Arrangement``) and play alternating blocks, T then CT, to each look of
+cs2rl.experiment.sequential's pre-registered rule, and the cell stops at the first look that
+decides. Each arrangement's rows are the first rows of the fixed-n run. Under a stop the
+``--expect`` check reads the stop: for ``sign`` its decision (``even`` passes on "undecided at
+cap"), for ``precision`` its anytime-valid interval. The accounting and the T-share checks read
+the rounds played; the T-share check is not sequentially controlled and loses power when the
+cell stops early. A sign stop decided at a look prints no interval: its share is biased.
+
 WHAT L2 CERTIFIES, WHAT IT DOES NOT: the "L2" paragraph of src/cs2rl/experiment/CONTEXT.md.
 
 PITFALLS
@@ -57,6 +68,7 @@ from scipy.stats import binomtest
 
 from cs2rl.eval.duel_bot import ACCURACY_THRESHOLD_FRAC, PROFILES, DuelBotActor, DuelBotParams
 from cs2rl.experiment import oracle_statue as L0
+from cs2rl.experiment import sequential as S
 
 SIDES = ("T", "CT")
 ROWS = (L0.HERO, L0.STATUE)            # the T row and the CT row
@@ -294,7 +306,6 @@ def _play_to_stop(arrangements, cap: int, rule: str) -> dict:
     result's "stop". sign: a look at each ``look_rounds(cap)``; precision: a look every
     LADDER_BLOCK rounds and at the cap. The test always gets one outcome list per arrangement:
     a pooled list would read T's rounds before CT's."""
-    from cs2rl.experiment import sequential as S
 
     def outcomes():
         return [[r["outcome"] for r in arr.rows] for arr in arrangements]
@@ -418,6 +429,42 @@ def shots_accounted(accounting) -> bool:
     return all(a[k][0] + a[k][1] == a[k][2] for a in accounting for k in ("fired", "hit", "fast"))
 
 
+def _stop_text(stop: dict, share: float) -> str:
+    """A stop's outcome in words (#417): for a sign decision the look and its test, and no
+    interval (the share of a cell stopped at a look is biased); at an undecided cap the full
+    cell's fixed-n Wilson interval; under precision the anytime-valid interval."""
+    if stop["rule"] == "precision":
+        lo, hi = stop["interval"]
+        return (f"{stop['status']}, {stop['rounds']} rounds per side; anytime-valid hero share "
+                f"{share:.4f} [{lo:.4f}, {hi:.4f}], width {hi - lo:.4f}, precise at most "
+                f"{stop['width']}")
+    last = stop["looks"][-1]
+    if stop["decision"] == S.UNDECIDED:
+        lo, hi = stop["wilson"]
+        return (f"{S.UNDECIDED}, {last['rounds']} rounds per side; fixed-n hero share "
+                f"{share:.4f} [{lo:.4f}, {hi:.4f}]")
+    return (f"{stop['decision']} at look {last['look']} of {S.LOOKS}, {last['rounds']} rounds per "
+            f"side; p {last['p_value']:.3g} <= {last['alpha']:.3g}")
+
+
+def _hero_check(s: dict, stop: dict | None, expect: str, none: str | None):
+    """The hero-share check for ``expect`` (even, hero, opponent). Fixed n: the 95% Wilson
+    interval of the decided rounds. A sign stop: its decision, undecided at cap for even.
+    A precision stop: its anytime-valid interval. No decided round fails it."""
+    if stop is not None and stop["rule"] == "sign":
+        want = {"even": S.UNDECIDED, "hero": "hero", "opponent": "opponent"}[expect]
+        ok = s["decided"] > 0 and stop["decision"] == want
+        return (f"hero share sign stop: {expect}", ok, none or _stop_text(stop, s["hero_share"]))
+    if stop is None:
+        (lo, hi), name = s["hero_ci"], "hero share 95% CI"
+        detail = f"{s['hero_share']:.4f} [{lo:.4f}, {hi:.4f}]"
+    else:
+        (lo, hi), name = stop["interval"], "hero share mixture interval"
+        detail = _stop_text(stop, s["hero_share"])
+    ok = {"even": lo <= 0.5 <= hi, "hero": lo > 0.5, "opponent": hi < 0.5}[expect]
+    return (f"{name}: {expect}", s["decided"] > 0 and ok, none or detail)
+
+
 def verdict(res: dict, expect: str) -> tuple[bool, list[tuple[str, bool, str]]]:
     """(passed, [(name, ok, detail), ...]) — see THE VERDICT in the module docstring."""
     s = summary(res["rows"])
@@ -426,7 +473,6 @@ def verdict(res: dict, expect: str) -> tuple[bool, list[tuple[str, bool, str]]]:
     detail = "; ".join(f"{k} {a[k][0]}+{a[k][1]}={a[k][2]}" for a in acc
                        for k in ("fired", "hit", "fast"))
     lo, hi = s["t_ci"]
-    hlo, hhi = s["hero_ci"]
     # No decided round (a perfect mirror: every round a double kill) leaves both shares nan,
     # and nan fails both share checks: nothing was shown about who wins.
     none = "no decided round: every round a draw" if s["decided"] == 0 else None
@@ -439,10 +485,8 @@ def verdict(res: dict, expect: str) -> tuple[bool, list[tuple[str, bool, str]]]:
         ("T share 95% CI contains 0.5", lo <= 0.5 <= hi, none
          or f"{s['t_share']:.4f} [{lo:.4f}, {hi:.4f}]"),
     ]
-    rule = {"even": hlo <= 0.5 <= hhi, "hero": hlo > 0.5, "opponent": hhi < 0.5}
-    if expect in rule:
-        checks.append((f"hero share 95% CI: {expect}", rule[expect], none
-                       or f"{s['hero_share']:.4f} [{hlo:.4f}, {hhi:.4f}]"))
+    if expect in ("even", "hero", "opponent"):
+        checks.append(_hero_check(s, res.get("stop"), expect, none))
     return all(ok for _, ok, _ in checks), checks
 
 
@@ -468,9 +512,17 @@ def format_report(res: dict, hero: str, opponent: str, expect: str) -> str:
         fired, hit, fast = s[p + "_fired"], s[p + "_hit"], s[p + "_fast"]
         lines.append(f"{who:<9} wins {wins}  deaths {deaths}  shots fired {fired}  hit {hit} "
                      f"({hit / max(fired, 1):.3f})  fast {fast} ({fast / max(fired, 1):.3f})")
+    stop = res.get("stop")
+    per_side = f"{res['rounds']} per side" if stop is None else f"cap {res['rounds']} per side"
+    lines.append(f"rounds {s['rounds']} ({per_side}, seed {res['seed']}): decided {s['decided']}, "
+                 f"double kills {s['double']}, timeouts {s['timeout']}")
+    if stop is not None:
+        lines += [
+            f"stop ({stop['rule']}, #417): {_stop_text(stop, s['hero_share'])}",
+            "  the T-share check reads the rounds played: it is not sequentially controlled and "
+            "loses power when the cell stops early"
+        ]
     lines += [
-        f"rounds {s['rounds']} ({res['rounds']} per side, seed {res['seed']}): decided {s['decided']}, "
-        f"double kills {s['double']}, timeouts {s['timeout']}",
         f"time to kill (hero kills) median {s['ttk_median']:.1f}   time to death median "
         f"{s['ttd_median']:.1f} ticks", ""
     ]
@@ -488,7 +540,10 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hero", default=DEFAULT_BOT, help=f"the hero bot (default {DEFAULT_BOT})")
     ap.add_argument("--opponent", help="the opponent bot, or walker (default: the hero's spec)")
-    ap.add_argument("--rounds", type=int, default=500, help="rounds per side (default 500)")
+    ap.add_argument("--rounds",
+                    type=int,
+                    default=500,
+                    help="rounds per side, the cap per side under --stop (default 500)")
     ap.add_argument("--seed", type=int, default=0, help="env and bot seed (default 0)")
     ap.add_argument("--expect",
                     choices=("even", "hero", "opponent", "any"),
@@ -508,6 +563,12 @@ def main(argv=None) -> int:
                     default=None,
                     help="the hit model (EnvConfig.hitboxes): 1 the capsule hitboxes, 0 the legacy "
                     "ellipsoid. Default: EnvConfig.hitboxes.")
+    ap.add_argument("--stop",
+                    choices=("fixed", *STOP_RULES),
+                    default="fixed",
+                    help="fixed (default): play --rounds per side. sign / precision: play the "
+                    "sides in alternating blocks and stop at the first look of "
+                    "cs2rl.experiment.sequential's pre-registered rule (#417)")
     args = ap.parse_args(argv)
     opponent = args.opponent or args.hero
     try:
@@ -517,9 +578,14 @@ def main(argv=None) -> int:
     if hero == WALKER:
         ap.error("the hero must be a duel bot")
     expect = args.expect or ("even" if hero == opp else "any")
-    res = run_duel(hero, opp, args.rounds, args.seed, not args.ground_truth,
+    res = run_duel(hero,
+                   opp,
+                   args.rounds,
+                   args.seed,
+                   not args.ground_truth,
                    None if args.accuracy is None else bool(args.accuracy),
-                   None if args.hitboxes is None else bool(args.hitboxes))
+                   None if args.hitboxes is None else bool(args.hitboxes),
+                   stop=None if args.stop == "fixed" else args.stop)
     print(format_report(res, args.hero, opponent, expect))
     return 0 if verdict(res, expect)[0] else 1
 

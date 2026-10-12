@@ -176,7 +176,7 @@ def test_parse_bot():
 def test_main_exits_on_the_verdict_and_passes_the_switches(monkeypatch, capsys):
     seen = []
 
-    def fake(hero, opp, rounds, seed, obs_only, accuracy, hitboxes):
+    def fake(hero, opp, rounds, seed, obs_only, accuracy, hitboxes, stop=None):
         seen.append((rounds, seed, obs_only, accuracy, hitboxes))
         res = _rows(win=50, loss=50) if hero == opp else _rows(double=10)
         for k, r in enumerate(res["rows"]):
