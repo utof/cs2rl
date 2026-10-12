@@ -165,7 +165,8 @@ def assert_duel_env_supported(env_cfg: EnvConfig) -> None:
     passes above every capsule of a crouched target (cs2_env.h compute_masks), so a hero
     that may crouch could not be hit, and would learn to crouch. Its target velocity
     assumes one enemy (duel_bot.DuelBot.step_obs). KNOWN LIMIT, not refused: the map (the
-    bot's wall check assumes an open arena) and pin_pitch.
+    bot's wall check assumes an open arena), pin_pitch and accuracy/hitboxes other than 1/1
+    (the bot was measured only there; for_env reads hitboxes from the env).
     """
     bad = {
         k: getattr(env_cfg, k)

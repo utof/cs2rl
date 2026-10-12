@@ -415,7 +415,10 @@ def test_trainer_duel_rows_equal_a_reference_bot_across_rollout_boundaries():
     masks, the bot resetting a row only on its env's done flag. Obs, masks, done flags and the
     sent actions are recorded at the vector env's recv and send; only each episode's level is
     read off DuelOpponent (its draw is pinned by
-    test_only_the_ended_envs_draw_a_level_and_reset)."""
+    test_only_the_ended_envs_draw_a_level_and_reset).
+
+    KNOWN LIMIT: Serial only; the Multiprocessing CLI path was measured equal by review I
+    (r3-spy-mp-train), not pinned."""
     trainer, cleanup = _duel_trainer(4)
     try:
         vec = trainer.vecenv

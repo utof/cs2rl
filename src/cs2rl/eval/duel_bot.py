@@ -325,7 +325,10 @@ class DuelBot:
         """A bot over ``n_rows`` rows of ``env``'s map, rules and hit model: the turn clamp
         and the map's extent from its StaticData, the aim height from its hit model, and
         the rifle's move speed. Any Cs2Env built with the same config and map serves (a
-        trainer passes its vecenv's driver env, which lives in the main process)."""
+        trainer passes its vecenv's driver env, which lives in the main process).
+
+        KNOWN LIMIT: the rifle's, as the bot never switches weapon; a loadout that spawns
+        another weapon needs the held slot's speed, as oracle_duel.DuelRecorder reads it."""
         from cs2rl.env.c import binding
         from cs2rl.env.c.hit_model import hit_geometry
         sd = env._c_env.sd.contents
