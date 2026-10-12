@@ -529,7 +529,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # look perfectly well-formed. Key order does not matter — every config.json
     # dump uses sort_keys=True.
     if opponent == "duel":
-        cfg["duel_mix"] = parse_duel_mix(duel_mix_arg or DEFAULT_DUEL_MIX)
+        cfg["duel_mix"] = parse_duel_mix(DEFAULT_DUEL_MIX if duel_mix_arg is None else duel_mix_arg)
     env_keys = env_cfg.to_config_dict()
     assert not (cfg.keys() & env_keys.keys()), (
         "env config key collides with an existing config key: "

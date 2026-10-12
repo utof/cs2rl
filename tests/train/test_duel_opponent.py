@@ -86,6 +86,8 @@ def test_duel_budget_is_the_hero_steps_alone_and_the_mix_is_in_the_config():
         [["hard,style=stop", 1.0]]
     for other in ("self", "noop", "walker"):
         assert "duel_mix" not in _cfg(other, **DUEL_ENV), other
+    with pytest.raises(ValueError, match="is not SPEC:WEIGHT"):
+        _cfg("duel", duel_mix="", **DUEL_ENV)
 
 
 @pytest.mark.parametrize("other", ["self", "noop", "walker"])
