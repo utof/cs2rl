@@ -425,7 +425,10 @@ broken_contract_guidance = "Keep cs2rl.env.config stdlib-only: move the import i
 # Inside train/: the CLI on top, then the run driver, then the three things it composes
 # (the --record and --eval modes and the PuffeRL trainer), then the parts, then config.
 # The imports of trainer (torch, pufferlib) and of eval/viz stay function-local for
-# `--dump-config`'s lightness (tests/train/test_w1_modules.py), not for this contract.
+# `--dump-config`'s lightness (tests/train/test_w1_modules.py), except config's import of
+# cs2rl.eval.duel_bot (numpy and cs2rl.spec only;
+# tests/eval/test_duel_bot.py::test_importing_the_module_pulls_no_heavy_module), not for this
+# contract.
 # exhaustive: a new module in train/ fails until it gets a layer here.
 [[tool.importlinter.contracts]]
 name = "cs2rl.train layers"

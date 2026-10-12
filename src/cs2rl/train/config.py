@@ -125,10 +125,10 @@ SCRIPTED_OPPONENT_MODES = ("noop", "walker", "duel")
 # --opponent duel's default level mix, "+"-separated SPEC:WEIGHT entries; SPEC is
 # cs2rl.eval.duel_bot.parse_params' PROFILE[,dial=value...]. Easy-heavy, so a Rung 1b policy
 # can win from the start (Rung 1c research A5, Q3), in three styles, with one harder level
-# (fair) to climb to. The adad style and every level above fair stay out of it, held out for
-# the Rung 1c gate. A policy that already wins these (Rung 1b-2's arm V won about 99% of its
-# decided rounds against easy, easy,style=run and fair,style=stop) learns little from them:
-# pass a harder --duel-mix.
+# (fair) to climb to. The adad style and every level above fair stay out of it. A policy that
+# already wins these (Rung 1b-2's arm V won about 99% of its decided rounds against easy,
+# easy,style=run and fair,style=stop) learns little from them: pass a harder --duel-mix, and
+# keep a family (e.g. adad) out of it for the Rung 1c gate.
 DEFAULT_DUEL_MIX = "easy,style=stop:0.4+easy,style=run:0.3+easy:0.1+fair,style=stop:0.2"
 
 
