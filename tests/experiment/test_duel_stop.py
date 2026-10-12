@@ -76,6 +76,10 @@ def test_interleaved_policy_arrangements_play_duel_evals_one_side_cells():
             cells.append(D.run_duel(hero, opp, 4, 3, sides=(k, ))["rows"])
     with contextlib.ExitStack() as stack:
         arrs = _open(stack, hero, opp, 3)
+        for k, arr in enumerate(arrs):                 # duel_eval's recipe, pinned on the state
+            with torch.random.fork_rng(devices=[]):
+                torch.manual_seed(3 + k * D.CT_SEED_OFFSET)
+                assert torch.equal(arr.torch_state, torch.get_rng_state())
         for _ in range(2):
             for arr in arrs:
                 arr.play(2)
