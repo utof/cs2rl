@@ -441,6 +441,28 @@ def test_opponent_noop_without_no_self_play_is_refused_at_startup(tmp_path):
     assert not (tmp_path / "outputs").exists(), "the guard must fire before any side effect"
 
 
+@pytest.mark.slow
+def test_opponent_duel_records_its_mix_and_refuses_an_uncertified_env(tmp_path):
+    """Rung 1c: --duel-mix reaches config.json through the real argparse surface, with the
+    scripted budget, and --dump-config refuses a duel run outside the bot's certified env
+    (cs2rl.train.config.assert_duel_env_supported)."""
+    duel = _dump_config(tmp_path, "--opponent", "duel", "--no-self-play", "--n-active-per-team",
+                        "1", "--crouch-enabled", "0", "--jump-enabled", "0", "--timesteps",
+                        "1000000", "--duel-mix", "hard,style=stop:0.6+expert,style=run:0.4")
+    assert duel["opponent"] == "duel"
+    assert duel["duel_mix"] == [["hard,style=stop", 0.6], ["expert,style=run", 0.4]]
+    assert duel["total_timesteps"] == 10_000_000
+    r = run_train_command("--dump-config",
+                          "--checkpoint-dir",
+                          str(tmp_path / "refused"),
+                          "--opponent",
+                          "duel",
+                          "--no-self-play",
+                          timeout=120)
+    assert r.returncode != 0, r.stdout[-2000:]
+    assert "--opponent duel requires --n-active-per-team 1" in r.stderr, r.stderr[-2000:]
+
+
 def test_opponent_flag_declared_with_both_modes():
     """Source-scan pin for the opponent choices and default (the parser is built inline under
     `if __name__ == "__main__"` and cannot be imported): the flag must offer
@@ -460,7 +482,7 @@ def test_opponent_flag_declared_with_both_modes():
     assert "choices=OPPONENT_MODES" in body and 'default="self"' in body, body
     assert 'dest="opponent"' in body, body
     config_src = (REPO_ROOT / "src" / "cs2rl" / "train" / "config.py").read_text()
-    assert 'OPPONENT_MODES = ("self", "noop", "walker")' in config_src
+    assert 'OPPONENT_MODES = ("self", "noop", "walker", "duel")' in config_src
 
 
 @pytest.mark.slow

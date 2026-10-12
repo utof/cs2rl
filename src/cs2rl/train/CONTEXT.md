@@ -14,7 +14,7 @@ every flag.
 | driver | `loop` | `train(args)`: the run (W&B, metrics.jsonl, seeding, resume, eval hook), the epoch loop, checkpoints, dead-run detection |
 | builder | `compose` | `build_trainer`: shared memory, vec env, policy, participation rows, self-play manager and `Cs2PuffeRL`, for `train()` and the test harness |
 | modes | `record`, `evaluate`, `trainer` | `--record`, `--eval`, and `Cs2PuffeRL` |
-| parts | `selfplay`, `envs`, `update`, `rewards`, `entropy`, `resume`, `metrics` | the self-play pool, env wiring and `--smoke`, the PPO loss, reward normalisation, the entropy schedule, full-state resume, metric rows |
+| parts | `selfplay`, `envs`, `update`, `rewards`, `entropy`, `resume`, `metrics`, `duel_opponent` | the self-play pool, env wiring and `--smoke`, the PPO loss, reward normalisation, the entropy schedule, full-state resume, metric rows, the `--opponent duel` bot with its level mix and per-level outcome counts |
 | base | `config` | `build_train_config` (the run's `config.json`), `env_config_from_args` |
 
 The policy network is `cs2rl.policy_net.Dust2Policy`, built by `cs2rl.policy.build_policy`;

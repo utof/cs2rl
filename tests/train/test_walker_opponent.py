@@ -28,8 +28,7 @@ from cs2rl.train.config import (
 
 
 def test_walker_is_a_scripted_mode_and_the_cli_and_resolver_accept_it():
-    assert OPPONENT_MODES == ("self", "noop", "walker")
-    assert SCRIPTED_OPPONENT_MODES == ("noop", "walker")
+    assert "walker" in OPPONENT_MODES and "walker" in SCRIPTED_OPPONENT_MODES
     assert resolve_opponent_mode(types.SimpleNamespace(opponent="walker")) == "walker"
 
 

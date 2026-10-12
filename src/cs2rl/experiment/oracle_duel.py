@@ -68,7 +68,7 @@ from typing import Any
 import numpy as np
 from scipy.stats import binomtest
 
-from cs2rl.eval.duel_bot import ACCURACY_THRESHOLD_FRAC, PROFILES, DuelBotActor, DuelBotParams
+from cs2rl.eval.duel_bot import ACCURACY_THRESHOLD_FRAC, DuelBotActor, parse_params
 from cs2rl.experiment import oracle_statue as L0
 from cs2rl.experiment import sequential as S
 
@@ -81,21 +81,13 @@ MAX_TIMEOUT_SHARE = 0.05
 
 
 def parse_bot(spec: str):
-    """``PROFILE[,dial=value...]`` -> DuelBotParams, or WALKER. Raises ValueError."""
+    """``PROFILE[,dial=value...]`` -> DuelBotParams, or WALKER. Raises ValueError.
+
+    Everything but the bare ``walker`` is ``duel_bot.parse_params``' grammar."""
     name, *dials = spec.split(",")
     if name == WALKER and not dials:
         return WALKER
-    if name != "perfect" and name not in PROFILES:
-        raise ValueError(f"unknown bot {name!r}: one of perfect, {', '.join(PROFILES)}, {WALKER}")
-    params = DuelBotParams() if name == "perfect" else PROFILES[name]
-    types = {f.name: type(getattr(params, f.name)) for f in dataclasses.fields(params)}
-    kw: dict[str, Any] = {}
-    for d in dials:
-        key, _, value = d.partition("=")
-        if key not in types:
-            raise ValueError(f"unknown dial {key!r}: one of {', '.join(types)}")
-        kw[key] = bool(int(value)) if types[key] is bool else types[key](value)
-    return dataclasses.replace(params, **kw)
+    return parse_params(spec)
 
 
 def _actor(spec, row: int, rng: np.random.Generator, obs_only: bool):

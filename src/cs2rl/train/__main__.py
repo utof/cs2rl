@@ -25,6 +25,7 @@ from cs2rl.policy import validate_aim_log_std_max
 from cs2rl.spec.paths import CHECKPOINTS_DIR, RECORDINGS_DIR
 from cs2rl.train.config import (
     DEFAULT_CHECKPOINT_INTERVAL,
+    DEFAULT_DUEL_MIX,
     DEFAULT_GAMMA,
     OPPONENT_MODES,
     assert_opponent_self_play_compatible,
@@ -205,8 +206,18 @@ if __name__ == "__main__":
                         "statue (no-op bin on every action head, zero aim delta) and excludes "
                         "its rows from participation, from --timesteps and from every loss. "
                         "'walker' is the same except each opponent row walks a scripted walker "
-                        "(cs2rl.eval.walker.TRAIN_MIX, re-drawn every episode). "
-                        "Both require --no-self-play. Default 'self' = today's behaviour.")
+                        "(cs2rl.eval.walker.TRAIN_MIX, re-drawn every episode). 'duel' is the "
+                        "same except the opponent team is #152 L2's duel bot, which shoots "
+                        "back, at a --duel-mix level drawn per env every episode. "
+                        "All three require --no-self-play. Default 'self' = today's behaviour.")
+    parser.add_argument("--duel-mix",
+                        type=str,
+                        default=None,
+                        dest="duel_mix",
+                        help="--opponent duel's levels: SPEC:WEIGHT entries joined by '+', "
+                        "SPEC = PROFILE[,dial=value...] (cs2rl.eval.duel_bot.parse_params), "
+                        "weights positive and summing to 1. Recorded in config.json as "
+                        f"duel_mix. Default: {DEFAULT_DUEL_MIX}")
     # R0-G env knobs. Default None ⇒ the env/nav.py constant (config.json
     # records None, not a copied constant). Not in RESUME_CONFIG_ALLOWLIST:
     # changing any of them on --resume-run is a different experiment.
@@ -361,7 +372,7 @@ if __name__ == "__main__":
     # --dump-config / the sweep fingerprint reject a bad --aim-log-std-max
     # instead of build_policy() 30 s into every retry.
     validate_aim_log_std_max(args.aim_log_std_max)
-    # Rung 1a T3: a scripted --opponent (noop, walker) is only coherent with self-play bookkeeping
+    # Rung 1a T3: a scripted --opponent (noop, walker, duel) is only coherent with self-play bookkeeping
     # off. Checked HERE, above the --dump-config exit, for the same reason as
     # the σ cap: the Modal/run_rung1 fingerprint step must reject the launch
     # before any env is built.

@@ -62,6 +62,7 @@ def _build_trainer_for_test(
     aim_entropy_bonus: bool = True,
     opponent: str = "self",
     self_play_mgr=None,
+    duel_mix: str | None = None,
 ):
     """Build a tiny in-process ``Cs2PuffeRL`` trainer for trainer-level tests.
 
@@ -133,7 +134,9 @@ def _build_trainer_for_test(
         Rung 1a T3 (spec 2026-08-30): ``"self"`` (default, today's behaviour —
         both teams train) or ``"noop"`` (the opponent team is a stationary
         statue: no-op action bin on every head and NON-participating rows) or ``"walker"``
-        (the same, except the move head walks a RandomWalker mix).
+        (the same, except the move head walks a RandomWalker mix) or ``"duel"`` (the same,
+        except the duel bot plays every head; build_train_config refuses it unless
+        ``n_active_per_team=1``, ``crouch_enabled=0`` and ``jump_enabled=0``).
         Set on ``args``, so config ``opponent``, the participating-step budget,
         the participation rows and the self-play manager all come from it, through
         the same code as ``--opponent``.
@@ -141,6 +144,9 @@ def _build_trainer_for_test(
         build_trainer, as the CLI refuses ``--opponent noop`` without
         ``--no-self-play`` — a past-policy opponent is not a statue, and
         maybe_switch_teams would flip the statue's team mid-run.
+    duel_mix : str or None
+        ``--duel-mix`` for ``opponent="duel"`` (None: the CLI default,
+        cs2rl.train.config.DEFAULT_DUEL_MIX).
     self_play_mgr : SelfPlayManager or None
         A caller-built manager used INSTEAD of ``build_selfplay_manager``'s;
         build_trainer refuses one whose opponent_mode or pin_pitch disagrees
@@ -198,6 +204,7 @@ def _build_trainer_for_test(
             aim_log_std_max=aim_log_std_max,
             aim_entropy_bonus=aim_entropy_bonus,
             opponent=opponent,
+            duel_mix=duel_mix,
             num_envs=num_envs,
             self_play=with_selfplay,
             map_data=make_simple_map() if map_data is None else map_data,
