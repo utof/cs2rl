@@ -1,8 +1,8 @@
 # src/cs2rl/experiment/
 
 Experiment tooling: the gates and analyses that read a run's files after it has finished,
-three scripted-bot checks, an aim evaluation that plays a checkpoint against scripted
-opponents, and a replay saver that records such rounds to watch. Each module with a `main()`
+three scripted-bot checks, an aim evaluation and a duel evaluation that play a checkpoint
+against scripted opponents, and a replay saver that records such rounds to watch. Each module with a `main()`
 is a command line, run by module name from the repository root.
 
 ## What is here
@@ -16,6 +16,7 @@ is a command line, run by module name from the repository root.
 | `oracle_tracker` | nothing: `oracle_statue`'s harness with a random walker as the opponent (#152 L1) | one row per episode, the totals and one PASS/FAIL line |
 | `oracle_duel` | nothing: two `eval.duel_bot` bots (or a bot and the L1 walker) in `oracle_statue`'s harness, the hero on the T row and then on the CT row (#152 L2); `--accuracy` and `--hitboxes` as in `oracle_statue` | one row per round (seed, spawns, outcome, each side's fired, hit and fast shots), the per-side totals and one PASS/FAIL line, exit 0 PASS, 1 FAIL |
 | `aim_eval` | one policy checkpoint and its run's `config.json`, played in `oracle_statue`'s harness against a statue and three walkers | one row per opponent, aim mode and LSTM mode, plus the oracle and obs-oracle reference rows per opponent: kills, TTK, hit/fired, the aim error split along and across the target's motion, the lag in ticks, and on the policy rows the gap to the scripted oracle; no verdict, exit 0 when the run completes |
+| `duel_eval` | one policy checkpoint and its run's `config.json`, played in `oracle_duel`'s harness against `eval.duel_bot` opponents (by default the six Rung 1c opponents, the policy on the T side), with the perfect bot and the opponent's own spec as reference heroes on the same seeds | one row per cell (opponent, hero, side): the outcomes, the hero's share of the decided rounds with its 95% Wilson interval, hit per fired, the share of shots fired fast, the first-shot hit rate, time to damage and to kill, hp lost, lifetime, the moving share of idle ticks and the accounting check; `--json` writes every number and the per-round rows; no verdict, exit 0 when the run completes |
 | `replay` | one policy checkpoint and its run's `config.json`, or `oracle` / `obs-oracle`, played in `oracle_statue`'s harness against one `aim_eval` opponent | one line per round and the `rerun` command that opens the replay; writes the replay (`viz.render.ReplayRecorder`, one Rerun recording per round) and a per-tick text dump beside it, under `outputs/recordings/` by default; exit 0 when the rounds complete |
 
 ```bash
