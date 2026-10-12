@@ -16,9 +16,11 @@ WHAT IS PINNED HERE (seed 0 unless named; the values observed 2026-10-12)
 * The precision stop plays LADDER_BLOCK rounds per arrangement between looks and returns what
   sequential.precision_stop returns on the rounds played.
 * The verdict reads the stop: ``--expect hero`` fails an undecided stop even when the Wilson
-  interval of the rows lies above 0.5, and passes a "hero" decision even when it does not. A
-  cell decided at a look prints no Wilson interval of the hero's share, in oracle_duel's report
-  and in duel_eval's table, and an undecided cell prints the full cell's.
+  interval of the rows lies above 0.5, and passes a "hero" decision even when it does not;
+  ``--expect opponent`` reads the "opponent" decision. A cell decided at a look prints no Wilson
+  interval of the hero's share, in oracle_duel's report and in duel_eval's table, and an
+  undecided cell prints the full cell's. Under a precision stop the verdict, the report and the
+  table read the stop's anytime-valid interval, not the rows' Wilson interval.
 * The stop reads back from JSON with its fixed-n "wilson" (dataclasses.asdict would drop it).
 * duel_eval passes the stop to run_duel and each cell carries it.
 """
@@ -162,11 +164,11 @@ def test_the_verdict_and_the_report_read_the_stop(monkeypatch):
     decided = _planted_run(monkeypatch, "win", "win")[0]["stop"]
     assert (undecided["decision"], decided["decision"]) == (S.UNDECIDED, "hero")
     name = "hero share sign stop: hero"
-    above = _report_res(_rows(win=80, loss=20), undecided)             # Wilson above 0.5
+    above = _report_res(_rows(win=80, loss=20), undecided)                           # Wilson above 0.5
     ok, checks = D.verdict(above, "hero")
     assert not ok and [n for n, good, _ in checks if not good] == [name]
     assert D.verdict(above, "even")[0]
-                                                                       # Hero share 0.55, T share 0.5: the report's only interval of 0.55 would be the hero's.
+                                                                                     # Hero share 0.55, T share 0.5: the report's only interval of 0.55 would be the hero's.
     even = _report_res(_rows(win=55, loss=45, t_won=50), decided)
     assert D.verdict(even, "hero")[0]
     lo, hi = D.summary(even["rows"])["hero_ci"]
@@ -174,6 +176,17 @@ def test_the_verdict_and_the_report_read_the_stop(monkeypatch):
     assert "stop (sign, #417): hero at look" in report
     assert f"{lo:.4f}" not in report and f"{hi:.4f}" not in report
     assert "not sequentially controlled" in report and "(cap 50 per side," in report
+    lost = _planted_run(monkeypatch, "loss", "loss")[0]["stop"]
+    assert lost["decision"] == "opponent"
+    assert D.verdict(_report_res(_rows(win=45, loss=55, t_won=50), lost), "opponent")[0]
+    assert not D.verdict(even, "opponent")[0]                                        # even: the "hero" decision
+                                                                                     # A precision stop: the verdict and the report read its anytime-valid interval (above 0.9
+                                                                                     # after 80 wins and no loss), not the rows' Wilson interval (it contains 0.5).
+    prec = _planted_run(monkeypatch, "win", "win", cap=100, stop="precision")[0]["stop"]
+    res = _report_res(_rows(win=55, loss=45, t_won=50), prec)
+    assert D.verdict(res, "hero")[0] and not D.verdict(res, "even")[0]
+    assert "stop (precision, #417): precise, 40 rounds per side" in D.format_report(
+        res, "a", "b", "hero")
 
 
 def test_the_stop_reads_back_from_json_with_its_wilson_interval(monkeypatch):
@@ -211,3 +224,28 @@ def test_duel_eval_passes_the_stop_and_its_table_shows_it(monkeypatch):
     assert perfect.endswith("cap (20)") and f"[{lo:.4f}, {hi:.4f}]" in perfect
     assert "* stopped at a look: the share is biased and has no fixed-n interval (#417)" in table
     assert table[0].startswith("duel_eval: up to 20 rounds per cell (--stop sign, #417)")
+
+
+def test_duel_eval_table_shows_a_precision_stops_interval(monkeypatch):
+    from cs2rl.experiment import duel_eval as E
+    from tests.experiment.test_duel_eval import _res
+    prec = _planted_run(monkeypatch, "win", "win", cap=100, stop="precision")[0]["stop"]
+    seen = []
+
+    def fake(hero, opp, rounds, seed, obs_only, accuracy, hitboxes, sides, stop):
+        seen.append(stop)
+        return {**_res(), "stop": prec}
+
+    monkeypatch.setattr(E, "policy_hero", lambda *a: "policy")
+    monkeypatch.setattr(D, "run_duel", fake)
+    out = E.run_eval(None, 64, rounds=100, opponents=("easy,style=stop", ), stop="precision")
+    assert seen == ["precision"] * 3
+    table = E.format_table(out).splitlines()
+    policy = table[3]
+    lo, hi = prec["interval"]
+    flo, fhi = out["cells"][0]["hero_ci"]
+    assert f"[{lo:.4f}, {hi:.4f}]" in policy and f"[{flo:.4f}, {fhi:.4f}]" not in policy
+    assert policy.endswith("precise (40)")
+    assert ("precision stop (#417): [95% CI] is the anytime-valid interval of the share; "
+            f"a cell is precise once it is at most {S.WIDTH} wide") in table
+    assert table[0].startswith("duel_eval: up to 100 rounds per cell (--stop precision, #417)")
