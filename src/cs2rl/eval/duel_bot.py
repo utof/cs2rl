@@ -227,9 +227,9 @@ def parse_params(spec: str) -> DuelBotParams:
     """``PROFILE[,dial=value...]`` -> DuelBotParams; raises ValueError.
 
     PROFILE is a ``PROFILES`` key or ``perfect`` (``DuelBotParams()``); each dial is a
-    DuelBotParams field (``style=run``, ``reaction_ticks=3``, ``lead=0``). The grammar of
-    cs2rl.experiment.oracle_duel.parse_bot without its ``walker`` opponent. It lives here
-    for cs2rl.train, which the package layers forbid to import cs2rl.experiment.
+    DuelBotParams field (``style=run``, ``reaction_ticks=3``, ``lead=0``). It lives here
+    for cs2rl.train, which the package layers forbid to import cs2rl.experiment;
+    cs2rl.experiment.oracle_duel.parse_bot delegates to it for every non-walker spec.
     """
     name, *dials = spec.split(",")
     if name != "perfect" and name not in PROFILES:

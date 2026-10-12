@@ -16,7 +16,7 @@ import numpy as np
 import pytest
 import torch
 
-from cs2rl.eval.duel_bot import H_SHOOT, PROFILES, DuelBot, DuelBotParams, parse_params
+from cs2rl.eval.duel_bot import H_SHOOT, DuelBot, DuelBotParams, parse_params
 from cs2rl.spec.action import ACTION_DIM, ACTION_MASK_DIM, AIM_DIM
 from cs2rl.spec.obs import OBS_DIM
 from cs2rl.train.config import (
@@ -117,22 +117,6 @@ def test_parse_duel_mix_refuses_a_bad_mix(text, match):
 def test_parse_duel_mix_keeps_the_order_and_the_specs():
     assert parse_duel_mix(TWO_LEVELS) == [["hard,style=adad", 0.5], ["easy,style=run", 0.5]]
     assert [w for _, w in parse_duel_mix(DEFAULT_DUEL_MIX)] == [0.4, 0.3, 0.1, 0.2]
-
-
-def test_parse_params_is_oracle_duels_bot_grammar():
-    """The copy in eval.duel_bot (train/ may not import experiment/) must not drift."""
-    from cs2rl.experiment.oracle_duel import parse_bot
-
-    specs = [
-        "perfect", *PROFILES, "easy,style=run", "hard,reaction_ticks=3,lead=0",
-        "elite,style=adad,strafe_ticks=4,focus_initial_deg=1.5", "perfect,lead=1"
-    ]
-    for spec in specs:
-        assert parse_params(spec) == parse_bot(spec), spec
-    assert parse_params("hard,lead=0").lead is False and parse_params("perfect") == DuelBotParams()
-    for bad in ("walker", "nobody", "easy,aim=1"):
-        with pytest.raises(ValueError):
-            parse_params(bad)
 
 
 @pytest.mark.parametrize("knob,value", [("n_active_per_team", 2), ("crouch_enabled", 1),
