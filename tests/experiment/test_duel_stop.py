@@ -162,8 +162,8 @@ def test_the_verdict_and_the_report_read_the_stop(monkeypatch):
     ok, checks = D.verdict(above, "hero")
     assert not ok and [n for n, good, _ in checks if not good] == [name]
     assert D.verdict(above, "even")[0]
-                                                                       # Hero share 0.6, T share 0.5: the report's only interval of 0.6 would be the hero's.
-    even = _report_res(_rows(win=60, loss=40, t_won=50), decided)
+                                                                       # Hero share 0.55, T share 0.5: the report's only interval of 0.55 would be the hero's.
+    even = _report_res(_rows(win=55, loss=45, t_won=50), decided)
     assert D.verdict(even, "hero")[0]
     lo, hi = D.summary(even["rows"])["hero_ci"]
     report = D.format_report(even, "a", "b", "hero")
