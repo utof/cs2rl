@@ -47,6 +47,7 @@ PITFALLS
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import math
 from typing import Any
@@ -183,6 +184,107 @@ def _outcome(hero_died, opp_died) -> str:
     return "loss" if opp_died is None else "double"
 
 
+class _Arrangement:
+    """One arrangement (the hero on one side) kept alive between blocks of rounds (#417).
+
+    It holds what carries from round to round: the env (its C RNG streams), the
+    BaselineEvaluator, both actors (their Generators, seeded [arr_seed, 0] for the hero and
+    [arr_seed, 1] for the opponent, and their per-row state), the DuelRecorder, the env's
+    StepStats totals, the unmatched visibility slots, and its own torch RNG state, seeded with
+    the arrangement's seed as duel_eval seeds a cell. ``play(k)`` plays k more rounds through
+    oracle_statue's ``_episode``, as ``run_check`` does, and appends their rows.
+
+    WHY not ``run_check``: it builds and closes its env inside one call, so a second call
+    restarts the C RNG and replays the first call's spawns (measured, #417).
+    WHY its own torch state: a policy samples from the process-wide torch RNG (its discrete
+    heads even with the mean aim), so two arrangements played in alternating blocks would share
+    one stream: 7 of 30 and 0 of 30 rows equal the one-arrangement rows that way, 30 of 30 with
+    the swap (#417). The duel bots and the walker never touch torch: for them it changes
+    nothing.
+    PITFALL: ``close()`` frees the C env; call it once (``contextlib.closing``).
+    """
+
+    def __init__(self,
+                 hero,
+                 opponent,
+                 hero_side,
+                 seed,
+                 obs_only=True,
+                 accuracy=None,
+                 hitboxes=None):
+        import torch
+
+        from cs2rl.env.c import binding
+        self.h, self.o = hero_side, 1 - hero_side
+        self.arr_seed = seed if hero_side == 0 else seed + CT_SEED_OFFSET
+        hero_rng, opp_rng = np.random.default_rng([self.arr_seed,
+                                                   0]), np.random.default_rng([self.arr_seed, 1])
+        bots = [
+            _actor(hero, ROWS[hero_side], hero_rng, obs_only),
+            _actor(opponent, ROWS[self.o], opp_rng, obs_only)
+        ]
+        self.t_bot, self.ct_bot = bots if hero_side == 0 else bots[::-1]
+        self.rec = DuelRecorder([w["move_speed"] for w in binding.weapon_defs()])
+        self.env = L0.build_env(self.arr_seed, L0.ROUND_TIME, accuracy, hitboxes)
+        self.flags = (bool(self.env.config.accuracy), bool(self.env.config.hitboxes))
+        self.ev = L0.BaselineEvaluator(self.env, episodes=2, seed=self.arr_seed)
+        self.rows, self.totals, self.unmatched = [], dict(shots_fired=0,
+                                                          shots_hit=0,
+                                                          shots_fired_fast=0), 0
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(self.arr_seed)
+            self.torch_state = torch.get_rng_state()
+
+    def play(self, k: int) -> None:
+        """Play ``k`` more rounds and append their rows (run_duel's keys)."""
+        import torch
+        saved = torch.get_rng_state()
+        torch.set_rng_state(self.torch_state)
+        for _ in range(k):
+            r = L0._episode(self.env, self.ev, self.t_bot, self.ct_bot, 0.0, L0.ROUND_TIME,
+                            self.rec)
+            es = self.env._c_env.episode_stats
+            for key in self.totals:
+                self.totals[key] += int(getattr(es, key))
+            self.unmatched += r["unmatched"]
+            rr, h, o = self.rec.rounds[-1], self.h, self.o
+            self.rows.append({
+                "seed": self.arr_seed,
+                "episode": len(self.rows),
+                "t_xy": r["hero_xy"],
+                "ct_xy": r["statue_xy"],
+                "hero_side": SIDES[h],
+                "ticks": rr["ticks"],
+                "outcome": _outcome(rr["died"][h], rr["died"][o]),
+                "t_won": rr["died"][1] is not None and rr["died"][0] is None,
+                "ct_won": rr["died"][0] is not None and rr["died"][1] is None,
+                "kill_tick": rr["died"][o],
+                "death_tick": rr["died"][h],
+                **{
+                    f"{who}_{key}": rr[key][s]
+                    for who, s in (("hero", h), ("opp", o))
+                    for key in PER_SIDE
+                }
+            })
+        self.torch_state = torch.get_rng_state()
+        torch.set_rng_state(saved)
+
+    def accounting(self) -> dict:
+        """Each side's fired, hit and fast shots over the rounds played, beside the env's
+        totals for them, and the unmatched visibility slots."""
+        rounds = self.rec.rounds
+        acc: dict[str, Any] = {
+            k: (sum(r[k][0] for r in rounds), sum(r[k][1] for r in rounds), self.totals[ek])
+            for k, ek in (("fired", "shots_fired"), ("hit", "shots_hit"), ("fast",
+                                                                           "shots_fired_fast"))
+        }
+        acc["unmatched"] = self.unmatched
+        return acc
+
+    def close(self) -> None:
+        self.env.close()
+
+
 def run_duel(hero,
              opponent,
              rounds: int = 500,
@@ -193,62 +295,26 @@ def run_duel(hero,
              sides=(0, 1)) -> dict:
     """The arrangements in ``sides`` (0: the hero on the T row at ``seed``, 1: on the CT row at
     ``seed + CT_SEED_OFFSET``); returns {"rows": per-round rows, "accounting": one entry per
-    arrangement played, ...}. ``hero`` and ``opponent`` are what ``_actor`` takes."""
-    from cs2rl.env.c import binding
-    rows, accounting, env_flags = [], [], (None, None)
-    for hero_side, arr_seed in ((0, seed), (1, seed + CT_SEED_OFFSET)):
-        if hero_side not in sides:
-            continue
-        hero_rng, opp_rng = np.random.default_rng([arr_seed,
-                                                   0]), np.random.default_rng([arr_seed, 1])
-        bots = [
-            _actor(hero, ROWS[hero_side], hero_rng, obs_only),
-            _actor(opponent, ROWS[1 - hero_side], opp_rng, obs_only)
-        ]
-        t_bot, ct_bot = (bots if hero_side == 0 else bots[::-1])
-        rec = DuelRecorder([w["move_speed"] for w in binding.weapon_defs()])
-        res = L0.run_check(episodes=rounds,
-                           seed=arr_seed,
-                           hero=t_bot,
-                           opponent=ct_bot,
-                           on_step=rec,
-                           accuracy=accuracy,
-                           hitboxes=hitboxes)
-        env_flags = (res["accuracy"], res["hitboxes"])
-        accounting.append({
-            k: (sum(r[k][0] for r in rec.rounds), sum(r[k][1] for r in rec.rounds), res[env_key])
-            for k, env_key in (("fired", "shots_fired"), ("hit", "shots_hit"), ("fast",
-                                                                                "shots_fired_fast"))
-        })
-        accounting[-1]["unmatched"] = res["unmatched_vis_slots"]
-        for ep, r in zip(res["per_episode"], rec.rounds, strict=True):
-            h, o = hero_side, 1 - hero_side
-            rows.append({
-                "seed": arr_seed,
-                "episode": ep["episode"],
-                "t_xy": ep["hero_xy"],
-                "ct_xy": ep["statue_xy"],
-                "hero_side": SIDES[h],
-                "ticks": r["ticks"],
-                "outcome": _outcome(r["died"][h], r["died"][o]),
-                "t_won": r["died"][1] is not None and r["died"][0] is None,
-                "ct_won": r["died"][0] is not None and r["died"][1] is None,
-                "kill_tick": r["died"][o],
-                "death_tick": r["died"][h],
-                **{
-                    f"{who}_{k}": r[k][s]
-                    for who, s in (("hero", h), ("opp", o))
-                    for k in PER_SIDE
-                }
-            })
+    arrangement played, ...}. ``hero`` and ``opponent`` are what ``_actor`` takes. Each
+    arrangement plays all its rounds, T first, one env at a time (``_Arrangement``)."""
+    if rounds < 1:
+        raise ValueError(f"rounds must be >= 1, got {rounds}")
+    arrangements = []
+    for hero_side in (0, 1):
+        if hero_side in sides:
+            with contextlib.closing(
+                    _Arrangement(hero, opponent, hero_side, seed, obs_only, accuracy,
+                                 hitboxes)) as arr:
+                arr.play(rounds)
+            arrangements.append(arr)
     return {
-        "rows": rows,
-        "accounting": accounting,
+        "rows": [r for arr in arrangements for r in arr.rows],
+        "accounting": [arr.accounting() for arr in arrangements],
         "rounds": rounds,
         "seed": seed,
         "obs_only": obs_only,
-        "accuracy": env_flags[0],
-        "hitboxes": env_flags[1]
+        "accuracy": arrangements[-1].flags[0] if arrangements else None,
+        "hitboxes": arrangements[-1].flags[1] if arrangements else None
     }
 
 
