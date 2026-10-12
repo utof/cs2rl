@@ -535,13 +535,18 @@ def _print_opponent_setup(trainer, plan: _RunPlan, self_play_enabled: bool):
         rows = trainer._participating_rows_np
         role = {
             "noop": "a stationary statue",
-            "walker": "a scripted walker mix"
+            "walker": "a scripted walker mix",
+            "duel": "the scripted duel bot mix"
         }[plan.opponent_mode]
         print(f"[Train] Opponent mode '{plan.opponent_mode}': team "
               f"{trainer._self_play_mgr.opponent_team.upper()} is {role}; "
               f"{int(rows.sum()):,} of {rows.size:,} agent rows "
               f"participate (raw horizon {plan.config['total_timesteps']:,} rows = "
               f"{plan.config['participating_timesteps']:,} hero steps).")
+        if plan.opponent_mode == "duel":
+            levels = "; ".join(f"L{i} {spec} {weight:g}"
+                               for i, (spec, weight) in enumerate(plan.config["duel_mix"]))
+            print(f"[Train] Duel bot levels (metrics environment/duel/L<i>/<outcome>): {levels}")
 
 
 def _last_metrics_step(metrics_path: Path, run_id: str) -> int | None:
@@ -563,10 +568,11 @@ def _resume_full_state(trainer, resume_paths: dict, config: dict, outputs: _RunO
 
     Returns the resumed global step. The bound (check_resume_metrics_bound) is
     checkpoint_interval epochs wide on both sides, in participating units. Rung 1a T3:
-    it assumes BOTH teams participate, so under a scripted --opponent (noop, walker) it is 2× too wide —
+    it assumes BOTH teams participate, so under a scripted --opponent (noop, walker, duel) it is 2× too wide —
     only ever too permissive, never a false alarm; halve it before such a run resumes.
     KNOWN LIMIT: a resumed --opponent walker run rebuilds the walker from config["seed"] and
-    replays its draws from the start (the walker's RNG and holds are not checkpointed).
+    replays its draws from the start (the walker's RNG and holds are not checkpointed); a
+    resumed --opponent duel run does the same with the duel bot, its levels and their RNGs.
     """
     info = load_full_resume(trainer, trainer._self_play_mgr, resume_paths)
     resumed = info["resumed_from_step"]

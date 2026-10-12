@@ -31,6 +31,7 @@ from typing import Any
 import numpy as np
 
 from cs2rl.env.config import REWARD_FIELDS, UNSET, EnvConfig, RewardWeights
+from cs2rl.eval.duel_bot import parse_params
 from cs2rl.policy import LOG_STD_MAX, resolve_aim_log_std_init
 
 # Agents per team. A bare literal ON PURPOSE: this leaf and cs2rl.train.__main__ must
@@ -113,10 +114,68 @@ def compute_batch_dims(num_envs: int) -> tuple[int, int, int]:
 #   "walker" — the same, except the opponent team's move head walks: each row plays a
 #            scripted walker (cs2rl.eval.walker.TRAIN_MIX) re-drawn every episode.
 #            Every other head is bin 0 and the aim delta is zero.
-OPPONENT_MODES = ("self", "noop", "walker")
+#   "duel" — the opponent team is #152 L2's duel bot (cs2rl.eval.duel_bot), which moves,
+#            aims and shoots back; each env draws a level of the --duel-mix every episode.
+#            Its rows do not participate, as under noop.
+OPPONENT_MODES = ("self", "noop", "walker", "duel")
 # The modes whose opponent team is scripted: self-play is refused and its rows do not
 # participate (nothing trains on them, nothing counts toward --timesteps).
-SCRIPTED_OPPONENT_MODES = ("noop", "walker")
+SCRIPTED_OPPONENT_MODES = ("noop", "walker", "duel")
+
+# --opponent duel's default level mix, "+"-separated SPEC:WEIGHT entries; SPEC is
+# cs2rl.eval.duel_bot.parse_params' PROFILE[,dial=value...]. Easy-heavy, so a Rung 1b policy
+# can win from the start (Rung 1c research A5, Q3), in three styles, with one harder level
+# (fair) to climb to. The adad style and every level above fair stay out of it. A policy that
+# already wins these (Rung 1b-2's arm V won about 99% of its decided rounds against easy,
+# easy,style=run and fair,style=stop) learns little from them: pass a harder --duel-mix, and
+# keep a family (e.g. adad) out of it for the Rung 1c gate.
+DEFAULT_DUEL_MIX = "easy,style=stop:0.4+easy,style=run:0.3+easy:0.1+fair,style=stop:0.2"
+
+
+def parse_duel_mix(text: str) -> list[list]:
+    """``SPEC:WEIGHT+SPEC:WEIGHT...`` -> ``[[spec, weight], ...]`` in the given order.
+
+    Each SPEC must parse (duel_bot.parse_params), each weight must be positive and the
+    weights must sum to 1, so a typo cannot silently reweight the mix. Raises ValueError.
+    The list is what config.json records under ``duel_mix``; level i of the mix is the
+    ``duel/L{i}/*`` counters' i. The sum tolerance, 1e-8, is inside numpy's own for
+    ``Generator.choice(p=...)`` (sqrt of float64 eps, about 1.5e-8), so a mix that passes
+    here never fails at the draw; the comparisons also refuse a nan weight.
+    """
+    mix: list[list] = []
+    weights: list[float] = []
+    for entry in text.split("+"):
+        spec, sep, weight = entry.rpartition(":")
+        if not sep or not spec:
+            raise ValueError(f"--duel-mix entry {entry!r} is not SPEC:WEIGHT")
+        parse_params(spec)
+        weights.append(float(weight))
+        mix.append([spec, weights[-1]])
+    if not (all(w > 0 for w in weights) and abs(sum(weights) - 1.0) <= 1e-8):
+        raise ValueError(f"--duel-mix weights must be positive and sum to 1, got {weights}")
+    return mix
+
+
+def assert_duel_env_supported(env_cfg: EnvConfig) -> None:
+    """Startup guard: ``--opponent duel`` runs only in the env #152 L2 certified the bot in.
+
+    WHY: cs2rl.experiment.oracle_duel measured the duel bot one agent a side, with crouch
+    and jump masked (oracle_statue's N_ACTIVE_PER_TEAM, CROUCH_ENABLED, JUMP_ENABLED). The
+    bot never crouches or jumps and aims a standing target; with pitch pinned its level ray
+    passes above every capsule of a crouched target (cs2_env.h compute_masks), so a hero
+    that may crouch could not be hit, and would learn to crouch. Its target velocity
+    assumes one enemy (duel_bot.DuelBot.step_obs). KNOWN LIMIT, not refused: the map (the
+    bot's wall check assumes an open arena), pin_pitch and accuracy/hitboxes other than 1/1
+    (the bot was measured only there; for_env reads hitboxes from the env).
+    """
+    bad = {
+        k: getattr(env_cfg, k)
+        for k, ok in (("n_active_per_team", 1), ("crouch_enabled", 0), ("jump_enabled", 0))
+        if getattr(env_cfg, k) != ok
+    }
+    if bad:
+        raise ValueError(f"--opponent duel requires --n-active-per-team 1, --crouch-enabled 0 "
+                         f"and --jump-enabled 0 (the env #152 L2 certified the bot in); got {bad}")
 
 
 def resolve_opponent_mode(args) -> str:
@@ -142,7 +201,7 @@ def resolve_opponent_mode(args) -> str:
 
 
 def assert_opponent_self_play_compatible(opponent: str, self_play_enabled: bool) -> None:
-    """Startup guard: a scripted ``--opponent`` (noop, walker) requires ``--no-self-play``.
+    """Startup guard: a scripted ``--opponent`` (noop, walker, duel) requires ``--no-self-play``.
 
     WHY (spec 2026-08-30 §2 T3, "team constancy"): the statue is whichever team
     SelfPlayManager.opponent_team names. That starts at "ct" but self-play
@@ -179,7 +238,7 @@ def build_participating_rows(num_envs: int,
 
       - ``opponent_mode="self"``: slots 0..n_active-1 of BOTH teams. Bit-identical
         to the pre-T3 expression ``(i % TEAM_SIZE) < n_active``.
-      - ``opponent_mode`` "noop" or "walker": those slots of the HERO team only. The
+      - a scripted ``opponent_mode`` (noop, walker, duel): those slots of the HERO team only. The
         scripted team neither learns nor is counted.
 
     WHY a shared helper: this vector used to be built by two copies of the same
@@ -323,6 +382,14 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     n_active = env_cfg.n_active_per_team
     assert 1 <= n_active <= TEAM_SIZE, n_active
     opponent = resolve_opponent_mode(args)
+    # --opponent duel: the level mix, recorded in config.json (a different mix is a
+    # different experiment), and the env it may run in. The key exists only in duel runs,
+    # so every other run's config and config_hash are unchanged.
+    duel_mix_arg = getattr(args, "duel_mix", None)
+    if opponent != "duel" and duel_mix_arg is not None:
+        raise ValueError(f"--duel-mix needs --opponent duel (got --opponent {opponent})")
+    if opponent == "duel":
+        assert_duel_env_supported(env_cfg)
     _part_per_env = n_active * (1 if opponent in SCRIPTED_OPPONENT_MODES else 2)
     raw_timesteps = args.timesteps * (TEAM_SIZE * 2) // _part_per_env
     # R0-E.3/4 (#131): aim-head knobs. CLI gives "on"/"off" for the entropy
@@ -362,7 +429,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "seed": args.seed,
         "total_timesteps": raw_timesteps,
         "participating_timesteps": args.timesteps,
-                                                                       # Rung 1a T3: "self" (both teams learn) or "noop"/"walker" (scripted opponent —
+                                                                       # Rung 1a T3: "self" (both teams learn) or "noop"/"walker"/"duel" (scripted opponent —
                                                                        # hero-team-only participation AND budget, see raw_timesteps above).
                                                                        # NOT an EnvConfig knob: the statue is enforced trainer-side, in
                                                                        # the patched evaluate(), so the env is identical either way. Not
@@ -462,6 +529,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # a weight were ever named like one of the keys above, and the result would
     # look perfectly well-formed. Key order does not matter — every config.json
     # dump uses sort_keys=True.
+    if opponent == "duel":
+        cfg["duel_mix"] = parse_duel_mix(DEFAULT_DUEL_MIX if duel_mix_arg is None else duel_mix_arg)
     env_keys = env_cfg.to_config_dict()
     assert not (cfg.keys() & env_keys.keys()), (
         "env config key collides with an existing config key: "
