@@ -78,6 +78,7 @@ ROUNDS = [
     _row("loss",
          20,
          death=20,
+         opp_fired=6,
          hero_fired=2,
          hero_first_fire=4,
          hero_first_fire_hit=False,
@@ -95,6 +96,7 @@ ROUNDS = [
          hero_hp_lost=100,
          hero_idle=27),
     _row("timeout", 161, hero_idle=161),
+    _row("win", 8, kill=8),
 ]
 
 
@@ -105,16 +107,17 @@ def _res(rows=ROUNDS, fired=(9, 0, 9), unmatched=0):
 
 def test_the_cell_summary_reads_the_recorders_definitions():
     s = E.cell_summary(_res())
-    assert (s["win"], s["loss"], s["double"], s["timeout"]) == (1, 1, 1, 1)
+    assert (s["win"], s["loss"], s["double"], s["timeout"]) == (2, 1, 1, 1)
     assert (s["hero_first_shots"], s["hero_first_shot_hits"]) == (3, 1)
     assert s["hero_first_shot_hit_rate"] == 1 / 3 and s["hero_first_shot_ci"] == D.wilson(1, 3)
     # First hits on ticks 5 and 16: 16 ticks is 1 s, which Leetify leaves out.
     assert (s["hero_ttd_rounds"], s["hero_ttd_median"], s["hero_ttd_1s_share"]) == (2, 5.0, 0.5)
     # Time to death (the hero died on ticks 20 and 30) has its own key, never a ttd_ one.
     assert s["death_tick_median"] == 25.0 and "ttd_median" not in s
-    assert s["hero_lifetime_mean"] == (10 + 20 + 30 + 161) / 4
-    assert s["opp_lifetime_mean"] == (10 + 20 + 30 + 161) / 4
-    assert s["hero_shots_per_kill"] == 9 / 2 and s["hero_hp_lost_mean"] == 227 / 4
+    assert s["hero_lifetime_mean"] == (10 + 20 + 30 + 161 + 8) / 5
+    assert s["opp_lifetime_mean"] == (10 + 20 + 30 + 161 + 8) / 5
+    assert s["hero_shots_per_kill"] == 9 / 3 and s["hero_hp_lost_mean"] == 227 / 5
+    assert s["opp_shots_per_kill"] == 6 / 2
     assert (s["hero_hit_per_fast"], s["hero_hit_per_slow"]) == (1 / 2, 4 / 7)
     assert s["hero_moving_idle_share"] == 3 / (6 + 18 + 27 + 161)
     assert s["opp_first_shot_hit_rate"] is None and s["opp_ttd_median"] is None
