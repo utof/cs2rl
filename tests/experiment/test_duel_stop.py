@@ -197,7 +197,7 @@ def test_duel_eval_passes_the_stop_and_its_table_shows_it(monkeypatch):
     monkeypatch.setattr(E, "policy_hero", lambda *a: "policy")
     monkeypatch.setattr(D, "run_duel", fake)
     out = E.run_eval(None, 64, rounds=20, opponents=("easy,style=stop", ), stop="sign")
-    assert seen == ["sign"] * 3 and out["stop"] == "sign"
+    assert seen == ["sign"] * 3
     assert [c["stop"]["decision"] for c in out["cells"]] == ["hero", S.UNDECIDED, S.UNDECIDED]
     table = E.format_table(out).splitlines()
     policy, perfect = table[3], table[4]

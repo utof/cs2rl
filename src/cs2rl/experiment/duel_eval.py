@@ -75,7 +75,6 @@ import json
 import math
 import time
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -205,7 +204,7 @@ def run_eval(policy,
                 if "stop" in res:
                     cell["stop"] = res["stop"]
                 cells.append(cell)
-    out: dict[str, Any] = {
+    return {
         "rounds": rounds,
         "seed": seed,
         "sides": list(sides),
@@ -217,9 +216,6 @@ def run_eval(policy,
         "cells": cells,
         "wall_s": time.perf_counter() - t0
     }
-    if stop is not None:
-        out["stop"] = stop
-    return out
 
 
 def _fmt(v, spec):
@@ -259,7 +255,7 @@ def format_table(out: dict) -> str:
     wo = max(len(c["opponent"]) for c in out["cells"])
     src = f", from {out['accuracy_source']}" if out.get("accuracy_source") else ""
     hb_src = f", from {out['hitboxes_source']}" if out.get("hitboxes_source") else ""
-    stop = out.get("stop")
+    stop = next((c["stop"]["rule"] for c in out["cells"] if "stop" in c), None)
     per_cell = (f"{out['rounds']} rounds per cell"
                 if stop is None else f"up to {out['rounds']} rounds per cell (--stop {stop}, #417)")
     lines = [
