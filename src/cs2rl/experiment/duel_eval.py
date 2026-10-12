@@ -4,8 +4,8 @@
 WHAT
 ----
 Plays a checkpoint against ``eval.duel_bot`` opponents (oracle_duel's ``PROFILE[,dial=value...]``
-specs, default ``OPPONENTS``) in oracle_duel's harness: ``run_duel`` over oracle_statue's
-``run_check``, the arena duel with one agent a side, pin_pitch, crouch and jump off, the bots
+specs, default ``OPPONENTS``) in oracle_duel's harness: ``run_duel`` over oracle_statue's env
+and round loop, the arena duel with one agent a side, pin_pitch, crouch and jump off, the bots
 deciding from their observation rows. The policy is loaded and played as aim_eval does it
 (``aim_eval.load_checkpoint``: built with the run's config.json, a sim-v3 encoder widened onto
 the sim-v4 obs; ``aim_eval.build_policy_hero``), by default in the mode the Rung 1b-2 gate reads:
@@ -97,8 +97,8 @@ TTD_CUTOFF_TICKS = TICK_RATE
 def policy_hero(policy, aim: str, lstm: str, bptt_horizon: int):
     """A ``run_duel`` hero factory: aim_eval's policy hero for the mode, whatever the row.
 
-    ``PolicyActor`` fills every row and run_check keeps its side's rows, so the same actor
-    plays T or CT."""
+    ``PolicyActor`` fills every row and oracle_statue's ``_episode`` keeps its side's rows, so
+    the same actor plays T or CT."""
     aim_eval.build_policy_hero(policy, aim, lstm, bptt_horizon)        # rejects an unknown mode
     return lambda row, rng: aim_eval.build_policy_hero(policy, aim, lstm, bptt_horizon)
 

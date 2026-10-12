@@ -3,12 +3,13 @@
 
 WHAT
 ----
-Two ``eval.duel_bot`` bots duel in oracle_statue's arena (``run_check``: the Rung 1a env, one
-agent a side, pin_pitch, crouch and jump off, the cone and the hit model as ``--accuracy`` and
-``--hitboxes`` say). The hero plays ``--rounds`` rounds on the T row, then ``--rounds`` on the
-CT row against the same opponent (under ``--stop``, see STOP), so a side advantage cancels in the
-hero's share and shows in the T share. It prints one row per round, the per-side totals and one PASS/FAIL line. Exit
-status 0 = PASS, 1 = FAIL.
+Two ``eval.duel_bot`` bots duel in oracle_statue's arena (its ``build_env`` and round loop
+``_episode``, as ``run_check`` plays them: the Rung 1a env, one agent a side, pin_pitch, crouch
+and jump off, the cone and the hit model as ``--accuracy`` and ``--hitboxes`` say). The hero
+plays ``--rounds`` rounds on the T row, then ``--rounds`` on the CT row against the same opponent
+(under ``--stop``, see STOP), so a side advantage cancels in the hero's share and shows in the T
+share. It prints one row per round, the per-side totals and one PASS/FAIL line. Exit status 0 =
+PASS, 1 = FAIL.
 
     env UV_NO_SYNC=1 PYTHONPATH=<checkout>/src .venv/bin/python -m cs2rl.experiment.oracle_duel
     ... -m cs2rl.experiment.oracle_duel --hero hard,style=stop --opponent hard,style=run --expect hero
@@ -49,8 +50,9 @@ WHAT L2 CERTIFIES, WHAT IT DOES NOT: the "L2" paragraph of src/cs2rl/experiment/
 
 PITFALLS
 --------
-* run_check names its rows hero (T) and statue (CT): here its ``hero`` argument is whichever
-  actor plays the T row, and ``per_episode``'s ``hero_xy`` / ``statue_xy`` are the T and CT spawns.
+* oracle_statue names its rows hero (T) and statue (CT): here ``_episode``'s ``oracle`` argument
+  is whichever actor plays the T row, its ``statue`` the CT one, and its ``hero_xy`` /
+  ``statue_xy`` are the T and CT spawns.
 * The bots decide from their observation rows (as a trainer's would) unless --ground-truth.
 * The bots' pitch is aimed (hit_geometry); a Rung 1 policy's is pinned. Moot under pin_pitch=1.
 * Never writes to outputs/.
@@ -114,8 +116,9 @@ PER_SIDE = ("fired", "hit", "fast", "fast_hit", "first_fire", "first_fire_hit", 
 
 
 class DuelRecorder:
-    """``run_check``'s ``on_step``: per round, each side's shots, the tick each side died, and
-    the per-side quantities the Rung 1c duel evaluation reads (cs2rl.experiment.duel_eval).
+    """oracle_statue ``_episode``'s ``on_step``: per round, each side's shots, the tick each
+    side died, and the per-side quantities the Rung 1c duel evaluation reads
+    (cs2rl.experiment.duel_eval).
 
     Read off the C state after each step (``st``) and the state the actors saw (``st_prev``,
     the reset state on tick 1). Index 0 is the T side. The definitions, one place each:
