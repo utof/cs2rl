@@ -5,11 +5,11 @@ WHAT IS PINNED HERE
 * The opponents are the Rung 1c zero-shot set, and the references are the perfect bot and
   the opponent's own spec.
 * ``cell_summary`` on hand-set rounds: the first-shot hit rate and its Wilson interval, time
-  to damage (median of the first hits under 16 ticks, and the share at or over 16, which
-  Leetify excludes), lifetime (the death tick, else the round's last), shots per kill, hit
-  per fired of the fast and slow shots, the moving share of idle ticks, and the accounting
-  check, which a cell whose shots do not sum, or with an unmatched visibility slot, fails
-  and the table flags.
+  to damage (median of the first hits under 16 ticks, and the share at or over 16, which Leetify
+  excludes), lifetime (the death tick, else the round's last; every death in these rows ends its
+  round, as in the arena, so only the round's length is pinned), shots per kill, hit per fired of
+  the fast and slow shots, the moving share of idle ticks, and the accounting check, which a cell
+  whose shots do not sum, or with an unmatched visibility slot, fails and the table flags.
 * ``run_eval`` plays each cell on its side (seed, then seed + 10000 on CT), and a reference
   cell's rounds are oracle_duel.run_duel's rounds for the same bots, seed and side.
 * The policy plays as aim_eval plays it: against the same duel bot, aim_eval's cell and

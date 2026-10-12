@@ -34,8 +34,10 @@ combat.
     hit per fired of the fast and of the slow shots; the first-shot hit rate per engagement
     with its Wilson interval, and shots per kill (G3); time to damage, its median over the
     rounds whose first hit came under 1 s, and, of the rounds with a first hit, the share
-    whose first hit came at or over 1 s, the ones Leetify excludes (G4); hp lost and lifetime per round, lifetime being the death
-    tick, else the round's last tick (G5); and the moving-while-visible-not-firing share, the
+    whose first hit came at or over 1 s, the ones Leetify excludes (G4); hp lost and lifetime per
+    round, lifetime being the death tick, else the round's last tick (G5; KNOWN LIMIT: in the arena
+    a round ends on the first death, so both sides' lifetime is the round's length; it separates the
+    sides only where a round outlives a death); and the moving-while-visible-not-firing share, the
     share of idle engagement ticks that were fast (G5, the ADAD signature);
   * ``accounting_ok``: each side's fired, hit and fast shots sum to the env's StepStats totals,
     and no visibility slot went unmatched (oracle_duel's accounting check).
