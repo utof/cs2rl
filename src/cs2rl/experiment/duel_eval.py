@@ -59,6 +59,8 @@ over those rounds. The table gains a stop column. A cell decided at a look print
 "*" and no interval: the share is biased, and the cell's JSON ``hero_ci`` (the Wilson interval
 of the rounds played) is not a valid interval for it ("stop" "wilson" is null). An undecided
 cell prints the full cell's fixed-n Wilson interval; a precision cell, the anytime-valid one.
+KNOWN LIMIT: an undecided cell's fixed-n Wilson interval can exclude 0.5 (60 of 100 decided: p
+0.057, Wilson [0.502, 0.691]); the decision is the sign test's.
 
 PITFALLS
 --------

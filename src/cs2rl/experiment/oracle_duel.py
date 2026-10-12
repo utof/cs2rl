@@ -45,6 +45,10 @@ decides. Each arrangement's rows are the first rows of the fixed-n run. Under a 
 cap"), for ``precision`` its anytime-valid interval. The accounting and the T-share checks read
 the rounds played; the T-share check is not sequentially controlled and loses power when the
 cell stops early. A sign stop decided at a look prints no interval: its share is biased.
+KNOWN LIMIT: ``--stop sign`` needs ``--rounds`` >= 5 (sequential.LOOKS); fewer raises
+look_rounds' ValueError.
+KNOWN LIMIT: an undecided cell's fixed-n Wilson interval can exclude 0.5 (60 of 100 decided: p
+0.057, Wilson [0.502, 0.691]); the decision is the sign test's.
 
 WHAT L2 CERTIFIES, WHAT IT DOES NOT: the "L2" paragraph of src/cs2rl/experiment/CONTEXT.md.
 
@@ -209,6 +213,9 @@ class _Arrangement:
     the swap (#417). The duel bots and the walker never touch torch: for them it changes
     nothing.
     PITFALL: ``close()`` frees the C env; call it once (``contextlib.closing``).
+    KNOWN LIMIT: if ``__init__`` raises after ``build_env`` (measured with a BaselineEvaluator
+    that raised: 1 env built, none closed), the env stays open: no object reaches the caller to
+    close. The trigger is unlikely.
     """
 
     def __init__(self,
