@@ -285,6 +285,45 @@ class _Arrangement:
         self.env.close()
 
 
+STOP_RULES = ("sign", "precision")
+
+
+def _play_to_stop(arrangements, cap: int, rule: str) -> dict:
+    """Play ``arrangements`` in blocks, a T block then a CT block, to each look of ``rule``
+    (cs2rl.experiment.sequential), and stop at the first look that is not RUNNING; return the
+    result's "stop". sign: a look at each ``look_rounds(cap)``; precision: a look every
+    LADDER_BLOCK rounds and at the cap. The test always gets one outcome list per arrangement:
+    a pooled list would read T's rounds before CT's."""
+    from cs2rl.experiment import sequential as S
+
+    def outcomes():
+        return [[r["outcome"] for r in arr.rows] for arr in arrangements]
+
+    if rule == "sign":
+        for played in S.look_rounds(cap):
+            for arr in arrangements:
+                arr.play(played - len(arr.rows))
+            st = S.sign_stop(outcomes(), cap)
+            if st.decision != S.RUNNING:
+                wilson = st.wilson
+                return {
+                    "rule": "sign",
+                    "cap": cap,
+                    "decision": st.decision,
+                    "looks": [dataclasses.asdict(look) for look in st.looks],
+                    "wilson": None if wilson is None else list(wilson)
+                }
+        raise AssertionError("sign_stop is RUNNING with every arrangement at the cap")
+    played = 0
+    while True:
+        played = min(played + S.LADDER_BLOCK, cap)
+        for arr in arrangements:
+            arr.play(played - len(arr.rows))
+        ps = S.precision_stop(outcomes(), cap)
+        if ps.status != S.RUNNING:
+            return {"rule": "precision", "cap": cap, **dataclasses.asdict(ps), "width": S.WIDTH}
+
+
 def run_duel(hero,
              opponent,
              rounds: int = 500,
@@ -292,22 +331,42 @@ def run_duel(hero,
              obs_only: bool = True,
              accuracy: bool | None = None,
              hitboxes: bool | None = None,
-             sides=(0, 1)) -> dict:
+             sides=(0, 1),
+             stop: str | None = None) -> dict:
     """The arrangements in ``sides`` (0: the hero on the T row at ``seed``, 1: on the CT row at
     ``seed + CT_SEED_OFFSET``); returns {"rows": per-round rows, "accounting": one entry per
-    arrangement played, ...}. ``hero`` and ``opponent`` are what ``_actor`` takes. Each
-    arrangement plays all its rounds, T first, one env at a time (``_Arrangement``)."""
+    arrangement played, ...}. ``hero`` and ``opponent`` are what ``_actor`` takes.
+
+    ``stop`` None (fixed n): each arrangement plays ``rounds`` rounds, T first, one env at a
+    time. ``stop`` in STOP_RULES (#417): ``rounds`` is the cap per arrangement; every
+    arrangement stays open and they play alternating blocks until the rule stops
+    (``_play_to_stop``), and the result gains "stop". Either way an arrangement's rows are the
+    first rows of a longer fixed-n run at the same seed, and "rows" lists T's before CT's.
+    """
     if rounds < 1:
         raise ValueError(f"rounds must be >= 1, got {rounds}")
-    arrangements = []
-    for hero_side in (0, 1):
-        if hero_side in sides:
+    if stop is not None and stop not in STOP_RULES:
+        raise ValueError(f"unknown stop rule {stop!r}: one of {', '.join(STOP_RULES)}")
+    hero_sides = [s for s in (0, 1) if s in sides]
+    stopped = None
+    if stop is None:
+        arrangements = []
+        for hero_side in hero_sides:
             with contextlib.closing(
                     _Arrangement(hero, opponent, hero_side, seed, obs_only, accuracy,
                                  hitboxes)) as arr:
                 arr.play(rounds)
             arrangements.append(arr)
-    return {
+    else:
+        with contextlib.ExitStack() as stack:
+            arrangements = [
+                stack.enter_context(
+                    contextlib.closing(
+                        _Arrangement(hero, opponent, hero_side, seed, obs_only, accuracy,
+                                     hitboxes))) for hero_side in hero_sides
+            ]
+            stopped = _play_to_stop(arrangements, rounds, stop)
+    res: dict[str, Any] = {
         "rows": [r for arr in arrangements for r in arr.rows],
         "accounting": [arr.accounting() for arr in arrangements],
         "rounds": rounds,
@@ -316,6 +375,9 @@ def run_duel(hero,
         "accuracy": arrangements[-1].flags[0] if arrangements else None,
         "hitboxes": arrangements[-1].flags[1] if arrangements else None
     }
+    if stopped is not None:
+        res["stop"] = stopped
+    return res
 
 
 def wilson(k: int, n: int) -> tuple[float, float]:
