@@ -3,12 +3,13 @@
 
 WHAT
 ----
-Two ``eval.duel_bot`` bots duel in oracle_statue's arena (``run_check``: the Rung 1a env, one
-agent a side, pin_pitch, crouch and jump off, the cone and the hit model as ``--accuracy`` and
-``--hitboxes`` say). The hero plays ``--rounds`` rounds on the T row, then ``--rounds`` on the
-CT row against the same opponent, so a side advantage cancels in the hero's share and shows in
-the T share. It prints one row per round, the per-side totals and one PASS/FAIL line. Exit
-status 0 = PASS, 1 = FAIL.
+Two ``eval.duel_bot`` bots duel in oracle_statue's arena (its ``build_env`` and round loop
+``_episode``, as ``run_check`` plays them: the Rung 1a env, one agent a side, pin_pitch, crouch
+and jump off, the cone and the hit model as ``--accuracy`` and ``--hitboxes`` say). The hero
+plays ``--rounds`` rounds on the T row, then ``--rounds`` on the CT row against the same opponent
+(under ``--stop``, see STOP), so a side advantage cancels in the hero's share and shows in the T
+share. It prints one row per round, the per-side totals and one PASS/FAIL line. Exit status 0 =
+PASS, 1 = FAIL.
 
     env UV_NO_SYNC=1 PYTHONPATH=<checkout>/src .venv/bin/python -m cs2rl.experiment.oracle_duel
     ... -m cs2rl.experiment.oracle_duel --hero hard,style=stop --opponent hard,style=run --expect hero
@@ -34,12 +35,28 @@ THE VERDICT
     interval contains 0.5; ``hero`` / ``opponent``: it lies above / below 0.5; ``any``: no check.
 A decided round has one survivor; a double kill and a time-out are draws.
 
+STOP (#417)
+-----------
+``--stop sign`` or ``--stop precision`` makes ``--rounds`` the cap per side: the two
+arrangements stay open (``_Arrangement``) and play alternating blocks, T then CT, to each look of
+cs2rl.experiment.sequential's pre-registered rule, and the cell stops at the first look that
+decides. Each arrangement's rows are the first rows of the fixed-n run. Under a stop the
+``--expect`` check reads the stop: for ``sign`` its decision (``even`` passes on "undecided at
+cap"), for ``precision`` its anytime-valid interval. The accounting and the T-share checks read
+the rounds played; the T-share check is not sequentially controlled and loses power when the
+cell stops early. A sign stop decided at a look prints no interval: its share is biased.
+KNOWN LIMIT: ``--stop sign`` needs ``--rounds`` >= 5 (sequential.LOOKS); fewer raises
+look_rounds' ValueError.
+KNOWN LIMIT: an undecided cell's fixed-n Wilson interval can exclude 0.5 (60 of 100 decided: p
+0.057, Wilson [0.502, 0.691]); the decision is the sign test's.
+
 WHAT L2 CERTIFIES, WHAT IT DOES NOT: the "L2" paragraph of src/cs2rl/experiment/CONTEXT.md.
 
 PITFALLS
 --------
-* run_check names its rows hero (T) and statue (CT): here its ``hero`` argument is whichever
-  actor plays the T row, and ``per_episode``'s ``hero_xy`` / ``statue_xy`` are the T and CT spawns.
+* oracle_statue names its rows hero (T) and statue (CT): here ``_episode``'s ``oracle`` argument
+  is whichever actor plays the T row, its ``statue`` the CT one, and its ``hero_xy`` /
+  ``statue_xy`` are the T and CT spawns.
 * The bots decide from their observation rows (as a trainer's would) unless --ground-truth.
 * The bots' pitch is aimed (hit_geometry); a Rung 1 policy's is pinned. Moot under pin_pitch=1.
 * Never writes to outputs/.
@@ -47,13 +64,17 @@ PITFALLS
 from __future__ import annotations
 
 import argparse
+import contextlib
+import dataclasses
 import math
+from typing import Any
 
 import numpy as np
 from scipy.stats import binomtest
 
 from cs2rl.eval.duel_bot import ACCURACY_THRESHOLD_FRAC, DuelBotActor, parse_params
 from cs2rl.experiment import oracle_statue as L0
+from cs2rl.experiment import sequential as S
 
 SIDES = ("T", "CT")
 ROWS = (L0.HERO, L0.STATUE)            # the T row and the CT row
@@ -91,8 +112,9 @@ PER_SIDE = ("fired", "hit", "fast", "fast_hit", "first_fire", "first_fire_hit", 
 
 
 class DuelRecorder:
-    """``run_check``'s ``on_step``: per round, each side's shots, the tick each side died, and
-    the per-side quantities the Rung 1c duel evaluation reads (cs2rl.experiment.duel_eval).
+    """oracle_statue ``_episode``'s ``on_step``: per round, each side's shots, the tick each
+    side died, and the per-side quantities the Rung 1c duel evaluation reads
+    (cs2rl.experiment.duel_eval).
 
     Read off the C state after each step (``st``) and the state the actors saw (``st_prev``,
     the reset state on tick 1). Index 0 is the T side. The definitions, one place each:
@@ -173,6 +195,148 @@ def _outcome(hero_died, opp_died) -> str:
     return "loss" if opp_died is None else "double"
 
 
+class _Arrangement:
+    """One arrangement (the hero on one side) kept alive between blocks of rounds (#417).
+
+    It holds what carries from round to round: the env (its C RNG streams), the
+    BaselineEvaluator, both actors (their Generators, seeded [arr_seed, 0] for the hero and
+    [arr_seed, 1] for the opponent, and their per-row state), the DuelRecorder, the env's
+    StepStats totals, the unmatched visibility slots, and its own torch RNG state, seeded with
+    the arrangement's seed as duel_eval seeds a cell. ``play(k)`` plays k more rounds through
+    oracle_statue's ``_episode``, as ``run_check`` does, and appends their rows.
+
+    WHY not ``run_check``: it builds and closes its env inside one call, so a second call
+    restarts the C RNG and replays the first call's spawns (measured, #417).
+    WHY its own torch state: a policy samples from the process-wide torch RNG (its discrete
+    heads even with the mean aim), so two arrangements played in alternating blocks would share
+    one stream: 7 of 30 and 0 of 30 rows equal the one-arrangement rows that way, 30 of 30 with
+    the swap (#417). The duel bots and the walker never touch torch: for them it changes
+    nothing.
+    PITFALL: ``close()`` frees the C env; call it once (``contextlib.closing``).
+    KNOWN LIMIT: if ``__init__`` raises after ``build_env`` (measured with a BaselineEvaluator
+    that raised: 1 env built, none closed), the env stays open: no object reaches the caller to
+    close. The trigger is unlikely.
+    """
+
+    def __init__(self,
+                 hero,
+                 opponent,
+                 hero_side,
+                 seed,
+                 obs_only=True,
+                 accuracy=None,
+                 hitboxes=None):
+        import torch
+
+        from cs2rl.env.c import binding
+        self.h, self.o = hero_side, 1 - hero_side
+        self.arr_seed = seed if hero_side == 0 else seed + CT_SEED_OFFSET
+        hero_rng, opp_rng = np.random.default_rng([self.arr_seed,
+                                                   0]), np.random.default_rng([self.arr_seed, 1])
+        bots = [
+            _actor(hero, ROWS[hero_side], hero_rng, obs_only),
+            _actor(opponent, ROWS[self.o], opp_rng, obs_only)
+        ]
+        self.t_bot, self.ct_bot = bots if hero_side == 0 else bots[::-1]
+        self.rec = DuelRecorder([w["move_speed"] for w in binding.weapon_defs()])
+        self.env = L0.build_env(self.arr_seed, L0.ROUND_TIME, accuracy, hitboxes)
+        self.flags = (bool(self.env.config.accuracy), bool(self.env.config.hitboxes))
+        self.ev = L0.BaselineEvaluator(self.env, episodes=2, seed=self.arr_seed)
+        self.rows, self.totals, self.unmatched = [], dict(shots_fired=0,
+                                                          shots_hit=0,
+                                                          shots_fired_fast=0), 0
+        with torch.random.fork_rng(devices=[]):
+            torch.manual_seed(self.arr_seed)
+            self.torch_state = torch.get_rng_state()
+
+    def play(self, k: int) -> None:
+        """Play ``k`` more rounds and append their rows (run_duel's keys)."""
+        import torch
+        saved = torch.get_rng_state()
+        torch.set_rng_state(self.torch_state)
+        for _ in range(k):
+            r = L0._episode(self.env, self.ev, self.t_bot, self.ct_bot, 0.0, L0.ROUND_TIME,
+                            self.rec)
+            es = self.env._c_env.episode_stats
+            for key in self.totals:
+                self.totals[key] += int(getattr(es, key))
+            self.unmatched += r["unmatched"]
+            rr, h, o = self.rec.rounds[-1], self.h, self.o
+            self.rows.append({
+                "seed": self.arr_seed,
+                "episode": len(self.rows),
+                "t_xy": r["hero_xy"],
+                "ct_xy": r["statue_xy"],
+                "hero_side": SIDES[h],
+                "ticks": rr["ticks"],
+                "outcome": _outcome(rr["died"][h], rr["died"][o]),
+                "t_won": rr["died"][1] is not None and rr["died"][0] is None,
+                "ct_won": rr["died"][0] is not None and rr["died"][1] is None,
+                "kill_tick": rr["died"][o],
+                "death_tick": rr["died"][h],
+                **{
+                    f"{who}_{key}": rr[key][s]
+                    for who, s in (("hero", h), ("opp", o))
+                    for key in PER_SIDE
+                }
+            })
+        self.torch_state = torch.get_rng_state()
+        torch.set_rng_state(saved)
+
+    def accounting(self) -> dict:
+        """Each side's fired, hit and fast shots over the rounds played, beside the env's
+        totals for them, and the unmatched visibility slots."""
+        rounds = self.rec.rounds
+        acc: dict[str, Any] = {
+            k: (sum(r[k][0] for r in rounds), sum(r[k][1] for r in rounds), self.totals[ek])
+            for k, ek in (("fired", "shots_fired"), ("hit", "shots_hit"), ("fast",
+                                                                           "shots_fired_fast"))
+        }
+        acc["unmatched"] = self.unmatched
+        return acc
+
+    def close(self) -> None:
+        self.env.close()
+
+
+STOP_RULES = ("sign", "precision")
+
+
+def _play_to_stop(arrangements, cap: int, rule: str) -> dict:
+    """Play ``arrangements`` in blocks, a T block then a CT block, to each look of ``rule``
+    (cs2rl.experiment.sequential), and stop at the first look that is not RUNNING; return the
+    result's "stop". sign: a look at each ``look_rounds(cap)``; precision: a look every
+    LADDER_BLOCK rounds and at the cap. The test always gets one outcome list per arrangement:
+    a pooled list would read T's rounds before CT's."""
+
+    def outcomes():
+        return [[r["outcome"] for r in arr.rows] for arr in arrangements]
+
+    if rule == "sign":
+        for played in S.look_rounds(cap):
+            for arr in arrangements:
+                arr.play(played - len(arr.rows))
+            st = S.sign_stop(outcomes(), cap)
+            if st.decision != S.RUNNING:
+                wilson = st.wilson
+                return {
+                    "rule": "sign",
+                    "cap": cap,
+                    "decision": st.decision,
+                    "looks": [dataclasses.asdict(look) for look in st.looks],
+                    "wilson": None if wilson is None else list(wilson)
+                }
+        raise AssertionError("sign_stop is RUNNING with every arrangement at the cap")
+    played = 0
+    while True:
+        played = min(played + S.LADDER_BLOCK, cap)
+        for arr in arrangements:
+            arr.play(played - len(arr.rows))
+        ps = S.precision_stop(outcomes(), cap)
+        if ps.status != S.RUNNING:
+            return {"rule": "precision", "cap": cap, **dataclasses.asdict(ps), "width": S.WIDTH}
+
+
 def run_duel(hero,
              opponent,
              rounds: int = 500,
@@ -180,66 +344,53 @@ def run_duel(hero,
              obs_only: bool = True,
              accuracy: bool | None = None,
              hitboxes: bool | None = None,
-             sides=(0, 1)) -> dict:
+             sides=(0, 1),
+             stop: str | None = None) -> dict:
     """The arrangements in ``sides`` (0: the hero on the T row at ``seed``, 1: on the CT row at
     ``seed + CT_SEED_OFFSET``); returns {"rows": per-round rows, "accounting": one entry per
-    arrangement played, ...}. ``hero`` and ``opponent`` are what ``_actor`` takes."""
-    from cs2rl.env.c import binding
-    rows, accounting, env_flags = [], [], (None, None)
-    for hero_side, arr_seed in ((0, seed), (1, seed + CT_SEED_OFFSET)):
-        if hero_side not in sides:
-            continue
-        hero_rng, opp_rng = np.random.default_rng([arr_seed,
-                                                   0]), np.random.default_rng([arr_seed, 1])
-        bots = [
-            _actor(hero, ROWS[hero_side], hero_rng, obs_only),
-            _actor(opponent, ROWS[1 - hero_side], opp_rng, obs_only)
-        ]
-        t_bot, ct_bot = (bots if hero_side == 0 else bots[::-1])
-        rec = DuelRecorder([w["move_speed"] for w in binding.weapon_defs()])
-        res = L0.run_check(episodes=rounds,
-                           seed=arr_seed,
-                           hero=t_bot,
-                           opponent=ct_bot,
-                           on_step=rec,
-                           accuracy=accuracy,
-                           hitboxes=hitboxes)
-        env_flags = (res["accuracy"], res["hitboxes"])
-        accounting.append({
-            k: (sum(r[k][0] for r in rec.rounds), sum(r[k][1] for r in rec.rounds), res[env_key])
-            for k, env_key in (("fired", "shots_fired"), ("hit", "shots_hit"), ("fast",
-                                                                                "shots_fired_fast"))
-        })
-        accounting[-1]["unmatched"] = res["unmatched_vis_slots"]
-        for ep, r in zip(res["per_episode"], rec.rounds, strict=True):
-            h, o = hero_side, 1 - hero_side
-            rows.append({
-                "seed": arr_seed,
-                "episode": ep["episode"],
-                "t_xy": ep["hero_xy"],
-                "ct_xy": ep["statue_xy"],
-                "hero_side": SIDES[h],
-                "ticks": r["ticks"],
-                "outcome": _outcome(r["died"][h], r["died"][o]),
-                "t_won": r["died"][1] is not None and r["died"][0] is None,
-                "ct_won": r["died"][0] is not None and r["died"][1] is None,
-                "kill_tick": r["died"][o],
-                "death_tick": r["died"][h],
-                **{
-                    f"{who}_{k}": r[k][s]
-                    for who, s in (("hero", h), ("opp", o))
-                    for k in PER_SIDE
-                }
-            })
-    return {
-        "rows": rows,
-        "accounting": accounting,
+    arrangement played, ...}. ``hero`` and ``opponent`` are what ``_actor`` takes.
+
+    ``stop`` None (fixed n): each arrangement plays ``rounds`` rounds, T first, one env at a
+    time. ``stop`` in STOP_RULES (#417): ``rounds`` is the cap per arrangement; every
+    arrangement stays open and they play alternating blocks until the rule stops
+    (``_play_to_stop``), and the result gains "stop". Either way an arrangement's rows are the
+    first rows of a longer fixed-n run at the same seed, and "rows" lists T's before CT's.
+    """
+    if rounds < 1:
+        raise ValueError(f"rounds must be >= 1, got {rounds}")
+    if stop is not None and stop not in STOP_RULES:
+        raise ValueError(f"unknown stop rule {stop!r}: one of {', '.join(STOP_RULES)}")
+    hero_sides = [s for s in (0, 1) if s in sides]
+    stopped = None
+    if stop is None:
+        arrangements = []
+        for hero_side in hero_sides:
+            with contextlib.closing(
+                    _Arrangement(hero, opponent, hero_side, seed, obs_only, accuracy,
+                                 hitboxes)) as arr:
+                arr.play(rounds)
+            arrangements.append(arr)
+    else:
+        with contextlib.ExitStack() as stack:
+            arrangements = [
+                stack.enter_context(
+                    contextlib.closing(
+                        _Arrangement(hero, opponent, hero_side, seed, obs_only, accuracy,
+                                     hitboxes))) for hero_side in hero_sides
+            ]
+            stopped = _play_to_stop(arrangements, rounds, stop)
+    res: dict[str, Any] = {
+        "rows": [r for arr in arrangements for r in arr.rows],
+        "accounting": [arr.accounting() for arr in arrangements],
         "rounds": rounds,
         "seed": seed,
         "obs_only": obs_only,
-        "accuracy": env_flags[0],
-        "hitboxes": env_flags[1]
+        "accuracy": arrangements[-1].flags[0] if arrangements else None,
+        "hitboxes": arrangements[-1].flags[1] if arrangements else None
     }
+    if stopped is not None:
+        res["stop"] = stopped
+    return res
 
 
 def wilson(k: int, n: int) -> tuple[float, float]:
@@ -280,6 +431,42 @@ def shots_accounted(accounting) -> bool:
     return all(a[k][0] + a[k][1] == a[k][2] for a in accounting for k in ("fired", "hit", "fast"))
 
 
+def _stop_text(stop: dict, share: float) -> str:
+    """A stop's outcome in words (#417): for a sign decision the look and its test, and no
+    interval (the share of a cell stopped at a look is biased); at an undecided cap the full
+    cell's fixed-n Wilson interval; under precision the anytime-valid interval."""
+    if stop["rule"] == "precision":
+        lo, hi = stop["interval"]
+        return (f"{stop['status']}, {stop['rounds']} rounds per side; anytime-valid hero share "
+                f"{share:.4f} [{lo:.4f}, {hi:.4f}], width {hi - lo:.4f}, precise at most "
+                f"{stop['width']}")
+    last = stop["looks"][-1]
+    if stop["decision"] == S.UNDECIDED:
+        lo, hi = stop["wilson"]
+        return (f"{S.UNDECIDED}, {last['rounds']} rounds per side; fixed-n hero share "
+                f"{share:.4f} [{lo:.4f}, {hi:.4f}]")
+    return (f"{stop['decision']} at look {last['look']} of {S.LOOKS}, {last['rounds']} rounds per "
+            f"side; p {last['p_value']:.3g} <= {last['alpha']:.3g}")
+
+
+def _hero_check(s: dict, stop: dict | None, expect: str, none: str | None):
+    """The hero-share check for ``expect`` (even, hero, opponent). Fixed n: the 95% Wilson
+    interval of the decided rounds. A sign stop: its decision, undecided at cap for even.
+    A precision stop: its anytime-valid interval. No decided round fails it."""
+    if stop is not None and stop["rule"] == "sign":
+        want = {"even": S.UNDECIDED, "hero": "hero", "opponent": "opponent"}[expect]
+        ok = s["decided"] > 0 and stop["decision"] == want
+        return (f"hero share sign stop: {expect}", ok, none or _stop_text(stop, s["hero_share"]))
+    if stop is None:
+        (lo, hi), name = s["hero_ci"], "hero share 95% CI"
+        detail = f"{s['hero_share']:.4f} [{lo:.4f}, {hi:.4f}]"
+    else:
+        (lo, hi), name = stop["interval"], "hero share mixture interval"
+        detail = _stop_text(stop, s["hero_share"])
+    ok = {"even": lo <= 0.5 <= hi, "hero": lo > 0.5, "opponent": hi < 0.5}[expect]
+    return (f"{name}: {expect}", s["decided"] > 0 and ok, none or detail)
+
+
 def verdict(res: dict, expect: str) -> tuple[bool, list[tuple[str, bool, str]]]:
     """(passed, [(name, ok, detail), ...]) — see THE VERDICT in the module docstring."""
     s = summary(res["rows"])
@@ -288,7 +475,6 @@ def verdict(res: dict, expect: str) -> tuple[bool, list[tuple[str, bool, str]]]:
     detail = "; ".join(f"{k} {a[k][0]}+{a[k][1]}={a[k][2]}" for a in acc
                        for k in ("fired", "hit", "fast"))
     lo, hi = s["t_ci"]
-    hlo, hhi = s["hero_ci"]
     # No decided round (a perfect mirror: every round a double kill) leaves both shares nan,
     # and nan fails both share checks: nothing was shown about who wins.
     none = "no decided round: every round a draw" if s["decided"] == 0 else None
@@ -301,10 +487,8 @@ def verdict(res: dict, expect: str) -> tuple[bool, list[tuple[str, bool, str]]]:
         ("T share 95% CI contains 0.5", lo <= 0.5 <= hi, none
          or f"{s['t_share']:.4f} [{lo:.4f}, {hi:.4f}]"),
     ]
-    rule = {"even": hlo <= 0.5 <= hhi, "hero": hlo > 0.5, "opponent": hhi < 0.5}
-    if expect in rule:
-        checks.append((f"hero share 95% CI: {expect}", rule[expect], none
-                       or f"{s['hero_share']:.4f} [{hlo:.4f}, {hhi:.4f}]"))
+    if expect in ("even", "hero", "opponent"):
+        checks.append(_hero_check(s, res.get("stop"), expect, none))
     return all(ok for _, ok, _ in checks), checks
 
 
@@ -330,9 +514,17 @@ def format_report(res: dict, hero: str, opponent: str, expect: str) -> str:
         fired, hit, fast = s[p + "_fired"], s[p + "_hit"], s[p + "_fast"]
         lines.append(f"{who:<9} wins {wins}  deaths {deaths}  shots fired {fired}  hit {hit} "
                      f"({hit / max(fired, 1):.3f})  fast {fast} ({fast / max(fired, 1):.3f})")
+    stop = res.get("stop")
+    per_side = f"{res['rounds']} per side" if stop is None else f"cap {res['rounds']} per side"
+    lines.append(f"rounds {s['rounds']} ({per_side}, seed {res['seed']}): decided {s['decided']}, "
+                 f"double kills {s['double']}, timeouts {s['timeout']}")
+    if stop is not None:
+        lines += [
+            f"stop ({stop['rule']}, #417): {_stop_text(stop, s['hero_share'])}",
+            "  the T-share check reads the rounds played: it is not sequentially controlled and "
+            "loses power when the cell stops early"
+        ]
     lines += [
-        f"rounds {s['rounds']} ({res['rounds']} per side, seed {res['seed']}): decided {s['decided']}, "
-        f"double kills {s['double']}, timeouts {s['timeout']}",
         f"time to kill (hero kills) median {s['ttk_median']:.1f}   time to death median "
         f"{s['ttd_median']:.1f} ticks", ""
     ]
@@ -350,7 +542,10 @@ def main(argv=None) -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--hero", default=DEFAULT_BOT, help=f"the hero bot (default {DEFAULT_BOT})")
     ap.add_argument("--opponent", help="the opponent bot, or walker (default: the hero's spec)")
-    ap.add_argument("--rounds", type=int, default=500, help="rounds per side (default 500)")
+    ap.add_argument("--rounds",
+                    type=int,
+                    default=500,
+                    help="rounds per side, the cap per side under --stop (default 500)")
     ap.add_argument("--seed", type=int, default=0, help="env and bot seed (default 0)")
     ap.add_argument("--expect",
                     choices=("even", "hero", "opponent", "any"),
@@ -370,6 +565,12 @@ def main(argv=None) -> int:
                     default=None,
                     help="the hit model (EnvConfig.hitboxes): 1 the capsule hitboxes, 0 the legacy "
                     "ellipsoid. Default: EnvConfig.hitboxes.")
+    ap.add_argument("--stop",
+                    choices=("fixed", *STOP_RULES),
+                    default="fixed",
+                    help="fixed (default): play --rounds per side. sign / precision: play the "
+                    "sides in alternating blocks and stop at the first look of "
+                    "cs2rl.experiment.sequential's pre-registered rule (#417)")
     args = ap.parse_args(argv)
     opponent = args.opponent or args.hero
     try:
@@ -379,9 +580,14 @@ def main(argv=None) -> int:
     if hero == WALKER:
         ap.error("the hero must be a duel bot")
     expect = args.expect or ("even" if hero == opp else "any")
-    res = run_duel(hero, opp, args.rounds, args.seed, not args.ground_truth,
+    res = run_duel(hero,
+                   opp,
+                   args.rounds,
+                   args.seed,
+                   not args.ground_truth,
                    None if args.accuracy is None else bool(args.accuracy),
-                   None if args.hitboxes is None else bool(args.hitboxes))
+                   None if args.hitboxes is None else bool(args.hitboxes),
+                   stop=None if args.stop == "fixed" else args.stop)
     print(format_report(res, args.hero, opponent, expect))
     return 0 if verdict(res, expect)[0] else 1
 

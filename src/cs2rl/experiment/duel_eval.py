@@ -4,8 +4,8 @@
 WHAT
 ----
 Plays a checkpoint against ``eval.duel_bot`` opponents (oracle_duel's ``PROFILE[,dial=value...]``
-specs, default ``OPPONENTS``) in oracle_duel's harness: ``run_duel`` over oracle_statue's
-``run_check``, the arena duel with one agent a side, pin_pitch, crouch and jump off, the bots
+specs, default ``OPPONENTS``) in oracle_duel's harness: ``run_duel`` over oracle_statue's env
+and round loop, the arena duel with one agent a side, pin_pitch, crouch and jump off, the bots
 deciding from their observation rows. The policy is loaded and played as aim_eval does it
 (``aim_eval.load_checkpoint``: built with the run's config.json, a sim-v3 encoder widened onto
 the sim-v4 obs; ``aim_eval.build_policy_hero``), by default in the mode the Rung 1b-2 gate reads:
@@ -50,6 +50,18 @@ is not side-agnostic: obs[24] is the team flag, and position and facing are abso
 trained on both sides can be read with ``--sides T CT``; the CT cells run at seed + 10000,
 oracle_duel's arrangement.
 
+STOP (#417)
+-----------
+``--stop sign`` or ``--stop precision`` makes ``--rounds`` each cell's cap: the cell plays blocks
+to cs2rl.experiment.sequential's looks and stops at the first that decides (oracle_duel's STOP).
+The cell's JSON gains "stop" and its ``per_round`` holds the rounds played; every other number is
+over those rounds. The table gains a stop column. A cell decided at a look prints its share with
+"*" and no interval: the share is biased, and the cell's JSON ``hero_ci`` (the Wilson interval
+of the rounds played) is not a valid interval for it ("stop" "wilson" is null). An undecided
+cell prints the full cell's fixed-n Wilson interval; a precision cell, the anytime-valid one.
+KNOWN LIMIT: an undecided cell's fixed-n Wilson interval can exclude 0.5 (60 of 100 decided: p
+0.057, Wilson [0.502, 0.691]); the decision is the sign test's.
+
 PITFALLS
 --------
 * The bots aim their pitch (hit_geometry), a Rung 1 policy's pitch head is masked. The arena
@@ -71,6 +83,7 @@ import numpy as np
 from cs2rl.eval.duel_bot import TICK_RATE
 from cs2rl.experiment import aim_eval
 from cs2rl.experiment import oracle_duel as D
+from cs2rl.experiment import sequential as S
 
 # The Rung 1c zero-shot opponents: the CS2 profiles at the L2 default style (stop), and the
 # hard bot in the two other moving styles.
@@ -85,8 +98,8 @@ TTD_CUTOFF_TICKS = TICK_RATE
 def policy_hero(policy, aim: str, lstm: str, bptt_horizon: int):
     """A ``run_duel`` hero factory: aim_eval's policy hero for the mode, whatever the row.
 
-    ``PolicyActor`` fills every row and run_check keeps its side's rows, so the same actor
-    plays T or CT."""
+    ``PolicyActor`` fills every row and oracle_statue's ``_episode`` keeps its side's rows, so
+    the same actor plays T or CT."""
     aim_eval.build_policy_hero(policy, aim, lstm, bptt_horizon)        # rejects an unknown mode
     return lambda row, rng: aim_eval.build_policy_hero(policy, aim, lstm, bptt_horizon)
 
@@ -158,8 +171,10 @@ def run_eval(policy,
              lstm: str = "carried",
              accuracy: bool | None = None,
              hitboxes: bool | None = None,
-             references=REFERENCE_HEROES) -> dict:
-    """Every opponent x side x (the policy + each reference hero); returns the JSON dict."""
+             references=REFERENCE_HEROES,
+             stop: str | None = None) -> dict:
+    """Every opponent x side x (the policy + each reference hero); returns the JSON dict.
+    ``stop``: oracle_duel.run_duel's (None, the default, plays ``rounds`` per cell)."""
     import torch
     t0 = time.perf_counter()
     make_policy = policy_hero(policy, aim, lstm, bptt_horizon)
@@ -174,12 +189,22 @@ def run_eval(policy,
                 c0 = time.perf_counter()
                 with torch.random.fork_rng(devices=[]):
                     torch.manual_seed(seed + k * D.CT_SEED_OFFSET)
-                    res = D.run_duel(hero, opp, rounds, seed, True, accuracy, hitboxes, sides=(k, ))
+                    res = D.run_duel(hero,
+                                     opp,
+                                     rounds,
+                                     seed,
+                                     True,
+                                     accuracy,
+                                     hitboxes,
+                                     sides=(k, ),
+                                     stop=stop)
                 cell = {"opponent": spec, "hero": name, "side": side, **cell_summary(res)}
                 cell.update(accuracy=res["accuracy"],
                             hitboxes=res["hitboxes"],
                             wall_s=time.perf_counter() - c0,
                             per_round=res["rows"])
+                if "stop" in res:
+                    cell["stop"] = res["stop"]
                 cells.append(cell)
     return {
         "rounds": rounds,
@@ -199,13 +224,44 @@ def _fmt(v, spec):
     return "-" if v is None or (isinstance(v, float) and math.isnan(v)) else format(v, spec)
 
 
+def _decided_at_look(c: dict) -> bool:
+    """A sign stop decided the cell at a look (#417)."""
+    stop = c.get("stop")
+    return stop is not None and stop["rule"] == "sign" and stop["decision"] != S.UNDECIDED
+
+
+def _share_ci(c: dict) -> str:
+    """The hero's share and its interval: the 95% Wilson interval at fixed n and at an
+    undecided cap (the full cell's), the anytime-valid one under a precision stop, and none for
+    a cell a sign stop decided at a look (#417: its share is biased), marked "*"."""
+    if _decided_at_look(c):
+        return f"{_fmt(c['hero_share'], '.4f')}*{'':16}"
+    stop = c.get("stop")
+    lo, hi = stop["interval"] if stop is not None and stop["rule"] == "precision" else c["hero_ci"]
+    return f"{_fmt(c['hero_share'], '.4f')} [{_fmt(lo, '.4f')}, {_fmt(hi, '.4f')}]"
+
+
+def _stop_cell(stop: dict) -> str:
+    """The stop column: "look k/5 (r)" for a sign decision, "precise (r)", or "cap (r)" when
+    the cell ran to its cap; r is the rounds played."""
+    if stop["rule"] == "precision":
+        return f"{'precise' if stop['status'] == 'precise' else 'cap'} ({stop['rounds']})"
+    last = stop["looks"][-1]
+    if stop["decision"] == S.UNDECIDED:
+        return f"cap ({last['rounds']})"
+    return f"look {last['look']}/{S.LOOKS} ({last['rounds']})"
+
+
 def format_table(out: dict) -> str:
     """One row per cell; the per-round rows are in the JSON."""
     wo = max(len(c["opponent"]) for c in out["cells"])
     src = f", from {out['accuracy_source']}" if out.get("accuracy_source") else ""
     hb_src = f", from {out['hitboxes_source']}" if out.get("hitboxes_source") else ""
+    stop = next((c["stop"]["rule"] for c in out["cells"] if "stop" in c), None)
+    per_cell = (f"{out['rounds']} rounds per cell"
+                if stop is None else f"up to {out['rounds']} rounds per cell (--stop {stop}, #417)")
     lines = [
-        f"duel_eval: {out['rounds']} rounds per cell, seed {out['seed']}, sides "
+        f"duel_eval: {per_cell}, seed {out['seed']}, sides "
         f"{' '.join(out['sides'])}, policy aim {out['aim']} lstm {out['lstm']}; cone "
         f"{'ON' if out['accuracy'] else 'off'}{src}; hit model "
         f"{'capsule hitboxes' if out['hitboxes'] else 'legacy ellipsoid'}{hb_src}",
@@ -213,15 +269,15 @@ def format_table(out: dict) -> str:
         "first-shot hit rate; ttd = time to damage (ticks, median under 1 s; >=1s its share); "
         "mov = moving share of idle visible ticks; life, hp- = per-round means",
         f"{'opponent':<{wo}} {'hero':<7} side W/L/D/TO        share  [95% CI]         hit/f "
-        f"fast/f opp-fast 1st   [95% CI]       ttd  >=1s  ttk   hp-   life  mov   opp-mov acct",
+        f"fast/f opp-fast 1st   [95% CI]       ttd  >=1s  ttk   hp-   life  mov   opp-mov acct"
+        f"{'' if stop is None else ' stop'}",
     ]
     for c in out["cells"]:
-        lo, hi = c["hero_ci"]
         flo, fhi = c["hero_first_shot_ci"]
         wldt = f"{c['win']}/{c['loss']}/{c['double']}/{c['timeout']}"
         lines.append(
             f"{c['opponent']:<{wo}} {c['hero']:<7} {c['side']:<4} {wldt:<15} "
-            f"{_fmt(c['hero_share'], '.4f')} [{_fmt(lo, '.4f')}, {_fmt(hi, '.4f')}] "
+            f"{_share_ci(c)} "
             f"{_fmt(c['hero_hit_per_fired'], '.3f')} {_fmt(c['hero_fast_per_fired'], '5.3f')}  "
             f"{_fmt(c['opp_fast_per_fired'], '5.3f')}    "
             f"{_fmt(c['hero_first_shot_hit_rate'], '.3f')} "
@@ -229,10 +285,16 @@ def format_table(out: dict) -> str:
             f"{_fmt(c['hero_ttd_median'], '4.1f')} {_fmt(c['hero_ttd_1s_share'], '5.3f')} "
             f"{_fmt(c['ttk_median'], '4.1f')} {c['hero_hp_lost_mean']:5.1f} "
             f"{c['hero_lifetime_mean']:5.1f} {_fmt(c['hero_moving_idle_share'], '5.3f')} "
-            f"{_fmt(c['opp_moving_idle_share'], '5.3f')}   {'ok' if c['accounting_ok'] else 'XX'}")
+            f"{_fmt(c['opp_moving_idle_share'], '5.3f')}   {'ok' if c['accounting_ok'] else 'XX'}"
+            f"{'' if stop is None else '   ' + _stop_cell(c['stop'])}")
         if not c["accounting_ok"]:
             lines.append(f"  <-- WARNING: the per-side shots do not sum to the env totals, or a "
                          f"visibility slot went unmatched: {c['accounting']}")
+    if any(_decided_at_look(c) for c in out["cells"]):
+        lines.append("* stopped at a look: the share is biased and has no fixed-n interval (#417)")
+    if stop == "precision":
+        lines.append("precision stop (#417): [95% CI] is the anytime-valid interval of the "
+                     f"share; a cell is precise once it is at most {S.WIDTH} wide")
     lines.append(f"wall {out['wall_s']:.1f} s")
     return "\n".join(lines)
 
@@ -247,7 +309,10 @@ def main(argv=None) -> int:
                     default=list(OPPONENTS),
                     help="duel bot specs, oracle_duel's PROFILE[,dial=value...] (default: "
                     f"{' '.join(OPPONENTS)})")
-    ap.add_argument("--rounds", type=int, default=200, help="rounds per cell (default 200)")
+    ap.add_argument("--rounds",
+                    type=int,
+                    default=200,
+                    help="rounds per cell, each cell's cap under --stop (default 200)")
     ap.add_argument("--seed", type=int, default=0, help="env, bot and torch seed (default 0)")
     ap.add_argument("--sides",
                     nargs="+",
@@ -278,6 +343,12 @@ def main(argv=None) -> int:
                     default=None,
                     help="the hit model: 1 the capsule hitboxes, 0 the legacy ellipsoid. "
                     "Default: the run's config.json setting, as in aim_eval.")
+    ap.add_argument("--stop",
+                    choices=("fixed", *D.STOP_RULES),
+                    default="fixed",
+                    help="fixed (default): play --rounds per cell. sign / precision: stop each "
+                    "cell at the first look of cs2rl.experiment.sequential's pre-registered rule "
+                    "(#417)")
     args = ap.parse_args(argv)
     for spec in args.opponents:
         try:
@@ -303,7 +374,8 @@ def main(argv=None) -> int:
                    lstm=args.lstm,
                    accuracy=accuracy,
                    hitboxes=hitboxes,
-                   references=args.references)
+                   references=args.references,
+                   stop=None if args.stop == "fixed" else args.stop)
     out.update(checkpoint=str(args.checkpoint),
                accuracy_source=source,
                hitboxes_source=hb_source,

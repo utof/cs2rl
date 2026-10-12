@@ -16,7 +16,7 @@ WHAT IS PINNED HERE
   duel_eval's cell play the same rounds (kill tick, shots, hits, spawns), in the sampled mode
   too, where the torch stream matters; and cells reproduce in any order.
 * The CLI plays the cone and the hit model the run trained with unless told otherwise, warns
-  on a difference and exits 0.
+  on a difference and exits 0; it passes --stop (fixed by default) to run_eval.
 * The CLI on the Rung 1b-2 V checkpoint, 2 rounds per cell. It needs the checkpoint, which
   only the owner's checkouts have (outputs/ is not in git), so it skips without one.
 """
@@ -220,6 +220,10 @@ def test_policy_cells_reproduce_in_any_order():
         "accuracy": True,
         "hitboxes": True
     }, ["--accuracy", "0"], (False, True), True),
+    ({
+        "accuracy": True,
+        "hitboxes": True
+    }, ["--stop", "sign"], (True, True), False),
 ])
 def test_the_cli_plays_the_env_the_run_trained_with(monkeypatch, capsys, tmp_path, trained, argv,
                                                     want, warned):
@@ -260,6 +264,7 @@ def test_the_cli_plays_the_env_the_run_trained_with(monkeypatch, capsys, tmp_pat
     assert (seen["accuracy"], seen["hitboxes"], seen["rounds"], seen["horizon"]) == (*want, 7, 64)
     assert (seen["sides"], seen["aim"], seen["lstm"]) == (["T"], "mean", "carried")
     assert seen["references"] == ["perfect", "mirror"]
+    assert seen["stop"] == ("sign" if "--stop" in argv else None)
     assert ("WARNING: the run trained a different env" in capsys.readouterr().out) == warned
     assert json.loads(path.read_text())["checkpoint"] == "ckpt.pt"
 
