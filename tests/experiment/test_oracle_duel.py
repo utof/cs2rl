@@ -22,7 +22,8 @@ WHAT IS PINNED HERE (seed 0, obs-only bots; the values observed 2026-10-11)
   observed 0.5860 [0.5280, 0.6416] with the cone, 0.4725 [0.4141, 0.5317] without. Lead:
   the perfect planted bot's hit/fired on the L1 walker is above 0.6 led (observed 0.7665)
   and below 0.35 unled (observed 0.2176), at 50 rounds a side.
-* The verdict's rules, parse_bot's spec grammar, and main's exit code and switches.
+* The verdict's rules, parse_bot's spec grammar, and main's exit code and switches (--stop:
+  tests/experiment/test_duel_stop.py).
 * The accounting check reads each counter: fired, hit and fast.
 * DuelRecorder's definitions (the Rung 1c duel evaluation reads them), on hand-built states:
   FAST at or above 0.34 x the held weapon's move speed; FIRST SHOT, the first fired tick of
@@ -177,7 +178,7 @@ def test_main_exits_on_the_verdict_and_passes_the_switches(monkeypatch, capsys):
     seen = []
 
     def fake(hero, opp, rounds, seed, obs_only, accuracy, hitboxes, stop=None):
-        seen.append((rounds, seed, obs_only, accuracy, hitboxes))
+        seen.append((rounds, seed, obs_only, accuracy, hitboxes, stop))
         res = _rows(win=50, loss=50) if hero == opp else _rows(double=10)
         for k, r in enumerate(res["rows"]):
             r.update(seed=seed,
@@ -201,7 +202,9 @@ def test_main_exits_on_the_verdict_and_passes_the_switches(monkeypatch, capsys):
         "even"
     ]) == 1
     assert "no decided round" in capsys.readouterr().out
-    assert seen == [(7, 0, True, None, None), (500, 0, False, False, True)]
+    assert D.main(["--rounds", "7", "--stop", "sign"]) == 0
+    assert seen == [(7, 0, True, None, None, None), (500, 0, False, False, True, None),
+                    (7, 0, True, None, None, "sign")]
     with pytest.raises(SystemExit):
         D.main(["--hero", "walker"])
 
