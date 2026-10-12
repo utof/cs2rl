@@ -11,9 +11,10 @@ block; it stops at the first look whose test rejects 0.5. Pure scipy: no env imp
 of dial values or profiles), where the cell's estimate matters, not its side of 0.5: it stops
 when an anytime-valid interval of the share is at most a pre-registered width.
 
-THE PRE-REGISTRATION (#417 K-Q1, measured on a grid of caps 100 to 1000 rounds per arrangement,
-draw rates 0 to 0.25 and hero shares 0.5 + d on T and 0.5 - d on CT for d up to 0.18; lane E's
-and lane J's duel cells have draw rates up to 0.2433 and T/CT share gaps up to 0.1704)
+THE PRE-REGISTRATION (#417 K-Q1, measured on a grid of caps 100, 300, 500 and 1000 rounds per
+arrangement, draw rates 0 to 0.25 and hero shares 0.5 + d on T and 0.5 - d on CT for d up to
+0.18; lane E's and lane J's duel cells have draw rates up to 0.2433 and T/CT share gaps up to
+0.1704)
   * looks: LOOKS = 5. At look k every arrangement has played ``look_rounds(cap)[k - 1]`` =
     ceil(k cap / 5) rounds, so each look sees EQUAL rounds of the T and the CT arrangement.
   * test: the exact two-sided sign test of the hero's wins against its losses at 0.5
@@ -26,9 +27,11 @@ and lane J's duel cells have draw rates up to 0.2433 and T/CT share gaps up to 0
     0.00126, 0.0084, 0.0226, 0.0414.
   * outcome: "hero" or "opponent" (the sign of wins - losses) at the first rejecting look, else
     UNDECIDED ("undecided at cap") with the fixed-n 95% Wilson interval of the full cell.
-  * false-decision rate when the hero's share is 0.5: at most 0.04818 over that grid by an exact
+  * false-decision rate when the hero's share is 0.5: at most 0.04818 at those caps by an exact
     lattice computation; a seeded Monte Carlo of 400000 sequences a point put its 95% upper end
-    at most 0.04898.
+    at most 0.04898. With no draws every cap from 5 to 3000 stays under 0.05 (worst 0.04997, cap
+    750, two arrangements; #417 review); the boundary's Gaussian limit is 0.050009, so the bound
+    rests on the exact test's lattice.
 
 PITFALLS
 --------
