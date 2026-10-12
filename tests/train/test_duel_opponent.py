@@ -493,10 +493,20 @@ def test_duel_opponent_rows_play_legal_actions_and_do_not_participate():
         assert trainer.actions[live][..., H_SHOOT].sum() > 0, "the live bot rows must fire"
         assert (trainer.cont_actions[live] != 0).any(), "the live bot rows must aim"
         trainer.last_log_time = 0.0
+        duel = trainer._opponent_duel
+        assert duel is not None
+        popped = []
+        real_pop = duel.pop_counts
+        duel.pop_counts = lambda: popped.append(real_pop()) or popped[-1]
         logs = trainer.train()
         assert logs is not None
         keys = {f"environment/duel/L{i}/{o}" for i in range(2) for o in OUTCOMES}
         assert keys <= logs.keys(), sorted(k for k in logs if "duel" in k)
         assert sum(logs[k] for k in keys) == logs["environment/episodes"] > 0
+        assert len(popped) == 1
+        for i in range(2):
+            for k, o in enumerate(OUTCOMES):
+                assert logs[f"environment/duel/L{i}/{o}"] == popped[0][i, k], (i, o)
+        assert (popped[0] != popped[0][:, ::-1]).any(), "palindromic counts cannot see a swap"
     finally:
         cleanup()
