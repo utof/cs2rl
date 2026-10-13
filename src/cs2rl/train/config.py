@@ -47,6 +47,7 @@ TEAM_SIZE = 5
 DEFAULT_CHECKPOINT_INTERVAL = 200
 
 DEFAULT_GAMMA = 0.999                  # R0-J: the historical PPO discount; --gamma default
+DEFAULT_LEARNING_RATE = 3e-4           # #420: Adam lr; --learning-rate default (cosine-annealed to 0)
 
 
 def resolve_gammas(args) -> tuple[float, float]:
@@ -422,6 +423,8 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # R0-J: --gamma / --pbrs-gamma. Same helper env_config_from_args ran for
     # env_cfg.pbrs_gamma, so the two discounts cannot resolve differently.
     gamma = resolve_gammas(args)[0]
+    # A local, not inlined in the dict (yapf: see the raw budget above).
+    learning_rate = float(getattr(args, "learning_rate", DEFAULT_LEARNING_RATE))
     cfg = {
                                                                        # Core PPO
         "env": f"cs2-{map_name}",
@@ -456,7 +459,7 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "minibatch_size": 8192,
         "max_minibatch_size": 8192,
         "update_epochs": 3,
-        "learning_rate": 3e-4,
+        "learning_rate": learning_rate,
         "gamma": gamma,
         "gae_lambda": 0.95,
         "clip_coef": 0.15,

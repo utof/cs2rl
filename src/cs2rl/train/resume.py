@@ -568,6 +568,74 @@ def load_full_resume(trainer, self_play_mgr, paths: dict) -> dict:
     return {"resumed_from_step": trainer.global_step, "epoch": trainer.epoch}
 
 
+def load_optimizer_moments(optimizer, trainer_state_path, resume_path) -> dict:
+    """#420: Adam's moments from the checkpoint set the --resume weights came from.
+
+    WHAT: loads trainer_state.pt's optimizer state (each parameter's step, exp_avg and
+    exp_avg_sq) into this run's freshly built optimizer, then puts back every group's
+    own hyperparameters (lr, initial_lr, weight_decay, betas, eps). Nothing else is
+    restored: the LR scheduler, step counters, α, return normaliser, RNG and self-play
+    state stay this run's. A new run starts from the weights AND the optimizer memory
+    they were trained with. Returns {"path", "params", "step"} for the run log.
+
+    WHY: a weights-only --resume gets a fresh Adam. Its bias-corrected first steps
+    move every weight by about lr whatever the gradient, and 3 of 6 two-epoch CPU
+    smokes from Rung 1b-2's V lost the skill that way (#420). Warm moments scale each
+    weight's step by its own gradient history, as in the run that trained it.
+
+    PITFALLS:
+      * The moments belong to one set of weights. The model that trainer_state.pt
+        names (beside it) must equal the --resume file tensor for tensor, else
+        SystemExit. trainer_state.pt is rewritten at every checkpoint and names
+        that checkpoint's model; any other model_*.pt of the set is refused.
+      * torch's Optimizer.load_state_dict checks group and parameter counts, not
+        shapes, and it replaces each group's hyperparameters with the saved ones
+        (the source run's annealed lr, often 0.0). Shapes are checked here first; the
+        hyperparameters are restored after. A widened (sim-v3) or split-converted
+        --resume therefore fails the shape or count check: its moments do not fit.
+      * Call AFTER isolate_aim_log_std_param_group: the saved state has that σ group.
+    """
+    import torch
+
+    path = Path(trainer_state_path)
+    ts_path = path / "trainer_state.pt" if path.is_dir() else path
+    if not ts_path.exists():
+        raise SystemExit(f"[Resume] --resume-optimizer: {ts_path} not found")
+    ts = torch.load(ts_path, map_location="cpu", weights_only=False)
+    model_name = ts.get("model_name") if isinstance(ts, dict) else None
+    if not model_name or "optimizer_state_dict" not in ts:
+        raise SystemExit(f"[Resume] --resume-optimizer: {ts_path} has no model_name or "
+                         "optimizer_state_dict; not a trainer_state.pt")
+    named_path = ts_path.parent / model_name
+    if not named_path.exists():
+        raise SystemExit(f"[Resume] --resume-optimizer: {ts_path} names {model_name}, but "
+                         f"{named_path} is missing")
+    named = torch.load(named_path, map_location="cpu", weights_only=True)
+    given = torch.load(resume_path, map_location="cpu", weights_only=True)
+    if named.keys() != given.keys() or not all(torch.equal(named[k], given[k]) for k in named):
+        raise SystemExit(f"[Resume] --resume-optimizer: {resume_path} is not {named_path}, the "
+                         f"model {ts_path.name} holds the moments of")
+    saved = ts["optimizer_state_dict"]
+    groups = optimizer.param_groups
+    if [len(g["params"]) for g in saved["param_groups"]] != [len(g["params"]) for g in groups]:
+        raise SystemExit("[Resume] --resume-optimizer: parameter groups differ (saved "
+                         f"{[len(g['params']) for g in saved['param_groups']]}, this run "
+                         f"{[len(g['params']) for g in groups]})")
+    for saved_group, group in zip(saved["param_groups"], groups, strict=True):
+        for idx, param in zip(saved_group["params"], group["params"], strict=True):
+            state = saved["state"].get(idx)
+            if state is not None and state["exp_avg"].shape != param.shape:
+                raise SystemExit(f"[Resume] --resume-optimizer: saved moments of shape "
+                                 f"{tuple(state['exp_avg'].shape)} do not fit a parameter of "
+                                 f"shape {tuple(param.shape)}")
+    hypers = [{k: v for k, v in g.items() if k != "params"} for g in groups]
+    optimizer.load_state_dict(saved)
+    for group, own in zip(optimizer.param_groups, hypers, strict=True):
+        group.update(own)
+    steps = [float(s["step"]) for s in saved["state"].values()]
+    return {"path": ts_path, "params": len(saved["state"]), "step": max(steps, default=0.0)}
+
+
 def check_resume_metrics_bound(resumed_step: int, last_row_step: int, checkpoint_interval: int,
                                steps_per_epoch: int) -> tuple[int, int]:
     """Spec §R0-C sanity bound of a restored global_step against the last

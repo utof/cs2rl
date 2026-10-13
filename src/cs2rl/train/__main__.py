@@ -27,6 +27,7 @@ from cs2rl.train.config import (
     DEFAULT_CHECKPOINT_INTERVAL,
     DEFAULT_DUEL_MIX,
     DEFAULT_GAMMA,
+    DEFAULT_LEARNING_RATE,
     OPPONENT_MODES,
     assert_opponent_self_play_compatible,
     build_train_config,
@@ -69,7 +70,8 @@ if __name__ == "__main__":
         type=str,
         default=None,
         metavar="CHECKPOINT",
-        help="Load policy weights from .pt file before training (optimizer state not restored)",
+        help="Load policy weights from .pt file before training (optimizer state not restored; "
+        "see --resume-optimizer)",
     )
     parser.add_argument(
         "--resume-run",
@@ -80,6 +82,22 @@ if __name__ == "__main__":
         help="R0-C: full-state resume from <run_dir> (== --checkpoint-dir of the run): "
         "policy, optimizer, step counters, α/scheduler/return-norm/warm-start/"
         "self-play/RNG. --timesteps is the TOTAL budget, not additional.")
+    parser.add_argument(
+        "--resume-optimizer",
+        type=str,
+        default=None,
+        metavar="TRAINER_STATE",
+        dest="resume_optimizer",
+        help="#420: with --resume, also load Adam's moments from this trainer_state.pt (or the "
+        "checkpoint-set directory holding it), whose named model must equal the --resume "
+        "weights. The LR schedule, global_step, epoch, alpha, return normaliser and RNG "
+        "stay fresh.")
+    parser.add_argument("--learning-rate",
+                        type=float,
+                        default=DEFAULT_LEARNING_RATE,
+                        dest="learning_rate",
+                        help="Adam learning rate at the start of the run; it is cosine-annealed "
+                        "to 0 by the end (default %(default)g).")
     parser.add_argument(
         "--run-id",
         type=str,
