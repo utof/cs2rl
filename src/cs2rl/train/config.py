@@ -423,52 +423,54 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
     # R0-J: --gamma / --pbrs-gamma. Same helper env_config_from_args ran for
     # env_cfg.pbrs_gamma, so the two discounts cannot resolve differently.
     gamma = resolve_gammas(args)[0]
+    # A local, not inlined in the dict (yapf: see the raw budget above).
+    learning_rate = float(getattr(args, "learning_rate", DEFAULT_LEARNING_RATE))
     cfg = {
-                                                                                       # Core PPO
+                                                                       # Core PPO
         "env": f"cs2-{map_name}",
         "device": args.device,
         "seed": args.seed,
         "total_timesteps": raw_timesteps,
         "participating_timesteps": args.timesteps,
-                                                                                       # Rung 1a T3: "self" (both teams learn) or "noop"/"walker"/"duel" (scripted opponent —
-                                                                                       # hero-team-only participation AND budget, see raw_timesteps above).
-                                                                                       # NOT an EnvConfig knob: the statue is enforced trainer-side, in
-                                                                                       # the patched evaluate(), so the env is identical either way. Not
-                                                                                       # allowlisted for --resume-run — a different opponent is a different
-                                                                                       # experiment.
+                                                                       # Rung 1a T3: "self" (both teams learn) or "noop"/"walker"/"duel" (scripted opponent —
+                                                                       # hero-team-only participation AND budget, see raw_timesteps above).
+                                                                       # NOT an EnvConfig knob: the statue is enforced trainer-side, in
+                                                                       # the patched evaluate(), so the env is identical either way. Not
+                                                                       # allowlisted for --resume-run — a different opponent is a different
+                                                                       # experiment.
         "opponent": opponent,
-                                                                                       # R0-G: recorded as given (None ⇒ env default), read from args
-                                                                                       # directly under their CLI names — env_cfg renames and coerces.
+                                                                       # R0-G: recorded as given (None ⇒ env default), read from args
+                                                                       # directly under their CLI names — env_cfg renames and coerces.
         **{
             a: getattr(args, a, None)
             for a, _ in _ENV_KNOB_ARG_PAIRS
         },
         "aim_entropy_bonus": aim_entropy_bonus,
         "aim_log_std_max": aim_log_std_max,
-                                                                                       # Rung 1a T1: DERIVED from the cap (no CLI flag of its own); the
-                                                                                       # gate reads σ movement as |raw − init|, so it is provenance.
+                                                                       # Rung 1a T1: DERIVED from the cap (no CLI flag of its own); the
+                                                                       # gate reads σ movement as |raw − init|, so it is provenance.
         "aim_log_std_init": aim_log_std_init,
-                                                                                       # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
-                                                                                       # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
-                                                                                       # config keys, not allowlist entries).
+                                                                       # R0-I: fixed-baseline eval cadence (0 = off). Provenance only —
+                                                                       # not allowlisted for --resume-run (Task 7 rule: new CLI flags are
+                                                                       # config keys, not allowlist entries).
         "eval_interval": int(getattr(args, "eval_interval", 0) or 0),
         "batch_size": batch_size,
         "bptt_horizon": bptt_horizon,
         "minibatch_size": 8192,
         "max_minibatch_size": 8192,
         "update_epochs": 3,
-        "learning_rate": float(getattr(args, "learning_rate", DEFAULT_LEARNING_RATE)),
+        "learning_rate": learning_rate,
         "gamma": gamma,
         "gae_lambda": 0.95,
         "clip_coef": 0.15,
         "vf_coef": 0.5,
         "vf_clip_coef": None,
-        "ent_coef": 0.1,                                                               # fallback; adaptive alpha overrides
+        "ent_coef": 0.1,                                               # fallback; adaptive alpha overrides
         "max_grad_norm": 0.5,
         "target_kl": 0.03,
         "use_rnn": True,
         "weight_decay": 1e-4,
-                                                                                       # Extras required by PuffeRL constructor
+                                                                       # Extras required by PuffeRL constructor
         "compile": False,
         "compile_mode": "default",
         "compile_fullgraph": False,
@@ -481,27 +483,27 @@ def build_train_config(args, batch_size: int, bptt_horizon: int) -> dict:
         "anneal_lr": True,
         "checkpoint_interval":
         int(getattr(args, "checkpoint_interval",
-                    DEFAULT_CHECKPOINT_INTERVAL)),                                     # R0-C: --checkpoint-interval
+                    DEFAULT_CHECKPOINT_INTERVAL)),                     # R0-C: --checkpoint-interval
         "data_dir": args.checkpoint_dir,
         "precision": "float32",
         "prio_alpha": 0.0,
         "prio_beta0": 1.0,
         "vtrace_rho_clip": 1.0,
         "vtrace_c_clip": 1.0,
-                                                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
-                                                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
-                                                                                       # warmup_steps, held constant after; consumed by the SAC-style α
-                                                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
-                                                                                       # (0.7→0.5) kept the target so high the controller steered the policy
-                                                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
-                                                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
-                                                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
-                                                                                       # Cs2PuffeRL._entropy_terms (self._entropy_floor) clamps α ≥ 0.5 when H < 0.3·max;
-                                                                                       # a base target below the floor would make the two mechanisms fight.
+                                                                       # ── Entropy-target schedule (finding 4 residual, 2026-07-06 review) ──
+                                                                       # Linear ramp warmup_frac→base_frac (× max_entropy ≈ 8.21 nats) over
+                                                                       # warmup_steps, held constant after; consumed by the SAC-style α
+                                                                       # controller via _scheduled_target_entropy. Previous hardcoded values
+                                                                       # (0.7→0.5) kept the target so high the controller steered the policy
+                                                                       # toward near-uniform indefinitely (the 30M degenerate run). 0.35·max
+                                                                       # ≈ 2.87 nats still allows broad exploration but permits commitment.
+                                                                       # PITFALL: keep base_frac ABOVE 0.3 — the hard entropy floor in
+                                                                       # Cs2PuffeRL._entropy_terms (self._entropy_floor) clamps α ≥ 0.5 when H < 0.3·max;
+                                                                       # a base target below the floor would make the two mechanisms fight.
         "entropy_target_warmup_frac": 0.5,
         "entropy_target_base_frac": 0.35,
         "entropy_target_warmup_steps": 10_000_000,
-                                                                                       # ── Warm-start entropy mode: see the comment above ──
+                                                                       # ── Warm-start entropy mode: see the comment above ──
         "warmstart_entropy": ws_entropy,
         "warmstart_grace_steps": ws_grace,
         "warmstart_ramp_steps": ws_ramp,

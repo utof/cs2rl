@@ -70,7 +70,8 @@ if __name__ == "__main__":
         type=str,
         default=None,
         metavar="CHECKPOINT",
-        help="Load policy weights from .pt file before training (optimizer state not restored)",
+        help="Load policy weights from .pt file before training (optimizer state not restored; "
+        "see --resume-optimizer)",
     )
     parser.add_argument(
         "--resume-run",
@@ -89,7 +90,8 @@ if __name__ == "__main__":
         dest="resume_optimizer",
         help="#420: with --resume, also load Adam's moments from this trainer_state.pt (or the "
         "checkpoint-set directory holding it), whose named model must equal the --resume "
-        "weights. The LR schedule, step counters, alpha, return normaliser and RNG stay fresh.")
+        "weights. The LR schedule, global_step, epoch, alpha, return normaliser and RNG "
+        "stay fresh.")
     parser.add_argument("--learning-rate",
                         type=float,
                         default=DEFAULT_LEARNING_RATE,

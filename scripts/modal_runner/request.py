@@ -55,7 +55,7 @@ LIVE_TRAIN_OPTION_ARITY: dict[str, int] = {
     "--checkpoint": 1,
     "--resume": 1,
     "--resume-run": 1,                                 # R0-C (#134) full-state resume
-    "--resume-optimizer": 1,                           # #420: a trainer_state.pt path on the Volume
+    "--resume-optimizer": 1,                           # #420: a trainer_state.pt (or its set dir) on the Volume
     "--learning-rate": 1,
     "--run-id": 1,
     "--checkpoint-interval": 1,

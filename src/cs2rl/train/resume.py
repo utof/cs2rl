@@ -586,8 +586,8 @@ def load_optimizer_moments(optimizer, trainer_state_path, resume_path) -> dict:
     PITFALLS:
       * The moments belong to one set of weights. The model that trainer_state.pt
         names (beside it) must equal the --resume file tensor for tensor, else
-        SystemExit. trainer_state.pt is rewritten at every checkpoint, so it only
-        matches the set's NEWEST model; an older model_*.pt is refused.
+        SystemExit. trainer_state.pt is rewritten at every checkpoint and names
+        that checkpoint's model; any other model_*.pt of the set is refused.
       * torch's Optimizer.load_state_dict checks group and parameter counts, not
         shapes, and it replaces each group's hyperparameters with the saved ones
         (the source run's annealed lr, often 0.0). Shapes are checked here first; the
