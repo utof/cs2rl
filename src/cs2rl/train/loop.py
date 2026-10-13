@@ -56,6 +56,7 @@ from cs2rl.train.resume import (
     convert_legacy_state_dict_to_split,
     convert_shared_trunk_to_split,
     load_full_resume,
+    load_optimizer_moments,
     reinit_frozen_aim_log_std,
     resolve_resume_run,
     resolve_resume_split,
@@ -360,6 +361,10 @@ def _prepare_run(args) -> _RunPlan:
     # train(args) cannot start a run whose statue team self-play would swap out.
     opponent_mode = resolve_opponent_mode(args)
     assert_opponent_self_play_compatible(opponent_mode, bool(getattr(args, "self_play", True)))
+    # #420: moments for a weights-only start; --resume-run restores the whole optimizer.
+    if getattr(args, "resume_optimizer", None) and (getattr(args, "resume_run", None)
+                                                    or not getattr(args, "resume", None)):
+        raise SystemExit("[Resume] --resume-optimizer needs --resume and not --resume-run")
     resume_paths = _resolve_resume_run(args)
     if args.checkpoint_dir is None:    # the CLI default
         args.checkpoint_dir = str(CHECKPOINTS_DIR)
@@ -813,6 +818,11 @@ def train(args):
             if self_play_enabled and policy_init.source is not None and not full_state:
                 _preseed_selfplay_pool(args, trainer, Path(policy_init.source))
             _configure_run_trainer(trainer, outputs.run_id, plan.config)
+            if getattr(args, "resume_optimizer", None):
+                info = load_optimizer_moments(trainer.optimizer, args.resume_optimizer, args.resume)
+                print(f"[Resume] Adam moments of {info['params']} parameters (step "
+                      f"{info['step']:.0f}) loaded from {info['path']}; the LR schedule, "
+                      "counters, alpha and return normaliser start fresh")
             _print_opponent_setup(trainer, plan, self_play_enabled)
             resumed_from_step = (_resume_full_state(trainer, resume_paths, plan.config, outputs)
                                  if full_state else None)
